@@ -9,7 +9,10 @@ whichever worker is up.)*
 Domain-agnostic infrastructure: clusterbuck only ever sees jobs, capabilities, and
 results — never anything about the client applications that use it.
 
-**Status:** design only. See [DESIGN.md](DESIGN.md).
+**Status:** design only. See [DESIGN.md](DESIGN.md) for the overview, and
+[`docs/`](docs/) for detail — [architecture](docs/architecture.md),
+[protocols](docs/protocols.md), [deployment](docs/deployment.md),
+[decisions](docs/decisions.md).
 
 ## License
 

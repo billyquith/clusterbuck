@@ -24,6 +24,16 @@ intermittent** fleet (a 16 GB always-on mini; a 64 GB laptop that roams and slee
 maybe more later). That is a *job-queue* problem, not a *serving-cluster* problem.
 So the design is a distributed task queue with LLM-aware routing — not a cluster.
 
+**These are complementary, not competing.** A serving engine like **vLLM sits one layer
+below clusterbuck** — it is a *model server*, at the same level as Ollama / llama.cpp /
+LM Studio. On a node with a capable (typically NVIDIA) GPU you could run vLLM as that
+node's model server and have the worker call its OpenAI-compatible endpoint; clusterbuck
+neither knows nor cares. What vLLM optimises — continuous batching, PagedAttention KV
+cache, tensor/pipeline parallelism across a tight GPU cluster — is exactly the always-on,
+homogeneous, fast-interconnect territory clusterbuck's non-goals exclude. clusterbuck
+does the coarse-grained cross-machine routing *above* the engine; vLLM does the
+high-throughput single-node (or datacenter-cluster) serving *within* one.
+
 ## Core idea: one queue, many policies
 
 The ways a machine can contribute — "just work when contactable", "wake on a
@@ -205,3 +215,13 @@ about the client's domain.
 - How workers advertise *currently loaded* vs *installable* models (affects cold-load
   latency and routing).
 - Priority/fairness across multiple tenants once there's more than one.
+
+## Detailed docs
+
+- [docs/architecture.md](docs/architecture.md) — internal shape, what we build vs. adopt
+  (LiteLLM handles sync; we build the async plane), request lifecycles.
+- [docs/protocols.md](docs/protocols.md) — the concrete spec of every boundary: client
+  API, Redis queue contract, worker↔model API, Wake-on-LAN, registry.
+- [docs/deployment.md](docs/deployment.md) — .NET cross-platform build/RIDs, Raspberry Pi
+  / arm64, node roles, GPU/Metal notes, wake configuration.
+- [docs/decisions.md](docs/decisions.md) — ADR-lite log of the choices and their rationale.
