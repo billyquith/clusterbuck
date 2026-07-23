@@ -1,0 +1,41 @@
+# .NET build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+publish/
+*.dll
+*.exe
+*.pdb
+
+# .NET / Rider / VS
+.vs/
+.idea/
+*.user
+*.suo
+project.lock.json
+artifacts/
+
+# Test / coverage
+[Tt]est[Rr]esult*/
+coverage*.json
+coverage*.xml
+*.trx
+
+# NuGet
+*.nupkg
+.nuget/
+packages/
+
+# Local config & secrets (never commit)
+appsettings.*.local.json
+*.env
+secrets.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
