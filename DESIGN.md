@@ -259,7 +259,7 @@ client targets one endpoint:
 
 - **Interactive** work → the OpenAI-compatible **sync** endpoint (routes to a live
   worker, falls back to cloud on a miss). Drop-in for anything that speaks the OpenAI API.
-- **Patient** work → **submit an async job** (capability + prompt + patience policy),
+- **Patient** work → **submit an async job** (capability + prompt + urgency class),
   then poll or receive a callback. The job queues until a capable worker drains it.
 
 Clients never learn which machine served them, and clusterbuck never learns anything

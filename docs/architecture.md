@@ -35,7 +35,7 @@ shelf (LiteLLM); clusterbuck builds the async plane and the coordination around 
 | Concern | Owner | Notes |
 |---|---|---|
 | OpenAI-compatible endpoint, route to a live worker, health check, load-balance, cloud fallback, cooldown | **LiteLLM** (adopted) | Request/response only — no concept of "hold this job until a machine wakes" |
-| Durable job queue, submit/poll API, patience policies | **clusterbuck server** (built) | The async plane |
+| Durable job queue, submit/poll API, urgency + escalation | **clusterbuck server** (built) | The async plane |
 | Wake-on-LAN, scheduled-wake policy, queue-depth watching | **clusterbuck coordinator** (built) | Turns "asleep" into "available" |
 | Pull a job, call the local model server, write the result | **clusterbuck worker** (built) | Reference implementation; see [protocols](protocols.md) |
 | The actual inference | **model server** (adopted) | Ollama / llama.cpp / vLLM / LM Studio |
@@ -84,7 +84,7 @@ intermittent fleet this is decisive:
 3. Response streams straight back. Nothing is queued.
 
 ### Async (patient)
-1. Client `POST`s a job (capability, prompt, params, patience policy, optional deadline)
+1. Client `POST`s a job (capability, prompt, params, urgency class, optional deadline)
    and receives a job id + `result_key`.
 2. The server enqueues it on `q:<capability>`.
 3. If no capable worker is consuming, the coordinator may send Wake-on-LAN (on-demand

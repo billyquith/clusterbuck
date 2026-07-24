@@ -16,7 +16,7 @@ covers **all** of this:
 2. **Heterogeneous hardware** — a Pi, a Mac, an NVIDIA box, mixed RAM/GPU, all welcome.
 3. **Sleep/wake awareness** — schedule wake windows and/or **Wake-on-LAN** on demand.
 4. **Patient queuing** — work waits in a durable queue for a capable machine, rather than
-   failing over immediately; per-job patience policy.
+   failing over immediately; per-job urgency with escalation.
 5. **Coarse-grained, per-job routing** — send a *job* to whichever whole machine is
    capable and up; **not** sharding one model across nodes.
 6. **Model-server-agnostic** — treat the engine (Ollama/vLLM/llama.cpp/…) as swappable.
@@ -143,7 +143,7 @@ Open-source manager for a cluster of heterogeneous GPUs/accelerators (Apple, NVI
 serving models behind an OpenAI-compatible API, with scheduling across workers. **Why not
 suitable (as-is):** the closest to a "manager," but it assumes **registered, always-on
 worker nodes** and cluster-style scheduling; it isn't built around machines that sleep/
-roam, Wake-on-LAN, or a patient job queue with per-job patience policies. Worth watching /
+roam, Wake-on-LAN, or a patient job queue with per-job urgency/escalation. Worth watching /
 possibly borrowing ideas from.
 
 ### [Kalavai](https://kalavai.net)
