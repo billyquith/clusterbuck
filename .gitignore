@@ -39,3 +39,6 @@ secrets.json
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Claude Code — keep shared CLAUDE.md + settings.json, ignore personal overrides
+.claude/settings.local.json

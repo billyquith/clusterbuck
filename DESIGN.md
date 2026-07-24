@@ -225,3 +225,5 @@ about the client's domain.
 - [docs/deployment.md](docs/deployment.md) — .NET cross-platform build/RIDs, Raspberry Pi
   / arm64, node roles, GPU/Metal notes, wake configuration.
 - [docs/decisions.md](docs/decisions.md) — ADR-lite log of the choices and their rationale.
+- [docs/related-projects.md](docs/related-projects.md) — survey of adjacent projects and why
+  they don't fit this niche.
