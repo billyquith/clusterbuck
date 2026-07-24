@@ -48,15 +48,20 @@ Treat any leak of the above as a bug.
 
 ## Planned stack (once code starts)
 
-Full plan in [docs/implementation.md](../docs/implementation.md). In brief:
+Full plan in [docs/implementation.md](../docs/implementation.md). In brief — **two
+components, two languages**, meeting only at documented seams (Redis queue contract +
+HTTP), never in shared code:
 
-- **Two artifacts:** `cbk` (worker + probe + updater + CLI) as **Native AOT** single-file
-  per RID; `cbk-server` (API + engines + coordinator + dashboard) as **self-contained
-  JIT**. Both share `Clusterbuck.Core` (types + queue contract = compile-time protocol).
-- **.NET 10 LTS**, ASP.NET Core minimal APIs, Redis (Streams + consumer groups) as broker,
-  SQLite as durable system of record, `HttpClient` for all model/cloud calls (**no vendor
-  SDK**), Spectre.Console CLI, htmx dashboard, xUnit + Testcontainers, GitHub Actions RID
-  matrix → signed release manifest.
+- **`cbk-server` — Python** (one always-on box; ecosystem-heavy): FastAPI, **LiteLLM**
+  (native fit now the server is Python), redis-py (Redis **Streams + consumer groups**),
+  SQLite as durable system of record, APScheduler, uv. Serves the htmx dashboard.
+- **`cbk` — C#/.NET Native AOT** (fans out to every node; single-file self-update):
+  worker loop + hardware probe + updater + Spectre.Console CLI; StackExchange.Redis;
+  `HttpClient` to the local model server (**no vendor SDK**).
+- **Shared contract:** JSON Schema in `contract/` (source of truth) + a conformance test
+  on each side so the two type definitions can't drift.
+
+See [docs/decisions.md](../docs/decisions.md) ADR 7 (split rationale) and ADR 22 (contract).
 - **Broker + result store:** Redis (language-agnostic queue contract).
 - **Sync gateway:** LiteLLM (adopted, off the shelf) — do not reimplement OpenAI routing.
 - **Model servers:** Ollama / llama.cpp / vLLM / LM Studio — off the shelf, called over

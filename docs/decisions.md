@@ -38,6 +38,10 @@ cloud-fallback; build the durable queue, submit/poll API, coordinator, and worke
 **Why:** LiteLLM already solves synchronous routing well; it has no concept of holding a
 job until a machine wakes. Don't reinvent the half that exists.
 **Considered:** building our own OpenAI-compatible router — wasted effort.
+**Note:** LiteLLM is Python. This was briefly a concern (a Python sidecar duplicating
+the coordinator's registry/health/spend state in an otherwise-C# fabric), which the
+split language decision resolves — with a **Python server** (ADR 7), LiteLLM is a native
+in-process fit rather than a foreign sidecar.
 
 ## 6. clusterbuck is domain-agnostic
 **Decision:** the fabric sees only jobs, capabilities, and results — never anything about
@@ -46,21 +50,45 @@ a client's application.
 app's concepts would ruin that. Clients depend on clusterbuck, never the reverse.
 **Considered:** baking a first tenant's needs in — rejected to keep it shareable.
 
-## 7. Implementation language: C#/.NET (server + reference worker)
-**Decision:** write clusterbuck's own moving parts in C#/.NET.
-**Why:** author fluency (a lot of C# experience, no Go); it's a widely-read language in
-the author's work context; and modern .NET gives cross-platform reach plus
-self-contained single-file / Native AOT binaries that drop onto any node with no runtime
-— satisfying "efficient + very cross-platform" where efficiency means footprint,
-concurrency, and distribution, not raw FLOPs (the compute is in the model servers).
+## 7. Implementation language: split — Python server, C#/.NET worker
+**Decision:** build the **server** (job API, sync front, coordinator, engines, planner)
+in **Python**, and the **worker** (pull, call the local model server, probe, self-update,
+CLI) in **C#/.NET Native AOT**. They meet only at documented seams (Redis queue contract
++ HTTP), never in shared code.
+**Why:** the two halves have opposite needs. The server is the ecosystem-heavy half
+(LiteLLM, eval/dataset tooling, provider libs) and runs on **one box you control**, so
+Python's distribution weakness doesn't apply and its ecosystem + iteration speed win.
+The worker fans out to **every heterogeneous node** and self-updates, needs a lean
+single-file binary with no runtime install, and requires **no LLM libraries** — exactly
+where Python's distribution weakness bites and .NET AOT shines. The protocol-first design
+makes the split clean, and the worker's language stays **reversible** (it could later be
+Python if the second toolchain stops being worth it).
+**History:** this **revises an earlier all-C# decision**. That reasoning (author fluent
+in both C# and Python; .NET AOT for cross-platform distribution) held for the worker but
+under-weighted that (a) the LLM ecosystem the *server* needs is Python, and (b) adopting
+LiteLLM as a C# sidecar meant a Python process anyway, duplicating coordinator state
+(see ADR 5). A Python server makes LiteLLM a native fit and removes that duplication.
 **Considered:**
-- **Go** — best-in-class single-binary distribution and concurrency, but zero author
-  experience; the distribution edge over .NET AOT was too small to justify learning it.
-- **Python** — most familiar and fastest to prototype, and LiteLLM (adopted) is Python
-  anyway; but shipping an interpreter/venv to every heterogeneous node is exactly the
-  cross-platform friction .NET AOT avoids. Fine for a spike, weak for the shipped thing.
-- **Rust** — maximal efficiency, single binary, but overkill for I/O-bound glue and
-  slower to iterate.
+- **All Python** — max ecosystem + velocity, but the worker's fleet distribution /
+  self-update / footprint is genuinely worse (interpreter+venv or fragile per-OS bundles;
+  Docker can't help Mac inference nodes — no Metal in Docker on macOS).
+- **All C#/.NET** — clean single-binary distribution everywhere, but forces reimplementing
+  the Python LLM ecosystem (gateway → Microsoft.Extensions.AI + registry; build the eval
+  harness) for no gain on the one-box server.
+- **Go / Rust** — strong single-binary stories, but zero/low author experience and no
+  ecosystem edge over the split.
+
+## 22. Cross-language contract via JSON Schema source of truth
+**Decision:** because server (Python) and worker (C#) can't share a type library, the
+wire contract lives as a machine-readable **JSON Schema in `contract/`** (job, result,
+enrollment, heartbeat, reservation, attention, update-manifest), with a **conformance
+test on each side** asserting round-trip agreement.
+**Why:** the split (ADR 7) gives up the compile-time shared-types safety a single language
+would have had; a schema + two conformance tests restores it — the type definitions
+cannot silently drift, and [protocols.md](protocols.md) gains a machine-checkable
+counterpart.
+**Considered:** docs-only parallel types (drift); code-generating both sides from the
+schema (viable later; hand-written types + conformance tests are simpler to start).
 
 ## 8. Every boundary is a documented protocol
 **Decision:** define the client API, the Redis queue contract, the worker↔model API, and

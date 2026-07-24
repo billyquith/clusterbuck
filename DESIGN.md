@@ -107,8 +107,8 @@ pulls it. Graceful intermittency, for free.
 
 | Component | Role | Choice |
 |---|---|---|
-| **Server** | job API, sync front, coordinator | **C#/.NET** (this repo) |
-| **Worker** | pulls jobs for its capabilities, calls its local model server, writes result | **C#/.NET** (this repo; reference implementation) |
+| **Server** | job API, sync front, coordinator | **Python** (one always-on box; ecosystem-heavy) |
+| **Worker** | pulls jobs for its capabilities, calls its local model server, writes result | **C#/.NET (Native AOT)** (fans out to every node; single-file self-update) |
 | **Broker + result store** | holds queued jobs and results | Redis |
 | **Model server** | the actual inference on each machine | Ollama / LM Studio / vLLM (OpenAI-compatible) — off the shelf |
 | **Sync gateway** | OpenAI-compatible routing for interactive requests | LiteLLM (Python) — off the shelf |
@@ -119,11 +119,17 @@ every other node runs a worker that contributes whenever it's up.
 
 ## Implementation language & boundaries
 
-Only clusterbuck's **own** moving parts are written here, in **C#/.NET**: the **server**
-(job API + sync front + coordinator) and the **reference worker**. C# is the choice for
-author fluency, cross-platform reach (macOS/Linux/Windows × arm64/amd64), and
-**self-contained single-file / Native AOT** binaries that drop onto any node with no
-runtime install. Server and worker share one codebase and the same job/result types.
+clusterbuck's two own components are built in **different languages, each to its
+strength** — the design's protocol-first nature makes this clean, since they meet only at
+documented seams, never in shared code (full stack in [docs/implementation.md](docs/implementation.md)):
+
+- **Server** (job API + sync front + coordinator) — **Python**: the ecosystem-heavy half
+  (LiteLLM, eval/dataset tooling), running on one always-on box where Python's
+  distribution weakness doesn't apply.
+- **Worker** (pull, call the local model server, probe, self-update) — **C#/.NET Native
+  AOT**: fans out to every heterogeneous node as a lean single-file binary that
+  self-updates, and needs no LLM libraries. The worker's language is *reversible* behind
+  the protocol (see [docs/decisions.md](docs/decisions.md) ADR 7).
 
 Everything else is either off the shelf (Redis, LiteLLM, the model servers) or external
 (clients). Each is reached across a **documented protocol**, so the system is polyglot by
@@ -132,12 +138,13 @@ design and open at every seam:
 | Boundary | Protocol | Consequence |
 |---|---|---|
 | Client ↔ clusterbuck | HTTP: submit-job / poll-result API + OpenAI-compatible sync endpoint | Clients are any language / any OS (e.g. a Python client) |
-| clusterbuck ↔ worker | Redis queue contract (job + result schema) | C# worker is the *reference*; a worker in another language can slot in |
+| clusterbuck ↔ worker | Redis queue contract (job + result schema) | The C# worker is the *reference*; a worker in another language can slot in |
 | worker ↔ model server | OpenAI-compatible HTTP | Any model server (Ollama / llama.cpp / vLLM / LM Studio) |
 | coordinator ↔ node | Wake-on-LAN magic packets | Pure network protocol; no agent code needed to be woken |
 
-Keeping server + worker in one C# repo is a convenience (shared types, one artefact to
-distribute), **not** a constraint the fabric imposes on anyone integrating with it.
+Because server and worker are separate languages, the job/result contract is not a shared
+library but a **JSON Schema source of truth** (`contract/`), with a conformance test on
+each side so the two type definitions can't drift.
 
 ## Job model (async)
 
