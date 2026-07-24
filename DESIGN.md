@@ -125,9 +125,10 @@ job = {
                        #   (see docs/model-evaluation.md)
   messages / prompt,   # OpenAI-style
   params,              # temperature, max_tokens, response_format hint, …
-  policy,              # wait | wait_then_cloud | now   (see below)
+  urgency,             # urgent | necessary | waitable   (see below)
+  escalate_after_min,  # waitable only: age at which it becomes necessary
   privacy,             # local_only | cloud_ok — local_only NEVER leaves the LAN
-  deadline,            # optional; for wait_then_cloud / expiry
+  deadline,            # optional hard expiry
   result_key,          # where the worker writes the result
   attempts, max_attempts,
 }
@@ -136,15 +137,19 @@ job = {
 - **Idempotent + retryable.** A worker can die mid-inference (laptop lid closes).
   Jobs use a visibility timeout and are safe to re-run; results are written once
   under `result_key`.
-- **Patience policy** (the knob a client sets):
-  - `wait` — queue for a capable worker indefinitely; never cloud. Default for
-    scheduled/background work.
-  - `wait_then_cloud` — queue until `deadline`, then fall back to cloud.
-  - `now` — go straight to the sync plane (live worker or cloud). For a user
-    watching a spinner.
+- **Urgency** — a trajectory, not a static label (escalation model in
+  [docs/fleet-management.md](docs/fleet-management.md)); each class carries its own
+  **wake rights**:
+  - `urgent` — the client is blocked or a user is waiting: sync plane, may wake a
+    machine immediately, cloud allowed (if `cloud_ok`) when local can't serve in time.
+  - `necessary` — must run promptly but blocks nobody: head of the async queues; may
+    trigger an on-demand wake.
+  - `waitable(N)` — backlog work: **never wakes a machine** — rides existing warmth —
+    and **escalates** to `necessary` on age (N minutes), a backlog watermark, or a
+    client **attention** signal (the user opened the app → its pending work heats up).
 
-  The cloud steps of any policy apply only to `cloud_ok` jobs; a `local_only` job
-  waits (or fails explicitly) rather than ever leaving the LAN.
+  Cloud participation at any urgency is governed by `privacy` (and budget); a
+  `local_only` job escalates locally but never leaves the LAN.
 
 ## Availability & wake
 
@@ -187,6 +192,10 @@ full treatment in [docs/fleet-management.md](docs/fleet-management.md):
   ability 4, 30 min, medium priority, nightly") — admission-checked, node woken and
   artifact pre-loaded before the window, drained, then back to sleep. Soft commitments:
   owner eviction always wins and the coordinator re-plans.
+- **Urgency & attention:** jobs carry `urgent` / `necessary` / `waitable(N)` with
+  first-class **escalation** (age, backlog watermark, client attention lease); waitable
+  work never wakes a machine, and promotions coalesce into warm windows rather than
+  stampeding wakes.
 - **Cloud governors:** overflow to cloud when the local fleet is overwhelmed (not just
   absent), bounded by per-job **privacy classes** (`local_only` never leaves the LAN) and
   a **spend budget**.

@@ -162,14 +162,62 @@ set up for it rather than react to it:
 Worked example (the shape above): the coordinator finds a small local artifact scoring
 ≥ 4 on the task class, schedules the target node's wake for 01:55, pre-loads, opens the
 window at 02:00, the queued batch drains for ~30 minutes at medium priority (yielding to
-any interactive `now` traffic, ahead of background work), the idle timeout fires, the
+`urgent` traffic, ahead of `waitable` backlog), the idle timeout fires, the
 model unloads, the node sleeps. Nothing was hot before, nothing stays hot after.
+
+## Urgency, escalation & client attention
+
+Priority is a **trajectory, not a label**: work is submitted in an urgency class and
+moves between classes as conditions change. Each class carries its own **wake rights**,
+which is what keeps the fleet cold-by-default even with busy background pipelines:
+
+| Urgency | Meaning | Wake rights |
+|---|---|---|
+| `urgent` | Client is blocked / a user is waiting | Sync plane; may wake a machine immediately; cloud (if `cloud_ok`, within budget) when local can't serve in time |
+| `necessary` | Must run promptly; blocks nobody | Head of the async queues; may trigger an on-demand wake |
+| `waitable(N)` | Backlog work | **Never wakes a machine** — rides existing warmth (reservations, scheduled windows, opportunistic nodes) until escalated |
+
+**Escalation triggers** (waitable → necessary):
+
+1. **Age** — the job's `escalate_after_min` expires ("waitable 10 minutes").
+2. **Backlog watermark** — the waitable backlog for a (client, task class) exceeds a
+   depth or oldest-age threshold: the feed got busy, stop being lazy.
+3. **Attention** — the client signals that its user became active (below).
+
+**Escalation coalesces; it never stampedes.** When a watermark or attention signal
+promotes dozens of jobs at once, the coordinator batches them into a single **warm
+window** — one wake, one model load, one drain (an implicit reservation) — instead of
+per-job wakes.
+
+**Client attention is a lease.** A client posts `attention` when its user becomes
+active, with a TTL it refreshes while they stay active; the client's waitable backlog
+(optionally scoped by task class) promotes to `necessary` and the artifacts that backlog
+needs may pre-warm — so everything is up to date shortly after the user sits down. When
+the lease lapses, unstarted work demotes back to waitable and the system returns to
+lazy. Note the symmetry: **workers have presence** (owner active → small model, ADR 10)
+and **clients have attention** (user active → hot work) — the fabric mediates both
+sides. Reservation `priority` orders work *within* warmth; urgency governs whether
+warmth gets created at all, and `urgent` preempts everything.
+
+### Worked pattern: a background feed monitor
+
+A monitor task wakes on schedule, pulls its feeds, and emits a batch of extraction jobs
+at `waitable(10)`. The client library estimates the setup the batch needs — task class,
+ability floor, load class from item count × historical tokens-per-job, duration — and
+requests a **reservation**. On a counter-offer it accepts any plan that meets the
+**ability floor**: compromise on time, node, or (if `cloud_ok`) venue — **never on
+ability below the floor**. The batch drains in the window. If feeds spike and the
+backlog crosses its watermark, the oldest jobs promote to `necessary` and may wake a
+node early. When the user opens the client application, it posts **attention**: the
+pending backlog promotes, needed artifacts pre-warm, the user sees fresh results —
+then the lease lapses and everything goes back to sleep.
 
 ## Cloud tier: fallback, overflow, privacy, budget
 
 Cloud participation grows from "fallback when the fleet is away" to three distinct uses:
 
-- **Unavailability** — the existing patience policies (`wait` / `wait_then_cloud` / `now`).
+- **Unavailability** — via the urgency ladder above: escalated work reaches cloud only
+  per its privacy class and budget when the local fleet cannot serve it in time.
 - **Overflow** — when the fleet is up but **overwhelmed**: if a job's projected queue wait
   exceeds its deadline (estimated from queue depth × rolling service times), spill to
   cloud rather than blow the deadline.

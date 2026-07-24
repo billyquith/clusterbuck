@@ -170,3 +170,24 @@ owner wake windows and cheap-tariff hours).
 **Considered:** always-hot workers (wasteful, hostile to shared machines); purely
 reactive queue-depth wake only (cold-start latency, no ETA, no batch alignment); hard
 SLA-style reservations (unkeepable promises on a home fleet of roaming machines).
+
+## 18. Urgency as a trajectory: urgent / necessary / waitable + escalation
+**Decision:** jobs carry an urgency class — `urgent` (client blocked / user waiting),
+`necessary` (prompt but non-blocking), `waitable(N)` (backlog) — each with its own
+**wake rights** (urgent may wake immediately; necessary may on-demand wake; waitable
+never wakes, riding existing warmth). Escalation is first-class: waitable promotes to
+necessary on **age** (`escalate_after_min`), a **backlog watermark**, or a client
+**attention lease** (user became active → that client's pending work heats up, TTL'd,
+demoting gracefully on expiry). Promotions **coalesce into warm windows** (implicit
+reservations), never per-job wake stampedes. This supersedes the static patience
+policy vocabulary of ADR 3 (`wait`/`wait_then_cloud`/`now` map to waitable(∞)/
+waitable(N)+cloud_ok/urgent) while preserving its intent; privacy (ADR 14) still
+bounds cloud at every urgency.
+**Why:** a static label conflates deadline with cloud-willingness and cannot express
+how background pipelines actually behave — lazy until it matters, where "matters" is
+time passing, a backlog growing, or a user showing up. Tying wake rights to urgency is
+what keeps the fleet cold-by-default (ADR 17) while monitors churn; leasing attention
+prevents a stuck-escalated fleet.
+**Considered:** static priorities (no aging → starvation or permanent over-provision);
+keeping patience + urgency side by side (two overlapping knobs); clients re-submitting
+jobs at higher priority (racy, duplicates work).

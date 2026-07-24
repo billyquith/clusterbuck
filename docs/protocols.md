@@ -33,10 +33,12 @@ POST /jobs
   "capability":  "32b-reason",          // OR name a supply-side tier explicitly (advanced)
   "messages":    [ {role, content}, … ],// OpenAI-style; or "prompt"
   "params":      { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
-  "policy":      "wait",                // wait | wait_then_cloud | now
+  "urgency":     "waitable",            // urgent | necessary | waitable — a trajectory:
+  "escalate_after_min": 10,             //   waitable ages into necessary (see
+                                        //   fleet-management.md → urgency & escalation)
   "privacy":     "local_only",          // local_only | cloud_ok (default local_only —
                                         //   local_only NEVER routes to cloud)
-  "deadline":    "2026-01-01T00:00:00Z",// optional; required for wait_then_cloud
+  "deadline":    "2026-01-01T00:00:00Z",// optional hard expiry
   "callback_url":"https://…"            // optional; else poll
 }
 → 202 Accepted
@@ -69,7 +71,7 @@ any language that honours this contract can join the fleet.
     capability,
     messages | prompt,
     params,
-    policy, privacy, deadline,
+    urgency, escalate_after_min, privacy, deadline,
     result_key,
     attempts, max_attempts
   }
@@ -215,3 +217,25 @@ POST /reservations
   (`scheduled | warming | open | draining | closed | replanned`) + updated plan.
 - `DELETE /reservations/{id}` cancels; recurring reservations carry the recurrence on
   the parent and spawn per-occurrence instances.
+
+## 9. Client attention (escalation signal)
+
+A client tells the coordinator its user became active, so pending lazy work heats up —
+semantics in [fleet-management.md](fleet-management.md) → *Urgency, escalation & client
+attention*. Attention is a **lease**: the client refreshes it while the user stays
+active; expiry demotes unstarted work gracefully.
+
+```
+POST /attention
+{
+  "client_key": "…",
+  "state":      "active",               // active | idle (idle ends the lease early)
+  "scope":      ["summarize"] | null,   // optional task-class filter
+  "ttl_s":      600                     // lease duration; refresh to extend
+}
+→ 200 { "promoted": 37, "prewarm": ["<artifact>"], "lease_expires": "…" }
+```
+
+Effect: the client's `waitable` backlog (within scope) promotes to `necessary`,
+coalesced into a warm window rather than per-job wakes; artifacts that backlog needs may
+pre-warm. On lease expiry, unstarted promoted jobs return to `waitable`.

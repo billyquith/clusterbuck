@@ -105,7 +105,7 @@ over the years. Ability values are always reported with their scale version.
 The client-facing request contract becomes **need-shaped** rather than supply-shaped:
 
 ```
-{ "task_class": "summarize", "min_ability": 6, "privacy": "local_only", "policy": "wait" }
+{ "task_class": "summarize", "min_ability": 6, "privacy": "local_only", "urgency": "waitable" }
 ```
 
 Selection: filter artifacts by `ability(artifact, task_class) ≥ min_ability` and the
