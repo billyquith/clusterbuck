@@ -49,6 +49,16 @@ are **policies over one shared queue**:
 Same jobs, same queue; each machine (and optionally each job) just carries a
 different wake/consume policy.
 
+Underneath, the queue is a **demand buffer** — the point of the whole async design is
+that the system does not have to be hot the whole time. A loaded model costs RAM,
+power, and the owner's goodwill *continuously*, whether or not work arrives; buffered
+work costs only latency, which background jobs barely value. So demand pools cold and
+is released as infrequent, **dense bursts**: wake once, load once, drain the backlog —
+which is also the most efficient way to run an LLM, since the load cost amortises
+across the batch. The urgency classes (see the job model) are the price list on this
+trade: `urgent` pays for warmth now, `waitable` buffers, escalation is the controlled
+flush.
+
 ## Two planes over one pool of machines
 
 Both planes share the same worker machines and the same model servers on them.
