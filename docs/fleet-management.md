@@ -259,8 +259,11 @@ usage_record = {
 
 Rollups per model / node / client / day feed a `/usage` endpoint (and export). Raw
 records age out (e.g. 90 days); rollups are kept. This is **metering, not billing** —
-the goal is visibility ("which models earn their RAM", "what would this have cost in the
-cloud") and planner input, not chargeback.
+the goal is visibility and planner input, not chargeback. The **headline number is
+avoided cloud spend**: local tokens priced at the cloud rate they would otherwise have
+paid, minus actual cloud spend (and, honestly, minus an energy estimate — the open
+cost-model question). That is the project's reason to exist, made measurable; "which
+models earn their RAM" falls out of it.
 
 ## Worker self-update
 

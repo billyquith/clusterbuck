@@ -12,6 +12,13 @@ capacity. Clients submit work; the fabric decides *where* it runs and *when* —
 routing to a live worker for interactive requests, or queuing patient work until a
 capable machine is contactable (waking one if worth it).
 
+The economics are the point: **use compute you already own instead of buying cloud
+compute.** Cloud models stay permanently in the loop as the backstop — and *should* be
+used for urgency, overflow, and jobs bigger than any local machine — but every job
+served locally is cloud spend avoided. The system's headline success metric is exactly
+that: **avoided cloud cost**, computable from the usage metering (local tokens priced
+at the cloud rate they would otherwise have paid).
+
 This is **infrastructure**, deliberately domain-agnostic. clusterbuck knows nothing
 about any client's application: it only ever sees jobs, capabilities, and results.
 Clients talk to a stable endpoint and never learn which physical machine served them.
