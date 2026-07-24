@@ -123,6 +123,48 @@ each provider's models enter the catalog as ordinary artifacts — with *measure
 ([model-evaluation.md](model-evaluation.md)), a price, and no host node. A capability with
 no viable local host (e.g. a frontier-class tier) can thus be cloud-backed from the start.
 
+## Workload reservations & scheduled batches
+
+**Cold by default, warm by appointment.** The fleet's resting state is asleep and
+unloaded; workers are never kept hot "just in case". Warmth has three sources: the
+always-on node's small resident model (interactive sync traffic), queue-depth-triggered
+wakes (existing), and — the anticipatory case — **reservations**.
+
+A reservation is a client's advance declaration of expected demand, so the cluster can
+set up for it rather than react to it:
+
+```
+"light load, min_ability 4, ~30 minutes, medium priority, tonight at 02:00"
+```
+
+- **Shape:** task class + `min_ability`, a **load class** (`light` / `medium` / `heavy` —
+  a rough throughput expectation the coordinator maps to node tokens/sec from the
+  registry's measured stats), expected duration and/or job-count hint, priority, privacy,
+  and a **window** — ASAP, a start time, or a recurrence (e.g. daily 02:00).
+- **Admission:** the coordinator checks feasibility — is there a node + artifact clearing
+  the ability bar, free (or wakeable) in that window, within the owner's allowed hours,
+  privacy- and budget-compatible? It answers **confirmed** (with a plan: node, artifact,
+  warm-by time), a **counter-offer** (a different window, lower ability locally, or cloud
+  now), or **declined**.
+- **Lifecycle:** `scheduled → warming → open → draining → closed`. At lead time the
+  coordinator wakes the node and **pre-loads the artifact**, so the cold-load cost is
+  paid *before* the window opens, not on the first job. Jobs submitted against the
+  reservation (before or during the window) drain while it's open; an idle timeout
+  closes it early. On close the model unloads and the node reverts to its wake policy.
+- **Soft commitment:** this is a home fleet, not a datacenter — a plan can break (the
+  reserved node roams off-LAN; its owner returns and the presence ladder evicts, which
+  **always wins**). The coordinator then re-plans: another capable node, cloud if the
+  jobs are `cloud_ok`, or slip the window and notify.
+- **Recurring reservations feed the planner** with *forward-looking* demand (not just
+  usage history), and are the natural hook for aligning heavy batches with owner wake
+  windows and cheap-tariff hours.
+
+Worked example (the shape above): the coordinator finds a small local artifact scoring
+≥ 4 on the task class, schedules the target node's wake for 01:55, pre-loads, opens the
+window at 02:00, the queued batch drains for ~30 minutes at medium priority (yielding to
+any interactive `now` traffic, ahead of background work), the idle timeout fires, the
+model unloads, the node sleeps. Nothing was hot before, nothing stays hot after.
+
 ## Cloud tier: fallback, overflow, privacy, budget
 
 Cloud participation grows from "fallback when the fleet is away" to three distinct uses:

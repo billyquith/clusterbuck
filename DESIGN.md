@@ -152,6 +152,11 @@ job = {
   liveness signal; no separate poll needed for the opportunistic case.
 - **Scheduled wake** — `pmset repeat wake` windows for predictable overnight batch
   draining, then sleep.
+- **Reserved warmth** — a client can book capacity in advance (a **workload
+  reservation**: task class, min ability, load class, duration, priority, window); the
+  coordinator wakes the chosen node and pre-loads the artifact *before* the window
+  opens, drains the batch, then lets everything sleep again. Cold by default, warm by
+  appointment — see [docs/fleet-management.md](docs/fleet-management.md).
 - **On-demand wake** — the coordinator sends **Wake-on-LAN** magic packets when a
   capability queue has depth (or a priority/`now`-ish job) and a capable machine is
   asleep *on the LAN*.
@@ -178,6 +183,10 @@ full treatment in [docs/fleet-management.md](docs/fleet-management.md):
 - **Workload awareness:** clients tag jobs with task classes; the coordinator compares
   demand against fleet supply and a **model catalog**, and *suggests* changes — including
   upgrades when better models are released (eval-gated, human-approved downloads).
+- **Workload reservations:** clients book expected demand in advance ("light load,
+  ability 4, 30 min, medium priority, nightly") — admission-checked, node woken and
+  artifact pre-loaded before the window, drained, then back to sleep. Soft commitments:
+  owner eviction always wins and the coordinator re-plans.
 - **Cloud governors:** overflow to cloud when the local fleet is overwhelmed (not just
   absent), bounded by per-job **privacy classes** (`local_only` never leaves the LAN) and
   a **spend budget**.

@@ -153,3 +153,20 @@ Uniform ability + price across local and cloud enables the planner's cost-qualit
 arbitrage ("this cloud spend could be a local artifact clearing your min_ability").
 **Considered:** capability-only addressing (couples clients to hardware tiers);
 per-client model pinning (defeats fleet evolution).
+
+## 17. Workload reservations: cold by default, warm by appointment
+**Decision:** the fleet's resting state is asleep/unloaded; anticipated demand is served
+by **reservations** — a client declares shape (task class, min ability, load class,
+duration, priority, window/recurrence), the coordinator admission-checks against the
+registry and answers confirmed / counter-offer / declined, wakes the node and
+**pre-loads the artifact before the window opens**, drains the batch, then everything
+returns to sleep. Reservations are soft commitments: owner eviction (ADR 10) always
+wins, and the coordinator re-plans (another node, cloud if `cloud_ok`, or slip-and-notify).
+**Why:** keeping workers hot "just in case" wastes the RAM and power the fabric exists
+to conserve, while purely reactive wake pays the cold-load cost on the first job of
+every batch and gives clients no predictability. Booking moves the cold-start off the
+critical path and gives the planner forward-looking demand (recurrence → align with
+owner wake windows and cheap-tariff hours).
+**Considered:** always-hot workers (wasteful, hostile to shared machines); purely
+reactive queue-depth wake only (cold-start latency, no ETA, no batch alignment); hard
+SLA-style reservations (unkeepable promises on a home fleet of roaming machines).

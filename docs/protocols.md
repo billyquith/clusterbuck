@@ -183,3 +183,35 @@ is mandatory (an update channel is RCE by design); canary ring updates first, fl
 follows after a healthy grace period; crash-loop → automatic rollback to the retained
 previous binary; queue-contract `protocol_version` gates skew (a too-old worker pauses
 pulling until updated); per-node `auto_update: false` opt-out.
+
+## 8. Workload reservations (client ↔ clusterbuck)
+
+Advance capacity booking — see [fleet-management.md](fleet-management.md) → *Workload
+reservations* for semantics (soft commitment, owner-eviction wins, re-planning).
+
+```
+POST /reservations
+{
+  "task_class":  "summarize",
+  "min_ability": 4,
+  "load":        "light",               // light | medium | heavy (throughput class)
+  "duration_min": 30,                   // expected active window
+  "est_jobs":    200,                   // optional volume hint
+  "priority":    "medium",              // low | medium | high
+  "privacy":     "local_only",
+  "window":      { "start": "02:00" | "asap", "recur": "daily" | null }
+}
+→ 201 {
+  "id": "rsv_…",
+  "status": "confirmed | counter | declined",
+  "plan":    { "starts": "…", "warm_by": "…", "artifact": "…", "node": "<opaque>" },
+  "counter": null | { …alternative window / ability / cloud offer… }
+}
+```
+
+- Jobs opt in with `"reservation": "rsv_…"` on `POST /jobs`; they may be submitted
+  before the window and queue against it.
+- `GET /reservations/{id}` → lifecycle state
+  (`scheduled | warming | open | draining | closed | replanned`) + updated plan.
+- `DELETE /reservations/{id}` cancels; recurring reservations carry the recurrence on
+  the parent and spawn per-occurrence instances.
