@@ -59,6 +59,26 @@ drift. Schema change → both sides update or their contract tests fail.
 | mDNS | OS-native responder files in `deploy/`; browse via **Zeroconf** later | MVP uses a configured coordinator URL — the designed fallback |
 | Tests | **xUnit** + Testcontainers (Redis) | plus the shared contract test |
 
+### Worker footprint (the levers that make it lightweight)
+
+The worker shares nodes with their owners' real work, so a small, quiet resident
+footprint is a first-class requirement, not a nice-to-have. Concrete levers:
+
+- **Native AOT** — no JIT, no runtime: fast cold start and a low baseline heap.
+- **`InvariantGlobalization` + trimming** — drop ICU and unused IL; smaller binary,
+  fewer loaded resources.
+- **Workstation GC + memory-conserving settings** — the worker is I/O-bound, not
+  throughput-bound; a small heap beats server-GC's memory-for-speed trade.
+- **Minimal dependencies** — every package adds to the binary and must be AOT-verified;
+  keep it to StackExchange.Redis, source-gen `System.Text.Json`, Spectre.Console.
+- **Idle-cheap loop** — block on the Redis consumer read rather than poll; no busy-wait,
+  so an idle worker costs ~nothing.
+- **Stream large bodies** — don't buffer whole prompts/results in managed memory beyond
+  what the model-server call needs.
+
+Target: **tens of MB resident idle, not hundreds** — small enough to sit unnoticed on a
+shared laptop or a Pi.
+
 ## CI/CD
 
 - **Worker:** GitHub Actions RID matrix (`osx-arm64`, `linux-x64`, `linux-arm64`,
