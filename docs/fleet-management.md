@@ -112,12 +112,16 @@ gated by three checks before anything changes:
    relevant mode, disk quota).
 2. **Eval gate** — it passes a small task-representative eval suite (prompts drawn from
    the fleet's actual task classes) at least as well as the incumbent; optionally
-   shadow-test on a fraction of real jobs and compare.
+   shadow-test on a fraction of real jobs and compare. Scoring method — the per-task-class
+   **ability matrix**, anchored 1–10 scale — in [model-evaluation.md](model-evaluation.md).
 3. **Approval** — a human approves the download (multi-GB weights are never fetched
    silently; per-node auto-approve is an explicit opt-in).
 
-The catalog also lists **cloud models**: a capability with no viable local host (e.g. a
-frontier-class tier) can be declared cloud-backed from the start.
+The catalog also lists **cloud models**: the owner registers **provider accounts**
+(e.g. Anthropic, OpenAI) with API keys (held by the gateway) and per-token pricing, and
+each provider's models enter the catalog as ordinary artifacts — with *measured* ability
+([model-evaluation.md](model-evaluation.md)), a price, and no host node. A capability with
+no viable local host (e.g. a frontier-class tier) can thus be cloud-backed from the start.
 
 ## Cloud tier: fallback, overflow, privacy, budget
 

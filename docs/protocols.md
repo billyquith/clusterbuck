@@ -26,7 +26,11 @@ Submit a job:
 ```
 POST /jobs
 {
-  "capability":  "32b-reason",          // required; the tier, not a machine
+  // Addressing — one of the two forms:
+  "task_class":  "summarize",           // preferred: describe the need…
+  "min_ability": 6,                     // …and the coordinator resolves an artifact
+                                        //   (see model-evaluation.md for the 1-10 scale)
+  "capability":  "32b-reason",          // OR name a supply-side tier explicitly (advanced)
   "messages":    [ {role, content}, … ],// OpenAI-style; or "prompt"
   "params":      { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
   "policy":      "wait",                // wait | wait_then_cloud | now

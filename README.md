@@ -12,8 +12,8 @@ results — never anything about the client applications that use it.
 **Status:** design only. See [DESIGN.md](DESIGN.md) for the overview, and
 [`docs/`](docs/) for detail — [architecture](docs/architecture.md),
 [protocols](docs/protocols.md), [deployment](docs/deployment.md),
-[fleet management](docs/fleet-management.md), [decisions](docs/decisions.md),
-[related projects](docs/related-projects.md).
+[fleet management](docs/fleet-management.md), [model evaluation](docs/model-evaluation.md),
+[decisions](docs/decisions.md), [related projects](docs/related-projects.md).
 
 ## License
 

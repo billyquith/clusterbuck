@@ -126,3 +126,30 @@ possible; privacy must be a per-job invariant, not an operator setting. Default-
 because the whole point of the fabric is local-first inference.
 **Considered:** a global cloud on/off switch — too coarse; interactive public-data jobs
 and sensitive batch jobs coexist in the same fleet.
+
+## 15. Ability = per-task-class matrix on an anchored 1–10 scale
+**Decision:** model quality is scored as `ability(artifact, task_class)` — artifact =
+model + quantisation — measured by three tiers (programmatic checks → checklist judging
+→ pairwise preference aggregated Bradley-Terry/Elo) and calibrated to 1–10 via pinned
+**anchor artifacts** with a versioned scale. A workload-weighted headline scalar exists
+for humans; the router uses the matrix.
+**Why:** model quality is jagged — one number per model routes jobs wrongly. Pairwise
+judging is far more stable than absolute scoring; programmatic checks are free and
+unarguable where outputs are verifiable; anchoring makes the number legible; scale
+versioning stops "8" deflating as the frontier moves.
+**Considered:** a single per-model score (hides jaggedness); raw Elo exposed to users
+(meaningless without anchors); reference metrics like ROUGE (poor signal for modern
+LLMs); reusing public benchmarks (contaminated — models have memorised them).
+
+## 16. Need-shaped client addressing: task_class + min_ability
+**Decision:** the preferred job-addressing form is `{task_class, min_ability}` resolved
+by the coordinator (filter by ability + privacy → prefer local → cheapest → fastest);
+explicit capability tiers remain as advanced/internal addressing. Cloud models join the
+same catalog with measured ability and per-token pricing under registered provider
+accounts and a paced monthly budget.
+**Why:** clients should state their *need*, not the fleet's hardware shape — naming
+"32b" leaks supply-side detail into every client and breaks when the fleet changes.
+Uniform ability + price across local and cloud enables the planner's cost-quality
+arbitrage ("this cloud spend could be a local artifact clearing your min_ability").
+**Considered:** capability-only addressing (couples clients to hardware tiers);
+per-client model pinning (defeats fleet evolution).

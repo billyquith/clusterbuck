@@ -39,6 +39,9 @@ Treat any leak of the above as a bug.
 - [docs/fleet-management.md](../docs/fleet-management.md) — self-managing fleet: node
   enrollment + hardware probe, machine profiles, presence modes/model ladder, planner +
   model catalog, cloud governors (privacy classes, budget), usage accounting, self-update.
+- [docs/model-evaluation.md](../docs/model-evaluation.md) — the ability score: per-task-class
+  measurement (programmatic / checklist-judge / pairwise-Elo), anchored versioned 1–10
+  scale, need-shaped addressing (`task_class` + `min_ability`), cost-quality arbitrage.
 - [docs/decisions.md](../docs/decisions.md) — ADR-lite rationale for the key choices.
 - [docs/related-projects.md](../docs/related-projects.md) — survey of adjacent projects and
   why they don't fit this niche (keep collating).

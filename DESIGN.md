@@ -120,7 +120,9 @@ distribute), **not** a constraint the fabric imposes on anyone integrating with 
 ```
 job = {
   id, created_at,
-  capability,          # e.g. "8b-extract", "32b-reason", "70b-reason"
+  capability,          # supply-side tier (e.g. "32b-reason") — or task_class +
+                       #   min_ability (1-10), resolved by the coordinator
+                       #   (see docs/model-evaluation.md)
   messages / prompt,   # OpenAI-style
   params,              # temperature, max_tokens, response_format hint, …
   policy,              # wait | wait_then_cloud | now   (see below)
@@ -251,7 +253,8 @@ about the client's domain.
 - Priority/fairness across multiple clients once there's more than one.
 - Presence-detection signals per OS (screen lock / input idle / manual) and defaults.
 - Cost model for *local* compute in accounting: nominal per-token rate vs energy estimate.
-- Eval-suite composition for upgrade gating (drawn from real task classes vs canned).
+- Eval-suite curation over time — keeping items bespoke/rotating to dodge benchmark
+  contamination (framework in [docs/model-evaluation.md](docs/model-evaluation.md)).
 
 ## Detailed docs
 
@@ -264,6 +267,9 @@ about the client's domain.
 - [docs/fleet-management.md](docs/fleet-management.md) — node enrollment + hardware probe,
   machine profiles, presence modes/model ladder, planner + model catalog, cloud governors,
   usage accounting, self-update.
+- [docs/model-evaluation.md](docs/model-evaluation.md) — the ability score: per-task-class
+  quality measurement (programmatic checks, checklist judging, pairwise Elo), anchored
+  1–10 calibration, and how the router + budget use it.
 - [docs/decisions.md](docs/decisions.md) — ADR-lite log of the choices and their rationale.
 - [docs/related-projects.md](docs/related-projects.md) — survey of adjacent projects and why
   they don't fit this niche.
