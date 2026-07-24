@@ -34,7 +34,9 @@ POST /jobs
   "messages":    [ {role, content}, … ],// OpenAI-style; or "prompt"
   "params":      { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
   "urgency":     "waitable",            // urgent | necessary | waitable — a trajectory:
-  "escalate_after_min": 10,             //   waitable ages into necessary (see
+  "escalate_after_min": 10,             //   waitable = eager but non-demanding; N is a
+                                        //   patience bound (not a delay) — unserved
+                                        //   after N min it becomes necessary (see
                                         //   fleet-management.md → urgency & escalation)
   "privacy":     "local_only",          // local_only | cloud_ok (default local_only —
                                         //   local_only NEVER routes to cloud)

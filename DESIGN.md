@@ -144,9 +144,11 @@ job = {
     machine immediately, cloud allowed (if `cloud_ok`) when local can't serve in time.
   - `necessary` — must run promptly but blocks nobody: head of the async queues; may
     trigger an on-demand wake.
-  - `waitable(N)` — backlog work: **never wakes a machine** — rides existing warmth —
-    and **escalates** to `necessary` on age (N minutes), a backlog watermark, or a
-    client **attention** signal (the user opened the app → its pending work heats up).
+  - `waitable(N)` — backlog work, **eager but non-demanding**: never wakes a machine,
+    but runs as soon as existing warmth has spare cycles. N is a **patience bound, not
+    a delay** — unserved after N minutes it **escalates** to `necessary` (as it also
+    does on a backlog watermark or a client **attention** signal: the user opened the
+    app → its pending work heats up).
 
   Cloud participation at any urgency is governed by `privacy` (and budget); a
   `local_only` job escalates locally but never leaves the LAN.

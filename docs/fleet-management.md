@@ -175,7 +175,15 @@ which is what keeps the fleet cold-by-default even with busy background pipeline
 |---|---|---|
 | `urgent` | Client is blocked / a user is waiting | Sync plane; may wake a machine immediately; cloud (if `cloud_ok`, within budget) when local can't serve in time |
 | `necessary` | Must run promptly; blocks nobody | Head of the async queues; may trigger an on-demand wake |
-| `waitable(N)` | Backlog work | **Never wakes a machine** — rides existing warmth (reservations, scheduled windows, opportunistic nodes) until escalated |
+| `waitable(N)` | Backlog work — eager but non-demanding | **Never wakes a machine**, but runs **as soon as** existing warmth has spare cycles; N bounds the patience, then it escalates |
+
+**`waitable` is eager, not deferred.** N is a **patience bound, not a delay**: a
+waitable job runs the moment any capable node is awake with spare cycles — "if the
+system is awake, do it as soon as possible" — it just never *creates* capacity for
+itself (no wake, no cloud, no demand), and it yields to `urgent`/`necessary` work when
+the fleet is busy. Only if it is still unserved when N expires — the fleet stayed
+asleep, or busier work kept pre-empting it — does it promote to `necessary` and gain
+the right to demand capacity.
 
 **Escalation triggers** (waitable → necessary):
 
@@ -204,7 +212,9 @@ warmth gets created at all, and `urgent` preempts everything.
 A monitor task wakes on schedule, pulls its feeds, and emits a batch of extraction jobs
 at `waitable(10)`. The client library estimates the setup the batch needs — task class,
 ability floor, load class from item count × historical tokens-per-job, duration — and
-requests a **reservation**. On a counter-offer it accepts any plan that meets the
+requests a **reservation** — though if standing warmth (say, the always-on node's small
+model) already clears the ability floor with cycles to spare, the batch simply drains
+immediately and no reservation is needed. On a counter-offer it accepts any plan that meets the
 **ability floor**: compromise on time, node, or (if `cloud_ok`) venue — **never on
 ability below the floor**. The batch drains in the window. If feeds spike and the
 backlog crosses its watermark, the oldest jobs promote to `necessary` and may wake a
