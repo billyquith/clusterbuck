@@ -88,7 +88,7 @@ pulls it. Graceful intermittency, for free.
 | **Broker + result store** | holds queued jobs and results | Redis |
 | **Model server** | the actual inference on each machine | Ollama / LM Studio / vLLM (OpenAI-compatible) — off the shelf |
 | **Sync gateway** | OpenAI-compatible routing for interactive requests | LiteLLM (Python) — off the shelf |
-| **Model registry** | which machine hosts which models + capacity | static YAML first; heartbeat later |
+| **Model registry** | which machine hosts which models + capacity | seeded from static YAML; grows dynamic via enrollment + heartbeats — see [docs/fleet-management.md](docs/fleet-management.md) |
 
 The always-on node is the natural home for the server (broker + gateway + coordinator);
 every other node runs a worker that contributes whenever it's up.
@@ -124,6 +124,7 @@ job = {
   messages / prompt,   # OpenAI-style
   params,              # temperature, max_tokens, response_format hint, …
   policy,              # wait | wait_then_cloud | now   (see below)
+  privacy,             # local_only | cloud_ok — local_only NEVER leaves the LAN
   deadline,            # optional; for wait_then_cloud / expiry
   result_key,          # where the worker writes the result
   attempts, max_attempts,
@@ -140,6 +141,9 @@ job = {
   - `now` — go straight to the sync plane (live worker or cloud). For a user
     watching a spinner.
 
+  The cloud steps of any policy apply only to `cloud_ok` jobs; a `local_only` job
+  waits (or fails explicitly) rather than ever leaving the LAN.
+
 ## Availability & wake
 
 - **Detecting "contactable"** — the worker being subscribed and pulling *is* the
@@ -151,6 +155,34 @@ job = {
   asleep *on the LAN*.
 - **Off-LAN machines** (e.g. the work laptop at the office) are **opportunistic
   only** — they cannot be woken remotely and simply don't drain until home.
+
+## Self-managing fleet
+
+Beyond the MVP, clusterbuck manages its own fleet rather than being hand-configured —
+full treatment in [docs/fleet-management.md](docs/fleet-management.md):
+
+- **Enrollment:** install the worker agent → discover the coordinator (mDNS) → join with
+  a one-time token → **probe the hardware** (RAM, accelerator, disk, micro-benchmark) →
+  coordinator proposes a capability set the owner confirms.
+- **Machine profiles:** the owner's contract for how much of the machine clusterbuck may
+  take (`dedicated` / `shared` / `background`), with fast eviction — reclaim the machine
+  in seconds, jobs requeue safely.
+- **Presence modes & model ladder:** a shared machine runs a small model while its user
+  is `active` and swaps in a large one when `away`, with hysteresis so cold-loads don't
+  thrash. Queue subscriptions follow the ladder.
+- **Two participation modes:** a **managed worker** (full agent) or an **attached
+  endpoint** (model server only, no fabric code — driven by a coordinator-side proxy
+  worker), for policy-restricted machines.
+- **Workload awareness:** clients tag jobs with task classes; the coordinator compares
+  demand against fleet supply and a **model catalog**, and *suggests* changes — including
+  upgrades when better models are released (eval-gated, human-approved downloads).
+- **Cloud governors:** overflow to cloud when the local fleet is overwhelmed (not just
+  absent), bounded by per-job **privacy classes** (`local_only` never leaves the LAN) and
+  a **spend budget**.
+- **Usage accounting:** per-job records (tokens, model, node, cost) with rollups —
+  metering for visibility and planning, not billing.
+- **Self-update:** signed release manifest, canary rollout, auto-rollback, per-node
+  opt-out.
 
 ## Security / trust
 
@@ -172,14 +204,18 @@ Smallest thing that proves the core loop, using parts already on hand:
 5. A static `fleet.yaml` model/capability registry.
 
 Deferred: coordinator with WoL + scheduled wake; heartbeat registry; multiple
-workers; priority scheduling; metrics/throughput accounting; callbacks/webhooks.
+workers; priority scheduling; callbacks/webhooks; and the whole self-managing-fleet
+layer (enrollment + hardware probe, profiles/presence ladder, usage accounting,
+self-update, planner + model catalog, overflow/budget governors) — phased in
+[docs/fleet-management.md](docs/fleet-management.md).
 
 ## Non-goals (for now)
 
 - Not a WAN/public service — LAN only.
 - Not a training/fine-tuning system — inference serving only.
 - Not a cluster serving framework — intermittency is the point.
-- No per-token cost accounting (local compute is "free").
+- No billing / chargeback of clients — usage **metering** (tokens, cost per
+  model/node/client) *is* in scope; see [docs/fleet-management.md](docs/fleet-management.md).
 
 ## Example fleet
 
@@ -212,9 +248,10 @@ about the client's domain.
 ## Open questions
 
 - Result delivery for async: poll-only vs callbacks/webhooks.
-- How workers advertise *currently loaded* vs *installable* models (affects cold-load
-  latency and routing).
-- Priority/fairness across multiple tenants once there's more than one.
+- Priority/fairness across multiple clients once there's more than one.
+- Presence-detection signals per OS (screen lock / input idle / manual) and defaults.
+- Cost model for *local* compute in accounting: nominal per-token rate vs energy estimate.
+- Eval-suite composition for upgrade gating (drawn from real task classes vs canned).
 
 ## Detailed docs
 
@@ -224,6 +261,9 @@ about the client's domain.
   API, Redis queue contract, worker↔model API, Wake-on-LAN, registry.
 - [docs/deployment.md](docs/deployment.md) — .NET cross-platform build/RIDs, Raspberry Pi
   / arm64, node roles, GPU/Metal notes, wake configuration.
+- [docs/fleet-management.md](docs/fleet-management.md) — node enrollment + hardware probe,
+  machine profiles, presence modes/model ladder, planner + model catalog, cloud governors,
+  usage accounting, self-update.
 - [docs/decisions.md](docs/decisions.md) — ADR-lite log of the choices and their rationale.
 - [docs/related-projects.md](docs/related-projects.md) — survey of adjacent projects and why
   they don't fit this niche.

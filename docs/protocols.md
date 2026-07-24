@@ -30,6 +30,8 @@ POST /jobs
   "messages":    [ {role, content}, … ],// OpenAI-style; or "prompt"
   "params":      { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
   "policy":      "wait",                // wait | wait_then_cloud | now
+  "privacy":     "local_only",          // local_only | cloud_ok (default local_only —
+                                        //   local_only NEVER routes to cloud)
   "deadline":    "2026-01-01T00:00:00Z",// optional; required for wait_then_cloud
   "callback_url":"https://…"            // optional; else poll
 }
@@ -63,7 +65,7 @@ any language that honours this contract can join the fleet.
     capability,
     messages | prompt,
     params,
-    policy, deadline,
+    policy, privacy, deadline,
     result_key,
     attempts, max_attempts
   }
@@ -99,7 +101,10 @@ Waking a sleeping machine is a pure network action, needing no software on the t
 ## 5. Model / capability registry
 
 Which node hosts which models, its MAC (for WoL), and its capacity. Starts as static
-config; may grow into a heartbeat where each worker reports its *currently loaded* models.
+config; in the fleet-management phase (see [fleet-management.md](fleet-management.md))
+the same shape becomes the seed for a coordinator-held **dynamic registry** maintained by
+enrollment + heartbeats, which additionally tracks *installed vs currently loaded* models,
+profile, and presence mode per node.
 
 ```yaml
 # fleet.yaml
@@ -117,3 +122,60 @@ capabilities:
   32b-reason:  { queue: "q:32b", model_server: "http://localhost:11434/v1", model: "…" }
   70b-reason:  { queue: "q:70b", model_server: "http://localhost:11434/v1", model: "…" }
 ```
+
+## 6. Node enrollment & heartbeat (fleet-management phase)
+
+Spoken between a **worker agent** and the coordinator; see
+[fleet-management.md](fleet-management.md) for the lifecycle these serve.
+
+Enroll (once, with a one-time join token minted by the admin):
+
+```
+POST /nodes/enroll
+{
+  "join_token": "…",                    // one-time; burned on use
+  "hostname": "…", "os": "…", "arch": "arm64",
+  "hw": { "ram_gb": 64, "accelerator": "metal|cuda|cpu",
+          "vram_gb": null, "disk_free_gb": 512,
+          "bench_tps_small": 42.0 },    // optional micro-benchmark
+  "profile": "shared"                   // dedicated | shared | background
+}
+→ 201 { "node_id": "…", "node_key": "…",   // per-node auth key from here on
+        "proposed": { "capabilities": [...], "ladder": {...} } }  // owner confirms/edits
+```
+
+Heartbeat (periodic; also the poll point for updates):
+
+```
+POST /nodes/{id}/heartbeat
+{
+  "mode": "active|away|paused",
+  "installed": ["model-a", "model-b"],
+  "loaded":    ["model-a"],             // warm right now — enables model-affinity routing
+  "queues":    ["q:8b"],                // current subscriptions (follow the ladder)
+  "stats":     { "jobs_done": 12, "tps": 38.5 }
+}
+→ 200 { "update": null | { …manifest, see §7… }, "planner_notes": [ … ] }
+```
+
+**Attached endpoints** (machines running no agent) have no enrollment/heartbeat of their
+own: they are registered by the admin, and a coordinator-side **proxy worker** consumes
+their queues and drives them over the model-server API (§3); HTTP health checks stand in
+for heartbeats.
+
+## 7. Self-update channel
+
+The coordinator hosts a release manifest per platform; agents learn of it via the
+heartbeat response (or `GET /updates/manifest?rid=…`):
+
+```
+{ "version": "1.4.0", "rid": "osx-arm64",
+  "url": "…", "sha256": "…", "signature": "…",   // signed; agents verify against a
+  "channel": "canary|stable" }                    //   pinned public key — or refuse
+```
+
+Rules (rationale in [fleet-management.md](fleet-management.md)): signature verification
+is mandatory (an update channel is RCE by design); canary ring updates first, fleet
+follows after a healthy grace period; crash-loop → automatic rollback to the retained
+previous binary; queue-contract `protocol_version` gates skew (a too-old worker pauses
+pulling until updated); per-node `auto_update: false` opt-out.

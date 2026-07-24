@@ -89,4 +89,6 @@ The protocol boundaries are identical either way.
   local network. Put at least a shared key on the gateway and job API.
 - **Corporate / managed machines** participate as **dumb model-server endpoints** only —
   no clusterbuck code, no client credentials on them — and may be firewalled or VPN'd.
-  Respect device policy.
+  Respect device policy. (Formally the *attached endpoint* participation mode: a
+  coordinator-side proxy worker pulls jobs on their behalf — see
+  [fleet-management.md](fleet-management.md).)

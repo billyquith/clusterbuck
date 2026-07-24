@@ -36,6 +36,9 @@ Treat any leak of the above as a bug.
 - [docs/protocols.md](../docs/protocols.md) — the concrete spec of every boundary.
 - [docs/deployment.md](../docs/deployment.md) — .NET RIDs/AOT, Raspberry Pi/arm64, node
   roles, GPU/Metal notes, wake config.
+- [docs/fleet-management.md](../docs/fleet-management.md) — self-managing fleet: node
+  enrollment + hardware probe, machine profiles, presence modes/model ladder, planner +
+  model catalog, cloud governors (privacy classes, budget), usage accounting, self-update.
 - [docs/decisions.md](../docs/decisions.md) — ADR-lite rationale for the key choices.
 - [docs/related-projects.md](../docs/related-projects.md) — survey of adjacent projects and
   why they don't fit this niche (keep collating).

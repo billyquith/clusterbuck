@@ -69,3 +69,60 @@ the wake mechanism as protocols (see [protocols.md](protocols.md)).
 implementation, not a constraint; clients and model servers stay any-language/any-OS.
 **Considered:** a single-language in-process design — simpler short-term, closed
 long-term.
+
+## 9. Dynamic registry via enrollment + heartbeats (static YAML as seed only)
+**Decision:** nodes self-enroll (join token → hardware probe → proposed capability set)
+and maintain live state via heartbeats; `fleet.yaml` remains only the MVP seed.
+**Why:** a fleet that grows machine-by-machine shouldn't need hand-edited config; the
+probe (RAM, accelerator, disk, micro-benchmark) grounds capability assignment in measured
+reality. The heartbeat also carries *installed vs loaded* models, resolving cold-load-aware
+routing.
+**Considered:** static config forever — fine for 2 nodes, hostile at 5+.
+
+## 10. Machine profiles + presence-mode model ladder
+**Decision:** every node carries an owner-set profile (`dedicated`/`shared`/`background`)
+and a mode-driven model ladder: small model while the user is `active`, large model when
+`away`, with hysteresis and instant owner eviction.
+**Why:** most spare compute lives on machines people actually use; clusterbuck is a guest
+there. Making the owner's contract explicit (and reclaim instant) is what makes
+contributing a personal machine acceptable. Hysteresis exists because cold-loads are
+expensive; eviction is cheap because unloading is fast.
+**Considered:** fixed per-node model sets — wastes the away hours of big machines.
+
+## 11. Usage metering in scope (supersedes the earlier non-goal)
+**Decision:** the coordinator logs per-job usage (tokens in/out, model, node, queue wait,
+run time, cost — cloud actual, local nominal/energy) with rollups and a `/usage` endpoint.
+**Why:** needed for the planner ("which models earn their RAM"), cloud budget governance,
+and plain visibility. The original non-goal ("local compute is free") conflated *billing*
+with *metering*; billing/chargeback stays out of scope.
+**Considered:** keeping accounting out entirely — untenable once cloud spend exists.
+
+## 12. Two participation modes: managed worker vs attached endpoint
+**Decision:** a node either runs the full worker agent, or is an **attached endpoint**
+(model server only, zero fabric code) driven by a coordinator-side **proxy worker** that
+pulls from queues on its behalf.
+**Why:** resolves the tension between the pull-based worker model and machines where
+policy forbids installing fabric code (corporate/MDM devices, appliances). The queue
+contract is preserved; the proxy just relocates the puller.
+**Considered:** requiring the agent everywhere (excludes policy-bound machines) or
+sync-plane-only participation for them (they could never drain the async queue).
+
+## 13. Signed, canaried worker self-update
+**Decision:** coordinator-hosted release manifest; agents verify a pinned-key signature,
+canary ring first, auto-rollback on crash-loop, protocol-version skew gating, per-node
+opt-out.
+**Why:** "update the fleet by touching every box" doesn't scale past two machines; but an
+update channel is remote-code-execution by design, so it ships signed-or-nothing with a
+blast-radius limiter (canary) and an undo (rollback).
+**Considered:** manual updates (doesn't scale), unsigned pull-from-git (unacceptable RCE
+surface).
+
+## 14. Per-job privacy classes bounding all cloud routing
+**Decision:** every job carries `privacy: local_only | cloud_ok`, **defaulting to
+`local_only`**; no policy, overflow, or deadline pressure may ever route a `local_only`
+job off-LAN.
+**Why:** the moment cloud fallback/overflow exists, "it was busy so it leaked" becomes
+possible; privacy must be a per-job invariant, not an operator setting. Default-private
+because the whole point of the fabric is local-first inference.
+**Considered:** a global cloud on/off switch — too coarse; interactive public-data jobs
+and sensitive batch jobs coexist in the same fleet.
