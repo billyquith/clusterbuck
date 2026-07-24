@@ -12,12 +12,19 @@ capacity. Clients submit work; the fabric decides *where* it runs and *when* —
 routing to a live worker for interactive requests, or queuing patient work until a
 capable machine is contactable (waking one if worth it).
 
-The economics are the point: **use compute you already own instead of buying cloud
-compute.** Cloud models stay permanently in the loop as the backstop — and *should* be
-used for urgency, overflow, and jobs bigger than any local machine — but every job
-served locally is cloud spend avoided. The system's headline success metric is exactly
-that: **avoided cloud cost**, computable from the usage metering (local tokens priced
-at the cloud rate they would otherwise have paid).
+Two things are the point — **privacy** and **economics** — and local-first serves both:
+
+- **Privacy:** sensitive material need never leave the LAN. Every job carries a privacy
+  class (`local_only` | `cloud_ok`), **defaulting to `local_only`**, and no urgency,
+  overflow, or deadline pressure can ever route a `local_only` job to cloud — it waits
+  or fails explicitly instead. Privacy is a per-job invariant the client sets, not an
+  operator mood.
+- **Economics:** use compute you already own instead of buying cloud compute. Cloud
+  models stay permanently in the loop as the backstop — and *should* be used for
+  urgency, overflow, and bigger-than-local jobs when the job's privacy class allows —
+  but every job served locally is cloud spend avoided. The headline success metric:
+  **avoided cloud cost**, computable from the usage metering (local tokens priced at
+  the cloud rate they would otherwise have paid).
 
 This is **infrastructure**, deliberately domain-agnostic. clusterbuck knows nothing
 about any client's application: it only ever sees jobs, capabilities, and results.
@@ -292,6 +299,9 @@ about the client's domain.
 - Cost model for *local* compute in accounting: nominal per-token rate vs energy estimate.
 - Eval-suite curation over time — keeping items bespoke/rotating to dodge benchmark
   contamination (framework in [docs/model-evaluation.md](docs/model-evaluation.md)).
+- Node trust classes — should privacy also constrain *which local nodes* may serve a
+  job (e.g. personally-owned vs corporate-managed machines on the same LAN), not just
+  LAN vs cloud?
 
 ## Detailed docs
 

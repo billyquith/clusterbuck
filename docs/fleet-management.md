@@ -257,6 +257,10 @@ usage_record = {
 }
 ```
 
+Usage records are **metadata only — never prompt or completion text**: the accounting
+layer must not itself become a copy of every private thing the fleet has processed.
+(Job payloads and results live only in the broker, under their existing TTLs.)
+
 Rollups per model / node / client / day feed a `/usage` endpoint (and export). Raw
 records age out (e.g. 90 days); rollups are kept. This is **metering, not billing** —
 the goal is visibility and planner input, not chargeback. The **headline number is
