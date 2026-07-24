@@ -191,3 +191,35 @@ prevents a stuck-escalated fleet.
 **Considered:** static priorities (no aging → starvation or permanent over-provision);
 keeping patience + urgency side by side (two overlapping knobs); clients re-submitting
 jobs at higher priority (racy, duplicates work).
+
+## 19. Two build artifacts: AOT worker, JIT server
+**Decision:** ship `cbk` (worker + probe + updater + CLI) as a Native AOT single-file
+binary per RID, and `cbk-server` (API + engines + coordinator + dashboard) as an
+ordinary self-contained JIT deployment; both share `Clusterbuck.Core`.
+**Why:** the worker fans out across the fleet and self-updates, so it must be lean,
+dependency-light, and instant-start — AOT's sweet spot. The server runs on exactly one
+admin-updated box and benefits from ASP.NET Core's full (non-AOT) surface, freeing the
+dashboard and server libs (Dapper, YamlDotNet) from AOT constraints.
+**Considered:** all-AOT (cripples the server/dashboard for no distribution benefit —
+it's one box); all-JIT (worker distribution + start-up regress on every node).
+
+## 20. Redis Streams + consumer groups for the queue (not BLPOP lists)
+**Decision:** implement the queue contract on Redis Streams with consumer groups.
+**Why:** the pending-entries list + `XAUTOCLAIM` provide the visibility-timeout / reaper
+/ at-least-once semantics the protocol needs *natively* — the "laptop closed its lid
+mid-job" recovery — instead of hand-rolling in-flight tracking and a reaper over plain
+`BLPOP` lists. Redis stays the broker; SQLite is the durable system of record.
+**Considered:** `BLPOP` lists (simple, but re-implements reliability primitives Streams
+already ship); a real queue broker like RabbitMQ (heavier, another daemon on the
+always-on node, no gain at this scale).
+
+## 21. Dashboard: htmx over coordinator-served JSON APIs
+**Decision:** the web dashboard is server-rendered static assets + htmx calling the
+existing JSON endpoints, vendored (no CDN), served by `cbk-server`.
+**Why:** no separate frontend build chain on an infrastructure repo; reuses the APIs
+that already exist for the CLI and clients; LAN-only so vendoring is natural. Blazor
+remains the C#-native upgrade path if real interactivity is later needed — available
+because the server is JIT, not AOT (ADR 19).
+**Considered:** a React/Vite SPA (build chain + dependency mass unwarranted for an admin
+panel); Blazor from the start (heavier than needed for mostly-readonly views, but the
+sanctioned upgrade).

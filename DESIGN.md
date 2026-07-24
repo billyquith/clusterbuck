@@ -317,6 +317,8 @@ about the client's domain.
 - [docs/model-evaluation.md](docs/model-evaluation.md) — the ability score: per-task-class
   quality measurement (programmatic checks, checklist judging, pairwise Elo), anchored
   1–10 calibration, and how the router + budget use it.
+- [docs/implementation.md](docs/implementation.md) — the build plan: two artifacts (AOT
+  worker / JIT server), the .NET stack + libraries, UI surfaces, repo layout, milestones.
 - [docs/decisions.md](docs/decisions.md) — ADR-lite log of the choices and their rationale.
 - [docs/related-projects.md](docs/related-projects.md) — survey of adjacent projects and why
   they don't fit this niche.

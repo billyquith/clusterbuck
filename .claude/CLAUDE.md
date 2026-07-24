@@ -48,9 +48,15 @@ Treat any leak of the above as a bug.
 
 ## Planned stack (once code starts)
 
-- **Server + reference worker:** C#/.NET (author fluency; self-contained single-file /
-  Native AOT for cross-platform, incl. `linux-arm64`/Raspberry Pi). Server and worker
-  share one codebase and the same job/result types.
+Full plan in [docs/implementation.md](../docs/implementation.md). In brief:
+
+- **Two artifacts:** `cbk` (worker + probe + updater + CLI) as **Native AOT** single-file
+  per RID; `cbk-server` (API + engines + coordinator + dashboard) as **self-contained
+  JIT**. Both share `Clusterbuck.Core` (types + queue contract = compile-time protocol).
+- **.NET 10 LTS**, ASP.NET Core minimal APIs, Redis (Streams + consumer groups) as broker,
+  SQLite as durable system of record, `HttpClient` for all model/cloud calls (**no vendor
+  SDK**), Spectre.Console CLI, htmx dashboard, xUnit + Testcontainers, GitHub Actions RID
+  matrix → signed release manifest.
 - **Broker + result store:** Redis (language-agnostic queue contract).
 - **Sync gateway:** LiteLLM (adopted, off the shelf) — do not reimplement OpenAI routing.
 - **Model servers:** Ollama / llama.cpp / vLLM / LM Studio — off the shelf, called over

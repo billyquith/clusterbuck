@@ -13,7 +13,8 @@ results — never anything about the client applications that use it.
 [`docs/`](docs/) for detail — [architecture](docs/architecture.md),
 [protocols](docs/protocols.md), [deployment](docs/deployment.md),
 [fleet management](docs/fleet-management.md), [model evaluation](docs/model-evaluation.md),
-[decisions](docs/decisions.md), [related projects](docs/related-projects.md).
+[implementation](docs/implementation.md), [decisions](docs/decisions.md),
+[related projects](docs/related-projects.md).
 
 ## License
 
