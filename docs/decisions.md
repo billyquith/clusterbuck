@@ -220,16 +220,19 @@ prevents a stuck-escalated fleet.
 keeping patience + urgency side by side (two overlapping knobs); clients re-submitting
 jobs at higher priority (racy, duplicates work).
 
-## 19. Two build artifacts: AOT worker, JIT server
+## 19. Worker as a Native AOT single-file binary
 **Decision:** ship `cbk` (worker + probe + updater + CLI) as a Native AOT single-file
-binary per RID, and `cbk-server` (API + engines + coordinator + dashboard) as an
-ordinary self-contained JIT deployment; both share `Clusterbuck.Core`.
+binary per RID.
 **Why:** the worker fans out across the fleet and self-updates, so it must be lean,
-dependency-light, and instant-start — AOT's sweet spot. The server runs on exactly one
-admin-updated box and benefits from ASP.NET Core's full (non-AOT) surface, freeing the
-dashboard and server libs (Dapper, YamlDotNet) from AOT constraints.
-**Considered:** all-AOT (cripples the server/dashboard for no distribution benefit —
-it's one box); all-JIT (worker distribution + start-up regress on every node).
+dependency-light, and instant-start — AOT's sweet spot — and it needs no LLM libraries.
+**Superseded in part by ADR 7:** this ADR originally also specified the *server* as a
+self-contained **JIT C#** artifact sharing a `Clusterbuck.Core` library with the worker.
+The split-language decision (ADR 7) makes the server **Python**, so there is no JIT-C#
+server and no shared code project — the AOT/JIT distinction now applies only to the
+worker (AOT), and the cross-language contract replaces the shared library (ADR 22). The
+worker-AOT rationale here still stands.
+**Considered:** framework-dependent worker (needs a .NET runtime on every node); a JIT
+worker (start-up + distribution regress on every node).
 
 ## 20. Redis Streams + consumer groups for the queue (not BLPOP lists)
 **Decision:** implement the queue contract on Redis Streams with consumer groups.
