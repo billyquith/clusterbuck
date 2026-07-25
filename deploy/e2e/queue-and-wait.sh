@@ -19,7 +19,7 @@ docker exec cbk-redis redis-cli -n 0 FLUSHDB >/dev/null
 python3 "$REPO/server/tools/fake_model_server.py" --port 11436 & PIDS+=($!)
 wait_for "http://127.0.0.1:11436/healthz" "fake model"
 
-( cd "$REPO/server" && CBK_REDIS_URL="redis://localhost:6379/0" \
+( cd "$REPO/server" && exec env CBK_REDIS_URL="redis://localhost:6379/0" \
   CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" .venv/bin/python -m clusterbuck ) & PIDS+=($!)
 wait_for "$URL/healthz" "server"
 log "server up, NO worker running"

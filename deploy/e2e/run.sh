@@ -56,7 +56,7 @@ else
 fi
 
 # --- server -----------------------------------------------------------------
-( cd "$REPO/server" && \
+( cd "$REPO/server" && exec env \
   CBK_REDIS_URL="$REDIS_URL" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$SERVER_PORT" \
   .venv/bin/python -m clusterbuck ) &
 PIDS+=($!)

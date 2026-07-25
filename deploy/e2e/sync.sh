@@ -42,7 +42,7 @@ capabilities:
 YAML
 
 # --- server (serves both planes; sync needs the fleet) ----------------------
-( cd "$REPO/server" && \
+( cd "$REPO/server" && exec env \
   CBK_REDIS_URL="redis://localhost:6379/0" CBK_DB_PATH="$WORKDIR/cbk.db" \
   CBK_PORT="$PORT" CBK_FLEET_PATH="$WORKDIR/fleet.yaml" .venv/bin/python -m clusterbuck ) &
 PIDS+=($!)

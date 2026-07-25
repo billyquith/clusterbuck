@@ -20,7 +20,7 @@ wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0;
 
 docker exec cbk-redis redis-cli -n 0 FLUSHDB >/dev/null
 
-( cd "$REPO/server" && \
+( cd "$REPO/server" && exec env \
   CBK_REDIS_URL="redis://localhost:6379/0" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
   CBK_FLEET_PATH="$REPO/server/fleet.yaml" CBK_ESCALATION_INTERVAL_S=1 \
   CBK_WOL_BROADCAST=127.0.0.1 .venv/bin/python -m clusterbuck ) &
