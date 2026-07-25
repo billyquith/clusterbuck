@@ -12,6 +12,7 @@ public sealed record WorkerConfig
     public IReadOnlyList<string> Capabilities { get; init; } = new[] { "8b-extract" };
     public int PollMs { get; init; } = 1000;
     public int ResultTtlSeconds { get; init; } = 86400;
+    public int HeartbeatMs { get; init; } = 10000;
 
     public static WorkerConfig FromEnvironment()
     {
@@ -32,6 +33,7 @@ public sealed record WorkerConfig
                 : caps.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             PollMs = int.TryParse(Env("CBK_POLL_MS"), out var p) ? p : 1000,
             ResultTtlSeconds = int.TryParse(Env("CBK_RESULT_TTL_S"), out var t) ? t : 86400,
+            HeartbeatMs = int.TryParse(Env("CBK_HEARTBEAT_MS"), out var h) ? h : 10000,
         };
     }
 

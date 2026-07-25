@@ -110,7 +110,7 @@ cd worker
 dotnet build                  # JIT for dev; AOT publish is a later packaging step (ADR 19)
 dotnet test                   # contract conformance + serialization round-trip (no infra)
 dotnet run --project src/Clusterbuck.Worker -- work    # start the worker loop
-# CLI: `cbk work | submit --prompt … | status <job_id> | fleet`
+# CLI: `cbk work | submit --prompt … | status <id> | fleet | enroll --token … | pause | resume`
 
 # --- end-to-end (proves the loop on one node; USE_OLLAMA=1 for real inference) ---
 bash deploy/e2e/run.sh            # M0 async: submit → queue → worker → result → poll
@@ -119,6 +119,7 @@ bash deploy/e2e/sync.sh           # M1 sync: /v1/chat/completions via LiteLLM
 bash deploy/e2e/escalation.sh     # M2a: waitable job escalates to necessary (no worker)
 bash deploy/e2e/reservation.sh    # M2b: reservation confirmed → warming → open (reconciler)
 bash deploy/e2e/usage.sh          # M3a: completed job metered; avoided-cloud-spend > 0
+bash deploy/e2e/enroll.sh         # M4b: enroll → registry → heartbeat → pause
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

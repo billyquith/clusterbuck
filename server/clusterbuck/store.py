@@ -122,8 +122,14 @@ class Store:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self._db_path)
+        # WAL + a busy timeout: the coordinator's background loop writes concurrently with
+        # request handlers, so a plain rollback-journal DB can raise "database is locked".
+        # WAL lets readers proceed during a write; busy_timeout makes writers wait instead
+        # of erroring.
+        conn = sqlite3.connect(self._db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
             conn.commit()

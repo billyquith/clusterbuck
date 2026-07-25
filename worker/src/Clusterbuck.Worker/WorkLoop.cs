@@ -19,6 +19,8 @@ public sealed class WorkLoop
     private readonly ModelClient _model;
     private readonly WorkerConfig _cfg;
     private readonly Action<string> _log;
+    // Mutable so the presence ladder can resubscribe live (active ⇄ away).
+    private volatile IReadOnlyList<string> _capabilities;
 
     public WorkLoop(IDatabase db, ModelClient model, WorkerConfig cfg, Action<string>? log = null)
     {
@@ -26,33 +28,52 @@ public sealed class WorkLoop
         _model = model;
         _cfg = cfg;
         _log = log ?? Console.WriteLine;
+        _capabilities = cfg.Capabilities;
     }
+
+    public IReadOnlyList<string> Capabilities => _capabilities;
+
+    /// <summary>Swap the served capability set (ensuring groups for any new ones).</summary>
+    public async Task SetCapabilitiesAsync(IReadOnlyList<string> caps)
+    {
+        foreach (var cap in caps)
+            await EnsureGroupAsync(cap);
+        _capabilities = caps;
+    }
+
+    /// <summary>When true the loop stops pulling (owner eviction / paused presence mode).
+    /// In-flight jobs already claimed still finish; nothing new is claimed.</summary>
+    public volatile bool Paused;
 
     public static string StreamKey(string capability) => $"q:{capability}";
 
     /// <summary>Create the consumer group (and stream) for each capability. Idempotent.</summary>
     public async Task EnsureGroupsAsync()
     {
-        foreach (var cap in _cfg.Capabilities)
+        foreach (var cap in _capabilities)
+            await EnsureGroupAsync(cap);
+    }
+
+    private async Task EnsureGroupAsync(string cap)
+    {
+        try
         {
-            try
-            {
-                await _db.StreamCreateConsumerGroupAsync(
-                    StreamKey(cap), _cfg.ConsumerGroup, StreamPosition.NewMessages,
-                    createStream: true);
-            }
-            catch (RedisServerException e) when (e.Message.Contains("BUSYGROUP"))
-            {
-                // group already exists — fine
-            }
+            await _db.StreamCreateConsumerGroupAsync(
+                StreamKey(cap), _cfg.ConsumerGroup, StreamPosition.NewMessages,
+                createStream: true);
+        }
+        catch (RedisServerException e) when (e.Message.Contains("BUSYGROUP"))
+        {
+            // group already exists — fine
         }
     }
 
     /// <summary>Read at most one job per capability and process it. Returns true if it did work.</summary>
     public async Task<bool> PollOnceAsync(CancellationToken ct)
     {
+        if (Paused) return false;
         var didWork = false;
-        foreach (var cap in _cfg.Capabilities)
+        foreach (var cap in _capabilities)
         {
             if (ct.IsCancellationRequested) break;
             var entries = await _db.StreamReadGroupAsync(
@@ -70,7 +91,7 @@ public sealed class WorkLoop
     public async Task RunAsync(CancellationToken ct)
     {
         await EnsureGroupsAsync();
-        _log($"cbk worker {_cfg.WorkerId} serving [{string.Join(", ", _cfg.Capabilities)}] " +
+        _log($"cbk worker {_cfg.WorkerId} serving [{string.Join(", ", _capabilities)}] " +
              $"→ model {_cfg.ModelName} @ {_cfg.ModelServerUrl}");
         while (!ct.IsCancellationRequested)
         {

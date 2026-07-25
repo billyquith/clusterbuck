@@ -66,6 +66,43 @@ public sealed class ContractConformanceTests
     }
 
     [Fact]
+    public void Worker_EnrollRequest_Serializes_Schema_Valid()
+    {
+        var req = new EnrollRequest
+        {
+            JoinToken = "jt_x", Hostname = "h", Os = "darwin", Arch = "arm64",
+            Hw = new HwProbe { RamGb = 64, Accelerator = "metal", DiskFreeGb = 512 },
+            Profile = "shared",
+        };
+        var wire = JsonSerializer.Serialize(req, CbkJsonContext.Default.EnrollRequest);
+        Assert.True(Schema("enroll-request.schema.json").Evaluate(JsonNode.Parse(wire)).IsValid);
+    }
+
+    [Fact]
+    public void Worker_Parses_EnrollResponse_Fixture()
+    {
+        var resp = JsonSerializer.Deserialize(
+            File.ReadAllText(Path.Combine(ContractDir, "examples", "enroll-response.valid.json")),
+            CbkJsonContext.Default.EnrollResponse)!;
+        Assert.Equal("node-a7f3", resp.NodeId);
+        Assert.Contains("70b-reason", resp.Proposed.Capabilities);
+        Assert.NotNull(resp.Proposed.Ladder);
+    }
+
+    [Fact]
+    public void Worker_HeartbeatRequest_Serializes_Schema_Valid()
+    {
+        var hb = new HeartbeatRequest
+        {
+            Mode = "away", Installed = new() { "m" }, Loaded = new() { "m" },
+            Queues = new() { "q:8b-extract" },
+            Stats = new HeartbeatStats { JobsDone = 1, Tps = 10 }, ProtocolVersion = 1,
+        };
+        var wire = JsonSerializer.Serialize(hb, CbkJsonContext.Default.HeartbeatRequest);
+        Assert.True(Schema("heartbeat-request.schema.json").Evaluate(JsonNode.Parse(wire)).IsValid);
+    }
+
+    [Fact]
     public void Worker_Result_Serializes_Schema_Valid()
     {
         // A "done" Result the worker would write must satisfy the schema.

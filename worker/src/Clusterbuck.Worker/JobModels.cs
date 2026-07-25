@@ -55,6 +55,11 @@ public sealed record Result
 [JsonSerializable(typeof(Job))]
 [JsonSerializable(typeof(Result))]
 [JsonSerializable(typeof(Message))]
+[JsonSerializable(typeof(EnrollRequest))]
+[JsonSerializable(typeof(EnrollResponse))]
+[JsonSerializable(typeof(HeartbeatRequest))]
+[JsonSerializable(typeof(HeartbeatResponse))]
+[JsonSerializable(typeof(NodeState))]
 public partial class CbkJsonContext : JsonSerializerContext
 {
 }

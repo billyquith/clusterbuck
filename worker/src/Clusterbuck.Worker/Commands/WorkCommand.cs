@@ -27,14 +27,36 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         if (settings.Model is { Length: > 0 })
             cfg = cfg with { ModelName = settings.Model };
 
+        // Enrolled mode (M4b): if node identity exists, take the id + ladder from it and
+        // heartbeat. Otherwise the worker stays purely env-configured (M0-M3 behaviour).
+        var statePath = NodeStateStore.DefaultPath;
+        var state = NodeStateStore.Load(statePath);
+        PresenceLadder? ladder = null;
+        if (state is not null)
+        {
+            ladder = new PresenceLadder(state.Ladder, state.Capabilities);
+            ladder.Update(state.Mode);
+            cfg = cfg with
+            {
+                WorkerId = state.NodeId,
+                Capabilities = ladder.Capabilities().ToArray(),
+            };
+        }
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
         var mux = await ConnectionMultiplexer.ConnectAsync(cfg.RedisConfig);
         var db = mux.GetDatabase(cfg.Database);
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+        using var hbHttp = new HttpClient();
         var model = new ModelClient(http, cfg);
         var loop = new WorkLoop(db, model, cfg, s => AnsiConsole.MarkupLineInterpolated($"[grey]{s}[/]"));
+
+        Task? heartbeat = null;
+        if (state is not null && ladder is not null)
+            heartbeat = HeartbeatLoop(new RegistryClient(hbHttp, state.Server), loop, ladder,
+                                      statePath, cfg, cts.Token);
 
         try
         {
@@ -45,8 +67,42 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         }
         finally
         {
+            if (heartbeat is not null) { try { await heartbeat; } catch { } }
             await mux.CloseAsync();
         }
         return 0;
+    }
+
+    /// <summary>Periodic heartbeat: re-read the persisted mode, drive the ladder (which
+    /// resubscribes capabilities and toggles pause), and report to the coordinator.</summary>
+    private static async Task HeartbeatLoop(
+        RegistryClient registry, WorkLoop loop, PresenceLadder ladder,
+        string statePath, WorkerConfig cfg, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var s = NodeStateStore.Load(statePath);
+                if (s is not null)
+                {
+                    var effective = ladder.Update(s.Mode);
+                    loop.Paused = effective == "paused";
+                    await loop.SetCapabilitiesAsync(ladder.Capabilities());
+                    var caps = ladder.Capabilities();
+                    await registry.HeartbeatAsync(s.NodeId, s.NodeKey, new HeartbeatRequest
+                    {
+                        Mode = effective,
+                        Queues = caps.Select(c => WorkLoop.StreamKey(c)).ToList(),
+                        ProtocolVersion = 1,
+                    }, ct);
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch { /* transient; retry next beat */ }
+
+            try { await Task.Delay(cfg.HeartbeatMs, ct); }
+            catch (OperationCanceledException) { break; }
+        }
     }
 }
