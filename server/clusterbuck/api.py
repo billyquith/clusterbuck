@@ -15,13 +15,14 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from .background import coordinator_loop
 from .config import settings
 from .coordinator import resolve_capability
-from .escalation import escalation_loop
 from .fleet import load_fleet
-from .ids import new_ids
-from .models import JobRecord, JobSubmit, Urgency
+from .ids import new_ids, new_reservation_id
+from .models import JobRecord, JobSubmit, ReservationSubmit, Urgency
 from .queue import Queue
+from .reservations import admit, iso
 from .store import Store
 from .sync import build_router, sync_routes
 from .wake import WakeCoordinator
@@ -83,7 +84,7 @@ def create_app(
         task: asyncio.Task | None = None
         if start_scheduler:
             task = asyncio.create_task(
-                escalation_loop(
+                coordinator_loop(
                     app.state.store, app.state.queue, app.state.wake,
                     interval_s=settings.escalation_interval_s, stop=stop,
                 )
@@ -123,6 +124,15 @@ def create_app(
 
     @app.post("/jobs", status_code=202)
     async def submit_job(body: JobSubmit) -> JSONResponse:
+        # A reservation, if named, must exist and be confirmed. It does NOT override
+        # addressing (the job addresses normally); it's recorded as the linkage (§8).
+        if body.reservation is not None:
+            rsv = app.state.store.get_reservation(body.reservation)
+            if rsv is None or rsv["status"] != "confirmed":
+                raise HTTPException(
+                    status_code=400, detail="unknown or unconfirmed reservation"
+                )
+
         capability = resolve_capability(
             capability=body.capability,
             task_class=body.task_class,
@@ -158,6 +168,7 @@ def create_app(
             created_at=created_at,
             urgency=body.urgency.value,
             escalate_at=escalate_at,
+            reservation=body.reservation,
         )
         await app.state.queue.enqueue(record.to_wire())
 
@@ -202,6 +213,66 @@ def create_app(
             "attempts": result.get("attempts", 1),
             "worker": result.get("worker"),
         }
+
+    def _reservation_view(row) -> dict:
+        plan = None
+        if row["status"] == "confirmed":
+            plan = {
+                "node": row["node"],
+                "artifact": row["artifact"],
+                "warm_by": iso(row["warm_by"]),
+                "starts": iso(row["starts"]),
+                "ends": iso(row["ends"]),
+            }
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "state": row["state"],
+            "plan": plan,
+        }
+
+    @app.post("/reservations", status_code=201)
+    async def create_reservation(body: ReservationSubmit) -> JSONResponse:
+        decision = admit(
+            app.state.fleet,
+            task_class=body.task_class,
+            min_ability=body.min_ability,
+            window_start=body.window.start,
+            duration_min=body.duration_min,
+            lead_s=settings.warm_lead_s,
+        )
+        rsv_id = new_reservation_id()
+        created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        # confirmed reservations start their lifecycle; declined ones have none.
+        state = "scheduled" if decision.status == "confirmed" else None
+        app.state.store.insert_reservation(
+            id=rsv_id, status=decision.status, state=state,
+            task_class=body.task_class, min_ability=body.min_ability,
+            capability=decision.capability, node=decision.node, artifact=decision.artifact,
+            priority=body.priority, privacy=body.privacy.value, load=body.load,
+            duration_min=body.duration_min, est_jobs=body.est_jobs,
+            warm_by=decision.warm_by, starts=decision.starts, ends=decision.ends,
+            created_at=created_at,
+        )
+        content = _reservation_view(app.state.store.get_reservation(rsv_id))
+        content["counter"] = None  # counter-offers deferred (M2b)
+        if decision.status == "declined":
+            content["reason"] = decision.reason
+        return JSONResponse(status_code=201, content=content)
+
+    @app.get("/reservations/{rsv_id}")
+    async def get_reservation(rsv_id: str) -> dict:
+        row = app.state.store.get_reservation(rsv_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown reservation id")
+        return _reservation_view(row)
+
+    @app.delete("/reservations/{rsv_id}")
+    async def cancel_reservation(rsv_id: str) -> dict:
+        if app.state.store.get_reservation(rsv_id) is None:
+            raise HTTPException(status_code=404, detail="unknown reservation id")
+        app.state.store.cancel_reservation(rsv_id)
+        return _reservation_view(app.state.store.get_reservation(rsv_id))
 
     return app
 

@@ -20,7 +20,28 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at   TEXT NOT NULL,
     urgency      TEXT NOT NULL DEFAULT 'waitable',
     escalate_at  REAL,            -- epoch seconds; only set for waitable(N)
-    escalated    INTEGER NOT NULL DEFAULT 0
+    escalated    INTEGER NOT NULL DEFAULT 0,
+    reservation  TEXT             -- opt-in reservation id this job queues against
+);
+
+CREATE TABLE IF NOT EXISTS reservations (
+    id           TEXT PRIMARY KEY,
+    status       TEXT NOT NULL,   -- confirmed | declined
+    state        TEXT,            -- scheduled|warming|open|draining|closed|cancelled (null if declined)
+    task_class   TEXT,
+    min_ability  INTEGER,
+    capability   TEXT,
+    node         TEXT,
+    artifact     TEXT,
+    priority     TEXT,
+    privacy      TEXT,
+    load         TEXT,
+    duration_min INTEGER,
+    est_jobs     INTEGER,
+    warm_by      REAL,
+    starts       REAL,
+    ends         REAL,
+    created_at   TEXT NOT NULL
 );
 """
 
@@ -29,6 +50,7 @@ _MIGRATIONS = {
     "urgency": "ALTER TABLE jobs ADD COLUMN urgency TEXT NOT NULL DEFAULT 'waitable'",
     "escalate_at": "ALTER TABLE jobs ADD COLUMN escalate_at REAL",
     "escalated": "ALTER TABLE jobs ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0",
+    "reservation": "ALTER TABLE jobs ADD COLUMN reservation TEXT",
 }
 
 
@@ -61,13 +83,14 @@ class Store:
         created_at: str,
         urgency: str = "waitable",
         escalate_at: float | None = None,
+        reservation: str | None = None,
     ) -> None:
         with self._conn() as c:
             c.execute(
                 "INSERT INTO jobs "
-                "(id, result_key, capability, status, created_at, urgency, escalate_at) "
-                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
-                (id, result_key, capability, created_at, urgency, escalate_at),
+                "(id, result_key, capability, status, created_at, urgency, escalate_at, reservation) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
+                (id, result_key, capability, created_at, urgency, escalate_at, reservation),
             )
 
     def get(self, id: str) -> sqlite3.Row | None:
@@ -101,3 +124,49 @@ class Store:
                 "UPDATE jobs SET urgency = 'necessary', escalated = 1 WHERE id = ?",
                 (id,),
             )
+
+    # --- reservations (M2b) ---
+
+    def insert_reservation(self, *, id: str, status: str, state: str | None,
+                           task_class: str, min_ability: int, capability: str | None,
+                           node: str | None, artifact: str | None, priority: str,
+                           privacy: str, load: str, duration_min: int,
+                           est_jobs: int | None, warm_by: float | None,
+                           starts: float | None, ends: float | None,
+                           created_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO reservations (id, status, state, task_class, min_ability, "
+                "capability, node, artifact, priority, privacy, load, duration_min, "
+                "est_jobs, warm_by, starts, ends, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (id, status, state, task_class, min_ability, capability, node, artifact,
+                 priority, privacy, load, duration_min, est_jobs, warm_by, starts, ends,
+                 created_at),
+            )
+
+    def get_reservation(self, id: str) -> sqlite3.Row | None:
+        with self._conn() as c:
+            return c.execute("SELECT * FROM reservations WHERE id = ?", (id,)).fetchone()
+
+    def active_reservations(self) -> list[sqlite3.Row]:
+        """Confirmed reservations still in a live lifecycle state (for the reconciler)."""
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM reservations WHERE status = 'confirmed' "
+                "AND state IN ('scheduled', 'warming', 'open', 'draining')"
+            ).fetchall()
+
+    def set_reservation_state(self, id: str, state: str) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE reservations SET state = ? WHERE id = ?", (state, id))
+
+    def cancel_reservation(self, id: str) -> bool:
+        """Flip to cancelled unless already terminal. Returns True if it changed."""
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE reservations SET state = 'cancelled' "
+                "WHERE id = ? AND state NOT IN ('closed', 'cancelled')",
+                (id,),
+            )
+            return cur.rowcount > 0

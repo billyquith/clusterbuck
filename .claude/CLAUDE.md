@@ -10,14 +10,16 @@ LAN is capable and available — routing live requests now (sync plane), or queu
 work until a worker is contactable, waking one if worth it (async plane). The name is a
 nod to *"pass the buck"* — the broker hands each job to whichever worker is up.
 
-**Status: M2 in progress.** The design is complete. **M0** (async core loop: submit →
-Redis Streams queue → C# worker → model server → result → poll) and **M1** (sync plane —
+**Status: M2 complete.** The design is complete. **M0** (async core loop: submit →
+Redis Streams queue → C# worker → model server → result → poll), **M1** (sync plane —
 LiteLLM serving OpenAI-compatible `/v1/chat/completions` — + `fleet.yaml` registry +
-`cbk fleet`) are built and proven end-to-end (fake stub + Ollama). **M2a** adds
-**availability**: the escalation engine (waitable → necessary on age; ADR 18) and the
+`cbk fleet`), and **M2** (availability) are built and proven end-to-end (fake stub +
+Ollama). M2 adds: the **escalation engine** (waitable → necessary on age; ADR 18), the
 **Wake-on-LAN** coordinator (wakes capable sleeping nodes when urgent/necessary work has
-no live consumer; liveness = consumer `idle`; ADR 24). Basic reservations (M2b) are next.
-See *Build / test / run* below.
+no live consumer; liveness = consumer `idle`; ADR 24), and **basic reservations**
+(admission + a reconciler-tick lifecycle scheduled→warming→open→draining→closed; ADR 17).
+The escalation scan and reservation reconciler share one coordinator loop. See
+*Build / test / run* below. **M3** (dashboard + usage metering) is next.
 
 ## CRITICAL: keep it domain-agnostic
 
@@ -108,6 +110,7 @@ bash deploy/e2e/run.sh            # M0 async: submit → queue → worker → re
 bash deploy/e2e/queue-and-wait.sh # async: job parks as queued, drains when a worker joins
 bash deploy/e2e/sync.sh           # M1 sync: /v1/chat/completions via LiteLLM
 bash deploy/e2e/escalation.sh     # M2a: waitable job escalates to necessary (no worker)
+bash deploy/e2e/reservation.sh    # M2b: reservation confirmed → warming → open (reconciler)
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

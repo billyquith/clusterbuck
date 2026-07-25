@@ -52,6 +52,7 @@ class JobSubmit(BaseModel):
     privacy: Privacy = Privacy.local_only
     deadline: str | None = None
     callback_url: str | None = None
+    reservation: str | None = None  # opt-in reservation id to queue against (§8)
 
     @model_validator(mode="after")
     def _check(self) -> "JobSubmit":
@@ -63,6 +64,42 @@ class JobSubmit(BaseModel):
             )
         if self.messages is None and self.prompt is None:
             raise ValueError("provide either `messages` or `prompt`")
+        return self
+
+
+class Window(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    start: str = "asap"  # "asap" or "HH:MM" (local)
+    recur: str | None = None  # M2b: recurrence deferred — must be null
+
+
+class ReservationSubmit(BaseModel):
+    """Client request body for POST /reservations (protocols.md §8).
+
+    Server-only seam (client ↔ HTTP), so — like JobSubmit — it is validated by Pydantic
+    and is not part of contract/.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    task_class: str
+    min_ability: int = Field(ge=1, le=10)
+    load: Literal["light", "medium", "heavy"] = "light"
+    duration_min: int = Field(default=30, ge=1)
+    est_jobs: int | None = Field(default=None, ge=0)
+    priority: Literal["low", "medium", "high"] = "medium"
+    privacy: Privacy = Privacy.local_only
+    window: Window = Field(default_factory=Window)
+
+    @model_validator(mode="after")
+    def _check(self) -> "ReservationSubmit":
+        if self.window.recur is not None:
+            raise ValueError("recurring reservations are not supported yet (M2b)")
+        if self.window.start != "asap":
+            hh, _, mm = self.window.start.partition(":")
+            if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
+                raise ValueError("window.start must be 'asap' or 'HH:MM'")
         return self
 
 

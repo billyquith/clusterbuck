@@ -31,6 +31,8 @@ class Settings:
     escalation_interval_s: float = float(os.environ.get("CBK_ESCALATION_INTERVAL_S", "10"))
     wol_broadcast: str = os.environ.get("CBK_WOL_BROADCAST", "255.255.255.255")
     wol_port: int = int(os.environ.get("CBK_WOL_PORT", "9"))
+    # Reservations: wake + pre-load this long before a window opens (ADR 17).
+    warm_lead_s: int = int(os.environ.get("CBK_WARM_LEAD_S", "300"))
 
 
 settings = Settings()

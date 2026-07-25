@@ -11,7 +11,6 @@ promoted and could wake a machine for nothing.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
@@ -40,23 +39,3 @@ async def escalation_scan(
         _log.info("escalate %s [%s] waitable → necessary", row["id"], row["capability"])
         await wake.maybe_wake(row["capability"], reason="escalation")
     return promoted
-
-
-async def escalation_loop(
-    store: Store,
-    queue: Queue,
-    wake: WakeCoordinator,
-    *,
-    interval_s: float,
-    stop: asyncio.Event,
-) -> None:
-    """Run escalation_scan every interval_s until stopped."""
-    while not stop.is_set():
-        try:
-            await escalation_scan(store, queue, wake)
-        except Exception:  # a scan failure must not kill the loop
-            _log.exception("escalation scan failed")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval_s)
-        except asyncio.TimeoutError:
-            pass

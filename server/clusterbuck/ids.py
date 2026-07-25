@@ -9,3 +9,7 @@ def new_ids() -> tuple[str, str]:
     """Return (job_id, result_key) sharing a suffix."""
     suffix = uuid.uuid4().hex
     return f"job_{suffix}", f"res_{suffix}"
+
+
+def new_reservation_id() -> str:
+    return f"rsv_{uuid.uuid4().hex}"
