@@ -30,6 +30,11 @@ class Queue:
     def from_url(cls, url: str | None = None) -> "Queue":
         return cls(redis.from_url(url or settings.redis_url, decode_responses=True))
 
+    @property
+    def client(self) -> redis.Redis:
+        """The underlying Redis client (for coordinator reads like XINFO)."""
+        return self._r
+
     async def ensure_group(self, capability: str) -> None:
         """Create the consumer group (and stream) if absent. Idempotent."""
         key = stream_key(capability)

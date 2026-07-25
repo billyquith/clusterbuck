@@ -6,9 +6,10 @@ GET  /jobs/{id} → assemble lifecycle state from SQLite + the result blob in Re
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -16,15 +17,20 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 from .coordinator import resolve_capability
+from .escalation import escalation_loop
 from .fleet import load_fleet
 from .ids import new_ids
-from .models import JobRecord, JobSubmit
+from .models import JobRecord, JobSubmit, Urgency
 from .queue import Queue
 from .store import Store
 from .sync import build_router, sync_routes
+from .wake import WakeCoordinator
 
 # Terminal statuses live in the result blob; anything else is queue state.
 _TERMINAL = {"done", "failed", "expired"}
+
+# Urgency classes that carry wake rights (ADR 18): directly submitted or escalated.
+_WAKE_RIGHTS = {Urgency.urgent, Urgency.necessary}
 
 _log = logging.getLogger("clusterbuck")
 
@@ -33,6 +39,7 @@ def create_app(
     redis_url: str | None = None,
     db_path: str | None = None,
     fleet_path: str | None = None,
+    start_scheduler: bool = True,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -60,9 +67,34 @@ def create_app(
                 "/v1/* will return 503, async plane unaffected", path.resolve(),
             )
 
+        # Wake coordinator (needs the fleet for MAC lookup + Redis for liveness).
+        app.state.wake = WakeCoordinator(
+            app.state.fleet,
+            app.state.queue.client,
+            group=settings.consumer_group,
+            dead_ms=settings.worker_dead_ms,
+            cooldown_s=settings.wake_cooldown_s,
+            broadcast=settings.wol_broadcast,
+            port=settings.wol_port,
+        )
+
+        # Escalation engine: background scan promoting due waitable jobs.
+        stop = asyncio.Event()
+        task: asyncio.Task | None = None
+        if start_scheduler:
+            task = asyncio.create_task(
+                escalation_loop(
+                    app.state.store, app.state.queue, app.state.wake,
+                    interval_s=settings.escalation_interval_s, stop=stop,
+                )
+            )
+
         try:
             yield
         finally:
+            stop.set()
+            if task is not None:
+                await task
             await app.state.queue.aclose()
 
     app = FastAPI(title="clusterbuck server", version="0.0.1", lifespan=lifespan)
@@ -97,7 +129,8 @@ def create_app(
             min_ability=body.min_ability,
         )
         job_id, result_key = new_ids()
-        created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = datetime.now(timezone.utc)
+        created_at = now.isoformat().replace("+00:00", "Z")
 
         record = JobRecord(
             id=job_id,
@@ -113,13 +146,24 @@ def create_app(
             result_key=result_key,
         )
 
+        # A patience bound (waitable(N)) becomes an absolute escalation deadline.
+        escalate_at = None
+        if body.urgency is Urgency.waitable and body.escalate_after_min is not None:
+            escalate_at = (now + timedelta(minutes=body.escalate_after_min)).timestamp()
+
         app.state.store.insert(
             id=job_id,
             result_key=result_key,
             capability=capability,
             created_at=created_at,
+            urgency=body.urgency.value,
+            escalate_at=escalate_at,
         )
         await app.state.queue.enqueue(record.to_wire())
+
+        # Wake rights: urgent/necessary jobs may create capacity on submit.
+        if body.urgency in _WAKE_RIGHTS:
+            await app.state.wake.maybe_wake(capability, reason=f"submit:{body.urgency.value}")
 
         return JSONResponse(
             status_code=202,
@@ -138,6 +182,7 @@ def create_app(
             return {
                 "id": job_id,
                 "status": row["status"],
+                "urgency": row["urgency"],  # reflects escalation (waitable → necessary)
                 "result": None,
                 "error": None,
                 "attempts": 0,
@@ -151,6 +196,7 @@ def create_app(
         return {
             "id": job_id,
             "status": status,
+            "urgency": row["urgency"],
             "result": result.get("completion"),
             "error": result.get("error"),
             "attempts": result.get("attempts", 1),

@@ -10,11 +10,13 @@ LAN is capable and available — routing live requests now (sync plane), or queu
 work until a worker is contactable, waking one if worth it (async plane). The name is a
 nod to *"pass the buck"* — the broker hands each job to whichever worker is up.
 
-**Status: M1 in progress.** The design is complete. **M0** (async core loop: submit →
-Redis Streams queue → C# worker → model server → result → poll) is built and proven
-end-to-end across the cross-language contract. **M1** adds the **sync plane** (LiteLLM
-in-process serving OpenAI-compatible `/v1/chat/completions`), the **`fleet.yaml`**
-registry seed, and `cbk fleet`. Both planes are proven end-to-end (fake stub + Ollama).
+**Status: M2 in progress.** The design is complete. **M0** (async core loop: submit →
+Redis Streams queue → C# worker → model server → result → poll) and **M1** (sync plane —
+LiteLLM serving OpenAI-compatible `/v1/chat/completions` — + `fleet.yaml` registry +
+`cbk fleet`) are built and proven end-to-end (fake stub + Ollama). **M2a** adds
+**availability**: the escalation engine (waitable → necessary on age; ADR 18) and the
+**Wake-on-LAN** coordinator (wakes capable sleeping nodes when urgent/necessary work has
+no live consumer; liveness = consumer `idle`; ADR 24). Basic reservations (M2b) are next.
 See *Build / test / run* below.
 
 ## CRITICAL: keep it domain-agnostic
@@ -105,6 +107,7 @@ dotnet run --project src/Clusterbuck.Worker -- work    # start the worker loop
 bash deploy/e2e/run.sh            # M0 async: submit → queue → worker → result → poll
 bash deploy/e2e/queue-and-wait.sh # async: job parks as queued, drains when a worker joins
 bash deploy/e2e/sync.sh           # M1 sync: /v1/chat/completions via LiteLLM
+bash deploy/e2e/escalation.sh     # M2a: waitable job escalates to necessary (no worker)
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

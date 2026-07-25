@@ -269,3 +269,22 @@ job API. Recorded so the asymmetry is a deliberate design choice, not an oversig
 **Considered:** a custom header (`x-cbk-privacy`) to carry per-request privacy on the sync
 plane (viable later; unneeded while fallback defaults off); mirroring async's default-
 `local_only` per request (impossible without a field in the request shape).
+
+## 24. M2 escalation grants wake rights; intra-queue priority ordering deferred
+**Decision:** in M2, a job's urgency governs its **wake rights and escalation trajectory**
+(ADR 18) — `urgent`/`necessary` may wake a node; `waitable(N)` promotes to `necessary`
+on age — but does **not** reorder jobs *within* a capability's Redis stream. A running
+worker drains its stream FIFO regardless of urgency; strict "necessary = head of the
+queue" is a later refinement.
+**Why:** the observable effect of urgency on an intermittent fleet is *whether capacity
+gets created* (wake), which is what M2 (availability) is about. True intra-queue priority
+needs urgency-tiered streams per capability (`q:<cap>:urgent` consumed ahead of
+`q:<cap>`), which changes the queue topology and the worker's read loop — a contract-level
+change out of proportion to its value while the fleet is small and jobs mostly wait on
+*capacity*, not on *each other*. Deferring it keeps the M0 queue contract stable.
+**Consequence:** once a worker is awake, an escalated `necessary` job is served in
+submission order alongside `waitable` work on the same stream. Acceptable at M2 scale;
+revisit when a single warm node routinely has mixed-urgency backlog contending.
+**Considered:** tiered streams now (topology + worker churn, low payoff at this scale);
+a Redis sorted-set priority queue (abandons the Streams reliability primitives ADR 20
+adopted); reordering in the worker (can't — it can't see the whole stream cheaply).

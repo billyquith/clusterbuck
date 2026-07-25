@@ -46,6 +46,8 @@ def client(redis_url, tmp_path):
 
     from clusterbuck.api import create_app
 
-    app = create_app(redis_url=redis_url, db_path=str(tmp_path / "test.db"))
+    app = create_app(
+        redis_url=redis_url, db_path=str(tmp_path / "test.db"), start_scheduler=False
+    )
     with TestClient(app) as c:
         yield c

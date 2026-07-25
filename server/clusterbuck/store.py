@@ -1,7 +1,8 @@
 """SQLite job registry — the durable system of record (Redis stays purely the broker).
 
-Tracks the id → result_key mapping and the last-known lifecycle state so GET /jobs/{id}
-can answer even before (or without) a result blob in Redis.
+Tracks the id → result_key mapping, the last-known lifecycle state, and the urgency
+trajectory (urgency + escalation deadline) so the escalation engine can promote patient
+work without re-reading the queue payloads.
 """
 
 from __future__ import annotations
@@ -12,13 +13,23 @@ from typing import Iterator
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
-    id          TEXT PRIMARY KEY,
-    result_key  TEXT NOT NULL,
-    capability  TEXT NOT NULL,
-    status      TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    id           TEXT PRIMARY KEY,
+    result_key   TEXT NOT NULL,
+    capability   TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    urgency      TEXT NOT NULL DEFAULT 'waitable',
+    escalate_at  REAL,            -- epoch seconds; only set for waitable(N)
+    escalated    INTEGER NOT NULL DEFAULT 0
 );
 """
+
+# Columns added after the initial M0 schema; applied to pre-existing dev DBs.
+_MIGRATIONS = {
+    "urgency": "ALTER TABLE jobs ADD COLUMN urgency TEXT NOT NULL DEFAULT 'waitable'",
+    "escalate_at": "ALTER TABLE jobs ADD COLUMN escalate_at REAL",
+    "escalated": "ALTER TABLE jobs ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0",
+}
 
 
 class Store:
@@ -26,6 +37,10 @@ class Store:
         self._db_path = db_path
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            existing = {row["name"] for row in c.execute("PRAGMA table_info(jobs)")}
+            for col, ddl in _MIGRATIONS.items():
+                if col not in existing:
+                    c.execute(ddl)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -38,13 +53,21 @@ class Store:
             conn.close()
 
     def insert(
-        self, *, id: str, result_key: str, capability: str, created_at: str
+        self,
+        *,
+        id: str,
+        result_key: str,
+        capability: str,
+        created_at: str,
+        urgency: str = "waitable",
+        escalate_at: float | None = None,
     ) -> None:
         with self._conn() as c:
             c.execute(
-                "INSERT INTO jobs (id, result_key, capability, status, created_at) "
-                "VALUES (?, ?, ?, 'queued', ?)",
-                (id, result_key, capability, created_at),
+                "INSERT INTO jobs "
+                "(id, result_key, capability, status, created_at, urgency, escalate_at) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (id, result_key, capability, created_at, urgency, escalate_at),
             )
 
     def get(self, id: str) -> sqlite3.Row | None:
@@ -55,3 +78,26 @@ class Store:
     def set_status(self, id: str, status: str) -> None:
         with self._conn() as c:
             c.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, id))
+
+    def due_for_escalation(self, now: float) -> list[sqlite3.Row]:
+        """waitable jobs whose patience bound has expired and haven't escalated yet.
+
+        Doneness is NOT judged here (SQLite status is updated lazily on poll); the caller
+        must confirm against the Redis result blob before treating a row as unserved.
+        """
+        with self._conn() as c:
+            cur = c.execute(
+                "SELECT id, result_key, capability, escalate_at FROM jobs "
+                "WHERE urgency = 'waitable' AND escalated = 0 "
+                "AND escalate_at IS NOT NULL AND escalate_at <= ?",
+                (now,),
+            )
+            return cur.fetchall()
+
+    def mark_escalated(self, id: str) -> None:
+        """Promote waitable → necessary (records the trajectory change)."""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE jobs SET urgency = 'necessary', escalated = 1 WHERE id = ?",
+                (id,),
+            )

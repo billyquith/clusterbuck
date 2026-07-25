@@ -21,5 +21,16 @@ class Settings:
     # Opt-in cloud fallback for the sync plane; unset ⇒ sync plane is local-only.
     cloud_fallback_model: str | None = os.environ.get("CBK_CLOUD_FALLBACK_MODEL") or None
 
+    # --- availability / wake (M2) ---
+    # A consumer idle longer than this is treated as gone; must exceed the longest
+    # inference (a busy worker isn't polling). Real heartbeats (M4) supersede this.
+    worker_dead_ms: int = int(os.environ.get("CBK_WORKER_DEAD_MS", "60000"))
+    # At most one wake per capability per this window (coalesce, don't stampede).
+    wake_cooldown_s: float = float(os.environ.get("CBK_WAKE_COOLDOWN_S", "60"))
+    # How often the escalation engine scans for due waitable jobs.
+    escalation_interval_s: float = float(os.environ.get("CBK_ESCALATION_INTERVAL_S", "10"))
+    wol_broadcast: str = os.environ.get("CBK_WOL_BROADCAST", "255.255.255.255")
+    wol_port: int = int(os.environ.get("CBK_WOL_PORT", "9"))
+
 
 settings = Settings()

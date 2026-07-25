@@ -66,6 +66,7 @@ def sync_client(fake_model, tmp_path):
         redis_url="redis://localhost:6379/15",
         db_path=str(tmp_path / "t.db"),
         fleet_path=str(fleet),
+        start_scheduler=False,
     )
     with TestClient(app) as c:
         yield c
@@ -105,6 +106,7 @@ def test_sync_disabled_without_fleet(tmp_path):
         redis_url="redis://localhost:6379/15",
         db_path=str(tmp_path / "t.db"),
         fleet_path=str(tmp_path / "missing.yaml"),
+        start_scheduler=False,
     )
     with TestClient(app) as c:
         resp = c.post(
