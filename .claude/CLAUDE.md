@@ -20,12 +20,13 @@ no live consumer; liveness = consumer `idle`; ADR 24), and **basic reservations*
 (admission + a reconciler-tick lifecycle scheduled→warming→open→draining→closed; ADR 17).
 The escalation scan and reservation reconciler share one coordinator loop.
 
-**M3a** (visibility) adds **usage metering**: the coordinator loop captures a per-job
+**M3** (visibility) adds **usage metering** — the coordinator loop captures a per-job
 usage record (metadata only — no prompt/completion text) when a job completes, and
 `/usage` exposes rollups + the **avoided-cloud-spend headline** (local tokens × the
-`fleet.yaml` cloud-equivalent rate). Budget burn is display-only scaffolding (async-only
-metering ⇒ no cloud path to gate yet). The **htmx dashboard (M3b)** is next. See
-*Build / test / run* below.
+`fleet.yaml` cloud-equivalent rate; budget burn is display-only scaffolding while metering
+is async-only) — and the **htmx dashboard** at `/` (server-rendered, vendored assets, no
+CDN; panels self-refresh via `hx-get` over `/ui/*`). See *Build / test / run* below.
+**M4** (self-managing fleet: enrollment + probe, presence ladder, signed self-update) is next.
 
 ## CRITICAL: keep it domain-agnostic
 
@@ -100,9 +101,9 @@ docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine
 cd server
 uv venv && uv pip install -e ".[dev]"
 uv run pytest                 # contract conformance + submit/poll API + sync plane + fleet
-uv run cbk-server             # serve async job API + sync /v1/chat/completions
+uv run cbk-server             # async job API + sync /v1/chat/completions + dashboard at /
                               #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
-                              #    CBK_CLOUD_FALLBACK_MODEL — sync cloud fallback, default off)
+                              #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY)
 
 # --- worker (C#/.NET) ---
 cd worker

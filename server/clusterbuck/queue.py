@@ -58,5 +58,18 @@ class Queue:
         raw = await self._r.get(result_key)
         return json.loads(raw) if raw is not None else None
 
+    async def depth(self, capability: str, group: str) -> dict[str, int]:
+        """Per-capability queue stats: total entries, pending (claimed, unacked), consumers."""
+        key = stream_key(capability)
+        entries = await self._r.xlen(key)
+        pending, consumers = 0, 0
+        try:
+            summary = await self._r.xpending(key, group)
+            pending = int(summary["pending"]) if summary else 0
+            consumers = len(await self._r.xinfo_consumers(key, group))
+        except redis.ResponseError:
+            pass  # no group yet
+        return {"depth": entries, "pending": pending, "consumers": consumers}
+
     async def aclose(self) -> None:
         await self._r.aclose()

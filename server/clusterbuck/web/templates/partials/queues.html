@@ -1,0 +1,19 @@
+<h2>Queues</h2>
+{% if rows %}
+<table>
+  <tr><th>capability</th><th class="n">depth</th><th class="n">pending</th><th class="n">consumers</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td>{{ r.capability }}</td>
+    <td class="n">{{ r.depth }}</td>
+    <td class="n">{{ r.pending }}</td>
+    <td class="n">
+      {% if r.consumers %}<span class="pill ok">{{ r.consumers }} live</span>
+      {% else %}<span class="pill warn">asleep</span>{% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">no capabilities configured</p>
+{% endif %}

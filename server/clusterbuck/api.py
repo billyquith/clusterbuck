@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .background import coordinator_loop
 from .config import settings
@@ -27,6 +28,7 @@ from .store import Store
 from .sync import build_router, sync_routes
 from .usage import build_usage_summary
 from .wake import WakeCoordinator
+from .web import WEB_DIR, web_routes
 
 # Terminal statuses live in the result blob; anything else is queue state.
 _TERMINAL = {"done", "failed", "expired"}
@@ -101,6 +103,8 @@ def create_app(
 
     app = FastAPI(title="clusterbuck server", version="0.0.1", lifespan=lifespan)
     app.include_router(sync_routes)
+    app.include_router(web_routes)
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -127,6 +131,16 @@ def create_app(
     async def get_usage() -> dict:
         """Metering rollups + the avoided-cloud-spend headline (fleet-management → Usage)."""
         return build_usage_summary(app.state.store, settings.cloud_budget_monthly)
+
+    @app.get("/queues")
+    async def get_queues() -> dict:
+        """Per-capability queue depth / pending / live consumers."""
+        fleet = app.state.fleet
+        out = []
+        for cap in (fleet.capabilities if fleet else {}):
+            stats = await app.state.queue.depth(cap, settings.consumer_group)
+            out.append({"capability": cap, "queue": f"q:{cap}", **stats})
+        return {"queues": out}
 
     @app.post("/jobs", status_code=202)
     async def submit_job(body: JobSubmit) -> JSONResponse:
@@ -275,6 +289,11 @@ def create_app(
         if decision.status == "declined":
             content["reason"] = decision.reason
         return JSONResponse(status_code=201, content=content)
+
+    @app.get("/reservations")
+    async def list_reservations() -> dict:
+        rows = app.state.store.list_reservations()
+        return {"reservations": [_reservation_view(r) for r in rows]}
 
     @app.get("/reservations/{rsv_id}")
     async def get_reservation(rsv_id: str) -> dict:

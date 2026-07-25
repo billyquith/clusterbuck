@@ -171,6 +171,12 @@ class Store:
         with self._conn() as c:
             return c.execute("SELECT * FROM reservations WHERE id = ?", (id,)).fetchone()
 
+    def list_reservations(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM reservations ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+
     def active_reservations(self) -> list[sqlite3.Row]:
         """Confirmed reservations still in a live lifecycle state (for the reconciler)."""
         with self._conn() as c:

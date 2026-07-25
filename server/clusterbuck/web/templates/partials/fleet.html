@@ -1,0 +1,19 @@
+<h2>Fleet</h2>
+{% if caps %}
+<table>
+  <tr><th>capability</th><th>queue</th><th>model</th></tr>
+  {% for c in caps %}
+  <tr><td>{{ c.name }}</td><td>{{ c.queue }}</td><td>{{ c.model }}</td></tr>
+  {% endfor %}
+</table>
+{% if nodes %}
+<table style="margin-top:.9rem">
+  <tr><th>node</th><th>wake</th><th>capabilities</th></tr>
+  {% for n in nodes %}
+  <tr><td>{{ n.id }}</td><td><span class="pill">{{ n.wake }}</span></td><td>{{ n.capabilities }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% else %}
+<p class="empty">no fleet.yaml loaded</p>
+{% endif %}
