@@ -29,7 +29,9 @@ def test_mint_enroll_heartbeat_list(client):
                      json={"mode": "away", "loaded": ["qwen2.5:32b"]},
                      headers={"x-cbk-node-key": node_key})
     assert hb.status_code == 200
-    assert hb.json() == {"update": None, "planner_notes": []}
+    body = hb.json()
+    assert body["update"] is None and body["planner_notes"] == []
+    assert body["action"] is None  # nothing approved to do
 
     assert client.post(f"/nodes/{node_id}/heartbeat", json={"mode": "away"},
                        headers={"x-cbk-node-key": "wrong"}).status_code == 401

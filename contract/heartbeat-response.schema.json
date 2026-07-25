@@ -11,6 +11,19 @@
       "type": ["object", "null"],
       "description": "null ⇒ up to date; otherwise an update-manifest (see §7)."
     },
+    "action": {
+      "type": ["object", "null"],
+      "description": "An approved model-management action for this node to execute, or null. Only ever issued for a proposal a human (or an explicit per-node auto_approve opt-in) has approved.",
+      "additionalProperties": false,
+      "required": ["proposal_id", "kind", "artifact", "source"],
+      "properties": {
+        "proposal_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["install", "remove"] },
+        "artifact": { "type": "string", "minLength": 1 },
+        "registry_ref": { "type": "string", "description": "What to ask the model manager to pull (install only)." },
+        "source": { "type": "string", "description": "Model-manager the action targets, e.g. \"ollama\"." }
+      }
+    },
     "planner_notes": {
       "type": "array",
       "items": { "type": "string" },

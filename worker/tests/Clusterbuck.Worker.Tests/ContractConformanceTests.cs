@@ -99,11 +99,28 @@ public sealed class ContractConformanceTests
         var hb = new HeartbeatRequest
         {
             Mode = "away", Installed = new() { "m" }, Loaded = new() { "m" },
+            Digests = new() { ["m"] = "sha256:abc" },
             Queues = new() { "q:8b-extract" },
             Stats = new HeartbeatStats { JobsDone = 1, Tps = 10 }, ProtocolVersion = 1,
+            ActionResult = new ActionResult { ProposalId = "prop_1", Ok = true },
         };
         var wire = JsonSerializer.Serialize(hb, CbkJsonContext.Default.HeartbeatRequest);
         Assert.True(Schema("heartbeat-request.schema.json").Evaluate(JsonNode.Parse(wire)).IsValid);
+    }
+
+    [Fact]
+    public void Worker_Parses_HeartbeatResponse_Action()
+    {
+        // The coordinator's approved-action instruction must round-trip into the worker's
+        // type — this is what drives M6c's install/remove execution.
+        var resp = JsonSerializer.Deserialize(
+            File.ReadAllText(Path.Combine(ContractDir, "examples", "heartbeat-response.valid.json")),
+            CbkJsonContext.Default.HeartbeatResponse)!;
+        Assert.NotNull(resp.Action);
+        Assert.Equal("install", resp.Action!.Kind);
+        Assert.Equal("qwen2.5:14b", resp.Action.Artifact);
+        Assert.Equal("ollama", resp.Action.Source);
+        Assert.NotEmpty(resp.PlannerNotes);
     }
 
     [Fact]

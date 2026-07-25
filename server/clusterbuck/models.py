@@ -140,6 +140,16 @@ class EnrollRequest(BaseModel):
     profile: Literal["dedicated", "shared", "background"]
 
 
+class ActionResult(BaseModel):
+    """Outcome of a model-management action (contract/heartbeat-request → action_result)."""
+
+    model_config = {"extra": "forbid"}
+
+    proposal_id: str
+    ok: bool
+    error: str | None = None
+
+
 class HeartbeatRequest(BaseModel):
     """Worker heartbeat — mirrors contract/heartbeat-request.schema.json."""
 
@@ -153,6 +163,7 @@ class HeartbeatRequest(BaseModel):
     queues: list[str] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
     protocol_version: int | None = None
+    action_result: ActionResult | None = None
 
 
 class JobRecord(BaseModel):

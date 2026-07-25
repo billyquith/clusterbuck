@@ -1,4 +1,11 @@
 {
   "update": null,
-  "planner_notes": ["queue q:32b-reason waited 40 min on average — consider away-mode ladder on node-b"]
+  "action": {
+    "proposal_id": "prop_4f2e5d118409",
+    "kind": "install",
+    "artifact": "qwen2.5:14b",
+    "registry_ref": "qwen2.5:14b",
+    "source": "ollama"
+  },
+  "planner_notes": ["queue q:32b-reason waited 40 min on average — consider the away-mode ladder"]
 }

@@ -18,7 +18,14 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .background import coordinator_loop
-from .catalog import propose_reeval, quota_for, scan_all, seed_catalog
+from .catalog import (
+    apply_action_result,
+    next_action,
+    propose_reeval,
+    quota_for,
+    scan_all,
+    seed_catalog,
+)
 from .config import settings
 from .coordinator import propose_capabilities
 from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
@@ -445,8 +452,15 @@ def create_app(
             if propose_reeval(store, node_id, artifact, old, new, now=now):
                 notes.append(f"{artifact} changed upstream — re-evaluation proposed")
 
+        # Close the loop on any action the previous response issued.
+        if body.action_result is not None:
+            notes += apply_action_result(store, node_id, body.action_result, now=now)
+
+        # Hand out the next approved action, if one is permitted in this presence mode.
+        action = next_action(store, store.get_node(node_id), mode=body.mode)
+
         # Self-update manifest delivery (M4c apply path) is deferred; see ADR 13.
-        return {"update": None, "planner_notes": notes}
+        return {"update": None, "action": action, "planner_notes": notes}
 
     @app.get("/updates/manifest")
     async def update_manifest(rid: str) -> dict:

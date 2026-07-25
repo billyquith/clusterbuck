@@ -54,11 +54,14 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         var loop = new WorkLoop(db, model, cfg, s => AnsiConsole.MarkupLineInterpolated($"[grey]{s}[/]"));
 
         var inventory = new ModelInventory(hbHttp, cfg.ModelServerUrl, cfg.ModelManager);
+        // Model pulls can take minutes; give them their own generous client.
+        using var mgrHttp = new HttpClient { Timeout = TimeSpan.FromHours(1) };
+        var manager = new ModelManager(mgrHttp, inventory.NativeBase, cfg.ModelManager);
 
         Task? heartbeat = null;
         if (state is not null && ladder is not null)
             heartbeat = HeartbeatLoop(new RegistryClient(hbHttp, state.Server), loop, ladder,
-                                      inventory, statePath, cfg, cts.Token);
+                                      inventory, manager, statePath, cfg, cts.Token);
 
         try
         {
@@ -80,8 +83,10 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
     /// the coordinator.</summary>
     private static async Task HeartbeatLoop(
         RegistryClient registry, WorkLoop loop, PresenceLadder ladder,
-        ModelInventory inventory, string statePath, WorkerConfig cfg, CancellationToken ct)
+        ModelInventory inventory, ModelManager manager, string statePath, WorkerConfig cfg,
+        CancellationToken ct)
     {
+        ActionResult? pendingResult = null;   // reported on the next beat, then cleared
         while (!ct.IsCancellationRequested)
         {
             try
@@ -98,15 +103,23 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
                     var installed = await inventory.InstalledAsync(ct);
                     var loaded = await inventory.LoadedAsync(ct);
                     var digests = await inventory.DigestsAsync(ct);
-                    await registry.HeartbeatAsync(s.NodeId, s.NodeKey, new HeartbeatRequest
-                    {
-                        Mode = effective,
-                        Installed = installed,
-                        Loaded = loaded,
-                        Digests = digests.Count > 0 ? digests : null,
-                        Queues = caps.Select(c => WorkLoop.StreamKey(c)).ToList(),
-                        ProtocolVersion = 1,
-                    }, ct);
+                    var resp = await registry.HeartbeatAsync(s.NodeId, s.NodeKey,
+                        new HeartbeatRequest
+                        {
+                            Mode = effective,
+                            Installed = installed,
+                            Loaded = loaded,
+                            Digests = digests.Count > 0 ? digests : null,
+                            Queues = caps.Select(c => WorkLoop.StreamKey(c)).ToList(),
+                            ProtocolVersion = 1,
+                            ActionResult = pendingResult,
+                        }, ct);
+                    pendingResult = null;   // reported; don't repeat it
+
+                    // Execute an approved model-management action, if one was issued. The
+                    // worker never decides this — it only carries out an approved proposal.
+                    if (resp.Action is { } action)
+                        pendingResult = await ExecuteActionAsync(manager, action, ct);
                 }
             }
             catch (OperationCanceledException) { break; }
@@ -115,5 +128,24 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
             try { await Task.Delay(cfg.HeartbeatMs, ct); }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>Carry out one approved install/remove and report the outcome.</summary>
+    private static async Task<ActionResult> ExecuteActionAsync(
+        ModelManager manager, ModelAction action, CancellationToken ct)
+    {
+        AnsiConsole.MarkupLineInterpolated(
+            $"[grey]model {action.Kind}: {action.Artifact} (proposal {action.ProposalId})[/]");
+        var (ok, error) = action.Kind switch
+        {
+            "install" => await manager.InstallAsync(action.RegistryRef ?? action.Artifact, ct),
+            "remove" => await manager.RemoveAsync(action.Artifact, ct),
+            _ => (false, $"unknown action kind '{action.Kind}'"),
+        };
+        if (ok)
+            AnsiConsole.MarkupLineInterpolated($"[green]model {action.Kind} ok:[/] {action.Artifact}");
+        else
+            AnsiConsole.MarkupLineInterpolated($"[red]model {action.Kind} failed:[/] {error}");
+        return new ActionResult { ProposalId = action.ProposalId, Ok = ok, Error = error };
     }
 }

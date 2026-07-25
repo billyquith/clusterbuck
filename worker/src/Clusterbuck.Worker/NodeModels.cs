@@ -54,12 +54,32 @@ public sealed record HeartbeatRequest
     [JsonPropertyName("queues")] public List<string> Queues { get; init; } = new();
     [JsonPropertyName("stats")] public HeartbeatStats Stats { get; init; } = new();
     [JsonPropertyName("protocol_version")] public int? ProtocolVersion { get; init; }
+    [JsonPropertyName("action_result")] public ActionResult? ActionResult { get; init; }
+}
+
+/// <summary>An approved model-management action issued by the coordinator.</summary>
+public sealed record ModelAction
+{
+    [JsonPropertyName("proposal_id")] public string ProposalId { get; init; } = "";
+    [JsonPropertyName("kind")] public string Kind { get; init; } = "";
+    [JsonPropertyName("artifact")] public string Artifact { get; init; } = "";
+    [JsonPropertyName("registry_ref")] public string? RegistryRef { get; init; }
+    [JsonPropertyName("source")] public string Source { get; init; } = "";
+}
+
+/// <summary>Outcome the worker reports back on the next heartbeat.</summary>
+public sealed record ActionResult
+{
+    [JsonPropertyName("proposal_id")] public string ProposalId { get; init; } = "";
+    [JsonPropertyName("ok")] public bool Ok { get; init; }
+    [JsonPropertyName("error")] public string? Error { get; init; }
 }
 
 /// <summary>Heartbeat response the worker parses (contract/heartbeat-response.schema.json).</summary>
 public sealed record HeartbeatResponse
 {
     [JsonPropertyName("update")] public JsonElement? Update { get; init; }
+    [JsonPropertyName("action")] public ModelAction? Action { get; init; }
     [JsonPropertyName("planner_notes")] public List<string> PlannerNotes { get; init; } = new();
 }
 

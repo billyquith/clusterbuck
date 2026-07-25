@@ -17,6 +17,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+# Model ids whose pull should fail, so failure handling is testable too (--fail-pulls).
+FAIL_PULLS: set[str] = set()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:  # quiet
         pass
@@ -56,8 +60,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"ok")
 
+    def _read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        return json.loads(self.rfile.read(length) or "{}")
+
+    def do_DELETE(self) -> None:
+        # Ollama-native model removal, so the reclaim path is testable without Ollama.
+        if self.path.rstrip("/") == "/api/delete":
+            model = self._read_json().get("model")
+            if model in self.models:
+                self.models.remove(model)
+                if model in self.loaded_models:
+                    self.loaded_models.remove(model)
+                self._json({"status": "success"})
+            else:
+                self.send_error(404, "model not found")
+            return
+        self.send_error(404, "not found")
+
     def do_POST(self) -> None:
-        if self.path.rstrip("/") != "/v1/chat/completions":
+        path = self.path.rstrip("/")
+        # Ollama-native model install, so the approved-pull path is testable without Ollama.
+        if path == "/api/pull":
+            model = self._read_json().get("model")
+            if not model:
+                self._json({"error": "no model given"})
+                return
+            if model in FAIL_PULLS:
+                self._json({"error": f"simulated pull failure for {model}"})
+                return
+            if model not in self.models:
+                self.models.append(model)
+            self._json({"status": "success"})
+            return
+        if path != "/v1/chat/completions":
             self.send_error(404, "not found")
             return
 
@@ -107,9 +143,12 @@ def main() -> None:
                     help="comma-separated model ids to advertise on /v1/models")
     ap.add_argument("--loaded", default="",
                     help="comma-separated model ids to report warm on /api/ps")
+    ap.add_argument("--fail-pulls", default="",
+                    help="comma-separated model ids whose /api/pull should fail")
     args = ap.parse_args()
     Handler.models = [m for m in args.models.split(",") if m]
     Handler.loaded_models = [m for m in args.loaded.split(",") if m]
+    FAIL_PULLS.update(m for m in args.fail_pulls.split(",") if m)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"fake model server on http://{args.host}:{args.port}/v1/chat/completions")
     server.serve_forever()

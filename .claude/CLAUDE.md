@@ -29,6 +29,15 @@ cross-language contract. Milestones:
   P-256 verify + skew gate, ADR 13).
 - **M5 — optimisation:** ability matrix (ADR 15) + tier-1 programmatic eval + need-shaped
   ability routing (ADR 16), with `/ability`.
+- **M6 — model management (ADR 25):** workers **discover** their models over the generic
+  OpenAI `/v1/models` (portable; filesystem scanning deliberately not primary) and report
+  installed/loaded/digests; the coordinator holds a **model catalog** and raises
+  **proposals** (upgrade / re-eval on digest change / reclaim) through three gates — fits
+  (RAM + the owner's disk quota) → beats the incumbent's measured ability → **human
+  approval** (per-node `auto_approve` is opt-in; reclaim is never auto-approved); an
+  approved action is executed by the worker via a per-server **model-manager adapter**
+  (Ollama), presence-gated so no multi-GB pull lands under an active owner. A fresh install
+  or changed digest **never inherits** an ability score — it demands re-measurement.
 
 A single coordinator loop runs the escalation / reservation / attention / usage ticks.
 Deliberately deferred (needs real hardware, a judge model, real usage data, or multi-node —
@@ -130,6 +139,8 @@ bash deploy/e2e/reservation.sh    # M2b: reservation confirmed → warming → o
 bash deploy/e2e/usage.sh          # M3a: completed job metered; avoided-cloud-spend > 0
 bash deploy/e2e/enroll.sh         # M4b: enroll → registry → heartbeat → pause
 bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} routing
+bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not config
+bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

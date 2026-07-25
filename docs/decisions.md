@@ -288,3 +288,30 @@ revisit when a single warm node routinely has mixed-urgency backlog contending.
 **Considered:** tiered streams now (topology + worker churn, low payoff at this scale);
 a Redis sorted-set priority queue (abandons the Streams reliability primitives ADR 20
 adopted); reordering in the worker (can't — it can't see the whole stream cheaply).
+
+## 25. Model discovery is API-first; installation needs a vendor adapter
+**Decision:** a worker learns its **installed** models from the **generic OpenAI
+`GET /v1/models`** endpoint (which Ollama, LM Studio, vLLM and llama.cpp-server all serve),
+*not* by scanning vendor model directories. **Installing/removing** a model, however, has
+no OpenAI-standard equivalent, so it lives behind a small pluggable **model-manager
+adapter** (`ollama` today; `none` = manual), kept strictly separate from the inference path.
+`loaded` (warm now) and per-artifact **digests** also need the adapter and degrade to
+"unknown" without it.
+**Why:** discovery over the documented wire protocol keeps one portable code path and
+honours the no-vendor-SDK rule (ADR 8, protocols.md §3). Filesystem scanning is *worse*
+coupling than an SDK — Ollama's store is a content-addressed blob dir with manifests, an
+undocumented internal layout that can change, and a blob the running server hasn't
+registered isn't servable anyway. Installation is the honest exception: "pull a model" is
+inherently vendor-specific (Ollama `POST /api/pull`; llama.cpp has no concept of it; vLLM
+fetches at launch), so rather than pretend otherwise we isolate it in one swappable seam and
+keep the hot path vendor-neutral.
+**Consequences:** the coordinator **decides** (it holds the catalog, ability matrix, demand
+and budget) and the worker only **executes** an approved action — keeping the worker lean
+(ADR 19) and policy centralised. Because ability is pinned to an artifact (ADR 15), a
+changed digest or a fresh install means the stored score is **not** inherited: it earns a
+re-measurement. Installs are quota-bounded (the owner's disk contract, ADR 10) and
+presence-gated (no multi-GB transfer under an active owner); reclaim proposals exist so
+install and GC ship together, and reclaim is **never** auto-approved.
+**Considered:** filesystem scanning as primary (undocumented layouts, unservable blobs);
+requiring the operator to hand-list models forever (the hostility ADR 9 rejects); putting
+install decisions in the worker (duplicates catalog/ability state on every node).

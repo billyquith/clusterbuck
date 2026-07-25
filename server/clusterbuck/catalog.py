@@ -42,6 +42,10 @@ RECLAIM_UNUSED_DAYS = 30
 # Generic seed catalog: widely-available open models, described only by their public
 # metadata. Sizes/RAM floors are approximate 4-bit-class figures for planning, not promises.
 SEED_CATALOG = [
+    # A sub-1B entry matters on RAM-tight nodes, where nothing larger fits at all.
+    {"artifact": "qwen2.5:0.5b", "family": "qwen2.5", "params_b": 0.5, "quant": "Q4_K_M",
+     "size_gb": 0.4, "min_ram_gb": 2.0, "source": "ollama", "registry_ref": "qwen2.5:0.5b",
+     "expected_ability": 2.0},
     {"artifact": "llama3.2:3b", "family": "llama3.2", "params_b": 3.0, "quant": "Q4_K_M",
      "size_gb": 2.0, "min_ram_gb": 8.0, "source": "ollama", "registry_ref": "llama3.2:3b",
      "expected_ability": 4.0},
@@ -162,19 +166,84 @@ def scan_node(store: Store, node, *, now: str, scale_version: str = SCALE_VERSIO
 
 def propose_reeval(store: Store, node_id: str, artifact: str, old: str | None,
                    new: str | None, *, now: str) -> str | None:
-    """A digest change means a new artifact — its stored ability is stale (ADR 15)."""
+    """Flag an artifact as needing measurement (ADR 15).
+
+    Two callers: a digest change (same name, new artifact ⇒ stored score is stale), and a
+    fresh install (never measured here). Both mean "do not trust an inherited number".
+    """
     if store.open_proposal_exists(kind="reeval", node_id=node_id, artifact=artifact):
         return None
+    if old and new:
+        why = (f"{artifact} changed upstream ({old[:19]}… → {new[:19]}…). Ability is pinned "
+               f"to an artifact, so the stored score is stale and must be re-measured "
+               f"rather than inherited.")
+    else:
+        why = (f"{artifact} was just installed and has no measured ability on this scale; "
+               f"run the task-class suite before routing depends on it.")
     pid = _new_id()
     store.insert_proposal(
         id=pid, kind="reeval", node_id=node_id, artifact=artifact, incumbent=None,
-        task_class=None, status="pending", created_at=now,
-        rationale=(f"{artifact} changed upstream ({(old or '?')[:19]}… → {(new or '?')[:19]}…). "
-                   f"Ability is pinned to an artifact, so the stored score is stale and must "
-                   f"be re-measured rather than inherited."),
+        task_class=None, status="pending", created_at=now, rationale=why,
     )
-    _log.info("reeval proposed for %s on %s (digest changed)", artifact, node_id)
+    _log.info("reeval proposed for %s on %s", artifact, node_id)
     return pid
+
+
+def install_allowed(mode: str, profile: str | None) -> bool:
+    """Whether a multi-GB transfer is acceptable right now.
+
+    A dedicated machine exists to serve, so anytime. On a machine someone uses, pull only
+    while they're `away` — saturating the network/disk under an active owner is exactly the
+    rudeness ADR 10 exists to prevent. `paused` means the owner opted out: nothing.
+    """
+    if profile == "dedicated":
+        return mode != "paused"
+    return mode == "away"
+
+
+def next_action(store: Store, node, *, mode: str) -> dict | None:
+    """The next approved action this node should carry out, if any is permitted now."""
+    node_id = node["node_id"]
+
+    # Removals are cheap and free disk — allowed in any non-paused mode.
+    if mode != "paused":
+        for prop in store.approved_proposals_for_node(node_id, "reclaim"):
+            return {"proposal_id": prop["id"], "kind": "remove",
+                    "artifact": prop["artifact"], "source": "ollama"}
+
+    if not install_allowed(mode, node["profile"]):
+        return None
+    for prop in store.approved_proposals_for_node(node_id, "upgrade"):
+        cand = next((c for c in store.list_catalog() if c["artifact"] == prop["artifact"]), None)
+        if cand is None:
+            continue
+        return {"proposal_id": prop["id"], "kind": "install",
+                "artifact": prop["artifact"], "registry_ref": cand["registry_ref"],
+                "source": cand["source"]}
+    return None
+
+
+def apply_action_result(store: Store, node_id: str, result, *, now: str) -> list[str]:
+    """Record an action's outcome. A successful install leaves the artifact's ability
+    UNKNOWN, so it earns a re-eval proposal rather than inheriting anyone's score."""
+    notes: list[str] = []
+    prop = store.get_proposal(result.proposal_id)
+    if prop is None:
+        return notes
+    if not result.ok:
+        store.set_proposal_status(prop["id"], "failed")
+        notes.append(f"{prop['artifact']}: {prop['kind']} failed — {result.error}")
+        _log.warning("action %s failed on %s: %s", prop["id"], node_id, result.error)
+        return notes
+
+    store.set_proposal_status(prop["id"], "applied")
+    notes.append(f"{prop['artifact']}: {prop['kind']} applied")
+    if prop["kind"] == "upgrade":
+        # Newly installed ⇒ unmeasured on this scale. Flag it for measurement; running the
+        # tier-1 suite as ordinary jobs (model-evaluation.md) is the next step.
+        if propose_reeval(store, node_id, prop["artifact"], None, None, now=now):
+            notes.append(f"{prop['artifact']}: ability unmeasured — evaluation proposed")
+    return notes
 
 
 def scan_all(store: Store, *, now: str) -> list[str]:
