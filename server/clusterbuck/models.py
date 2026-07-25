@@ -53,6 +53,7 @@ class JobSubmit(BaseModel):
     deadline: str | None = None
     callback_url: str | None = None
     reservation: str | None = None  # opt-in reservation id to queue against (§8)
+    client_key: str | None = None  # optional client identity (attention scoping, §9)
 
     @model_validator(mode="after")
     def _check(self) -> "JobSubmit":
@@ -101,6 +102,17 @@ class ReservationSubmit(BaseModel):
             if not (hh.isdigit() and mm.isdigit() and 0 <= int(hh) < 24 and 0 <= int(mm) < 60):
                 raise ValueError("window.start must be 'asap' or 'HH:MM'")
         return self
+
+
+class AttentionRequest(BaseModel):
+    """Client attention signal (protocols.md §9). Server-only ⇒ not in contract/."""
+
+    model_config = {"extra": "forbid"}
+
+    client_key: str
+    state: Literal["active", "idle"] = "active"
+    scope: list[str] | None = None  # task-class filter; null = all
+    ttl_s: int = Field(default=600, ge=1)
 
 
 class HwProbe(BaseModel):

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from .attention import attention_tick
 from .escalation import escalation_scan
 from .fleet import Fleet
 from .queue import Queue
@@ -36,6 +37,7 @@ async def coordinator_loop(
         try:
             await escalation_scan(store, queue, wake)
             await reservation_tick(store, wake)
+            await attention_tick(store, queue)
             await usage_scan(store, queue, fleet)
         except Exception:  # a tick failure must not kill the loop
             _log.exception("coordinator tick failed")

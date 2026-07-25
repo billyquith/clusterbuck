@@ -11,6 +11,10 @@ import json
 import os
 from pathlib import Path
 
+# Keep any Wake-on-LAN broadcasts during tests on loopback (harmless), set before the
+# clusterbuck package (and its frozen Settings) is first imported by a fixture.
+os.environ.setdefault("CBK_WOL_BROADCAST", "127.0.0.1")
+
 import pytest
 
 CONTRACT_DIR = Path(__file__).resolve().parents[2] / "contract"

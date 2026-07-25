@@ -23,6 +23,7 @@ from .coordinator import propose_capabilities, resolve_capability
 from .fleet import load_fleet
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
 from .models import (
+    AttentionRequest,
     EnrollRequest,
     HeartbeatRequest,
     JobRecord,
@@ -49,6 +50,10 @@ _log = logging.getLogger("clusterbuck")
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _now_iso_at(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def create_app(
@@ -154,6 +159,39 @@ def create_app(
             out.append({"capability": cap, "queue": f"q:{cap}", **stats})
         return {"queues": out}
 
+    @app.post("/attention")
+    async def attention(body: AttentionRequest) -> dict:
+        """A client's user became active (or went idle) — heat up / cool down its backlog."""
+        store = app.state.store
+        if body.state == "idle":
+            # End the lease early: demote this client's unstarted attention-promotions.
+            for job in store.attention_promoted_jobs(body.client_key):
+                if await app.state.queue.read_result(job["result_key"]) is None:
+                    store.demote_job(job["id"])
+            store.delete_attention_lease(body.client_key)
+            return {"promoted": 0, "prewarm": [], "lease_expires": None}
+
+        affected = store.attention_promote(body.client_key, body.scope)
+        expires_at = datetime.now(timezone.utc).timestamp() + body.ttl_s
+        store.upsert_attention_lease(
+            body.client_key, json.dumps(body.scope) if body.scope else None, expires_at,
+        )
+
+        # Promotion grants wake rights; pre-warm the artifacts the backlog needs.
+        fleet = app.state.fleet
+        caps = {r["capability"] for r in affected}
+        prewarm = []
+        for cap in caps:
+            await app.state.wake.maybe_wake(cap, reason=f"attention:{body.client_key}")
+            if fleet and cap in fleet.capabilities:
+                prewarm.append(fleet.capabilities[cap].model)
+
+        return {
+            "promoted": len(affected),
+            "prewarm": sorted(set(prewarm)),
+            "lease_expires": _now_iso_at(expires_at),
+        }
+
     @app.post("/jobs", status_code=202)
     async def submit_job(body: JobSubmit) -> JSONResponse:
         # A reservation, if named, must exist and be confirmed. It does NOT override
@@ -211,6 +249,8 @@ def create_app(
             escalate_at=escalate_at,
             reservation=body.reservation,
             deadline_epoch=deadline_epoch,
+            client_key=body.client_key,
+            task_class=body.task_class,
         )
         await app.state.queue.enqueue(record.to_wire())
 

@@ -22,7 +22,18 @@ CREATE TABLE IF NOT EXISTS jobs (
     escalate_at  REAL,            -- epoch seconds; only set for waitable(N)
     escalated    INTEGER NOT NULL DEFAULT 0,
     reservation  TEXT,            -- opt-in reservation id this job queues against
-    deadline_epoch REAL           -- epoch seconds; for expiry sweep
+    deadline_epoch REAL,          -- epoch seconds; for expiry sweep
+    client_key   TEXT,            -- optional client identity (for attention scoping)
+    task_class   TEXT,            -- need-shaped task class (for attention scoping)
+    promoted_by  TEXT             -- null | 'age' | 'attention' (escalation provenance)
+);
+
+-- Client attention leases (ADR 18 / protocols §9): a client's active-user signal that
+-- promotes its waitable backlog; expiry demotes the unstarted promotions gracefully.
+CREATE TABLE IF NOT EXISTS attention_leases (
+    client_key  TEXT PRIMARY KEY,
+    scope       TEXT,             -- json array of task_class, or null (all)
+    expires_at  REAL NOT NULL
 );
 
 -- Dynamic registry (ADR 9): nodes self-enroll and heartbeat; fleet.yaml is only the seed.
@@ -93,6 +104,9 @@ _MIGRATIONS = {
     "escalated": "ALTER TABLE jobs ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0",
     "reservation": "ALTER TABLE jobs ADD COLUMN reservation TEXT",
     "deadline_epoch": "ALTER TABLE jobs ADD COLUMN deadline_epoch REAL",
+    "client_key": "ALTER TABLE jobs ADD COLUMN client_key TEXT",
+    "task_class": "ALTER TABLE jobs ADD COLUMN task_class TEXT",
+    "promoted_by": "ALTER TABLE jobs ADD COLUMN promoted_by TEXT",
 }
 
 
@@ -127,15 +141,17 @@ class Store:
         escalate_at: float | None = None,
         reservation: str | None = None,
         deadline_epoch: float | None = None,
+        client_key: str | None = None,
+        task_class: str | None = None,
     ) -> None:
         with self._conn() as c:
             c.execute(
                 "INSERT INTO jobs "
                 "(id, result_key, capability, status, created_at, urgency, escalate_at, "
-                "reservation, deadline_epoch) "
-                "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
+                "reservation, deadline_epoch, client_key, task_class) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
                 (id, result_key, capability, created_at, urgency, escalate_at,
-                 reservation, deadline_epoch),
+                 reservation, deadline_epoch, client_key, task_class),
             )
 
     def get(self, id: str) -> sqlite3.Row | None:
@@ -163,12 +179,73 @@ class Store:
             return cur.fetchall()
 
     def mark_escalated(self, id: str) -> None:
-        """Promote waitable → necessary (records the trajectory change)."""
+        """Promote waitable → necessary on age (records the trajectory + provenance)."""
         with self._conn() as c:
             c.execute(
-                "UPDATE jobs SET urgency = 'necessary', escalated = 1 WHERE id = ?",
+                "UPDATE jobs SET urgency = 'necessary', escalated = 1, promoted_by = 'age' "
+                "WHERE id = ?",
                 (id,),
             )
+
+    # --- client attention (M4a) ---
+
+    def attention_promote(self, client_key: str, scope: list[str] | None) -> list[sqlite3.Row]:
+        """Promote a client's waitable backlog to necessary. Returns the affected rows."""
+        params: list = [client_key]
+        scope_sql = ""
+        if scope:
+            scope_sql = f" AND task_class IN ({','.join('?' * len(scope))})"
+            params += scope
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id, capability FROM jobs WHERE client_key = ? "
+                "AND urgency = 'waitable' AND escalated = 0" + scope_sql,
+                params,
+            ).fetchall()
+            ids = [r["id"] for r in rows]
+            if ids:
+                c.execute(
+                    f"UPDATE jobs SET urgency = 'necessary', escalated = 1, "
+                    f"promoted_by = 'attention' WHERE id IN ({','.join('?' * len(ids))})",
+                    ids,
+                )
+            return rows
+
+    def attention_promoted_jobs(self, client_key: str) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT id, result_key FROM jobs "
+                "WHERE client_key = ? AND promoted_by = 'attention'",
+                (client_key,),
+            ).fetchall()
+
+    def demote_job(self, id: str) -> None:
+        """Return an attention-promoted job to waitable (lease lapsed, still unstarted)."""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE jobs SET urgency = 'waitable', escalated = 0, promoted_by = NULL "
+                "WHERE id = ?",
+                (id,),
+            )
+
+    def upsert_attention_lease(self, client_key: str, scope: str | None, expires_at: float) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO attention_leases (client_key, scope, expires_at) VALUES (?,?,?) "
+                "ON CONFLICT(client_key) DO UPDATE SET scope = excluded.scope, "
+                "expires_at = excluded.expires_at",
+                (client_key, scope, expires_at),
+            )
+
+    def delete_attention_lease(self, client_key: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM attention_leases WHERE client_key = ?", (client_key,))
+
+    def expired_attention_leases(self, now: float) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT client_key FROM attention_leases WHERE expires_at <= ?", (now,)
+            ).fetchall()
 
     # --- reservations (M2b) ---
 
