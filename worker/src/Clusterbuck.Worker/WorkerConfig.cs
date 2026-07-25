@@ -13,6 +13,9 @@ public sealed record WorkerConfig
     public int PollMs { get; init; } = 1000;
     public int ResultTtlSeconds { get; init; } = 86400;
     public int HeartbeatMs { get; init; } = 10000;
+    /// <summary>Which model-manager adapter to use for the non-OpenAI bits (loaded state,
+    /// digests, installs): auto | ollama | none. `none` = discovery via /v1/models only.</summary>
+    public string ModelManager { get; init; } = "auto";
 
     public static WorkerConfig FromEnvironment()
     {
@@ -34,6 +37,7 @@ public sealed record WorkerConfig
             PollMs = int.TryParse(Env("CBK_POLL_MS"), out var p) ? p : 1000,
             ResultTtlSeconds = int.TryParse(Env("CBK_RESULT_TTL_S"), out var t) ? t : 86400,
             HeartbeatMs = int.TryParse(Env("CBK_HEARTBEAT_MS"), out var h) ? h : 10000,
+            ModelManager = Env("CBK_MODEL_MANAGER") ?? "auto",
         };
     }
 

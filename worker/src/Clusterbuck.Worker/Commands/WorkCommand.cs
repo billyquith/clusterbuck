@@ -53,10 +53,12 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         var model = new ModelClient(http, cfg);
         var loop = new WorkLoop(db, model, cfg, s => AnsiConsole.MarkupLineInterpolated($"[grey]{s}[/]"));
 
+        var inventory = new ModelInventory(hbHttp, cfg.ModelServerUrl, cfg.ModelManager);
+
         Task? heartbeat = null;
         if (state is not null && ladder is not null)
             heartbeat = HeartbeatLoop(new RegistryClient(hbHttp, state.Server), loop, ladder,
-                                      statePath, cfg, cts.Token);
+                                      inventory, statePath, cfg, cts.Token);
 
         try
         {
@@ -74,10 +76,11 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
     }
 
     /// <summary>Periodic heartbeat: re-read the persisted mode, drive the ladder (which
-    /// resubscribes capabilities and toggles pause), and report to the coordinator.</summary>
+    /// resubscribes capabilities and toggles pause), take a model inventory, and report to
+    /// the coordinator.</summary>
     private static async Task HeartbeatLoop(
         RegistryClient registry, WorkLoop loop, PresenceLadder ladder,
-        string statePath, WorkerConfig cfg, CancellationToken ct)
+        ModelInventory inventory, string statePath, WorkerConfig cfg, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -90,9 +93,15 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
                     loop.Paused = effective == "paused";
                     await loop.SetCapabilitiesAsync(ladder.Capabilities());
                     var caps = ladder.Capabilities();
+                    // Observed reality, not configuration: what this node's model server
+                    // actually has, and what is warm right now.
+                    var installed = await inventory.InstalledAsync(ct);
+                    var loaded = await inventory.LoadedAsync(ct);
                     await registry.HeartbeatAsync(s.NodeId, s.NodeKey, new HeartbeatRequest
                     {
                         Mode = effective,
+                        Installed = installed,
+                        Loaded = loaded,
                         Queues = caps.Select(c => WorkLoop.StreamKey(c)).ToList(),
                         ProtocolVersion = 1,
                     }, ct);

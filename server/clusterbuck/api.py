@@ -462,7 +462,10 @@ def create_app(
                 "os": n["os"], "arch": n["arch"], "profile": n["profile"],
                 "ram_gb": n["ram_gb"], "accelerator": n["accelerator"],
                 "capabilities": json.loads(n["capabilities"] or "[]"),
-                "mode": n["mode"], "loaded": json.loads(n["loaded"] or "[]"),
+                "mode": n["mode"],
+                # Observed from the node's model server, not configured (M6a).
+                "installed": json.loads(n["installed"] or "[]"),
+                "loaded": json.loads(n["loaded"] or "[]"),
                 "last_heartbeat": n["last_heartbeat"],
             }
         return {"nodes": [view(n) for n in app.state.store.list_nodes()]}

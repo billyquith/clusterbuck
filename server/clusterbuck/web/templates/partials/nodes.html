@@ -1,7 +1,7 @@
 <h2>Enrolled nodes</h2>
 {% if nodes %}
 <table>
-  <tr><th>node</th><th>mode</th><th>loaded</th><th>capabilities</th></tr>
+  <tr><th>node</th><th>mode</th><th>models (installed / warm)</th><th>capabilities</th></tr>
   {% for n in nodes %}
   <tr>
     <td>{{ n.id }}<br><span class="sub" style="color:var(--muted);font-size:.75rem">{{ n.host }}</span></td>
@@ -10,7 +10,10 @@
       {% elif n.mode == "away" %}<span class="pill ok">away</span>
       {% else %}<span class="pill warn">{{ n.mode }}</span>{% endif %}
     </td>
-    <td>{{ n.loaded or "—" }}</td>
+    <td>
+      {{ n.installed or "—" }}
+      {% if n.loaded %}<br><span class="pill ok">warm: {{ n.loaded }}</span>{% endif %}
+    </td>
     <td>{{ n.caps }}</td>
   </tr>
   {% endfor %}

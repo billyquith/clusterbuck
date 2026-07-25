@@ -87,10 +87,13 @@ async def ui_nodes(request: Request) -> HTMLResponse:
 
     nodes = []
     for n in request.app.state.store.list_nodes():
+        installed = _json.loads(n["installed"] or "[]")
         nodes.append({
             "id": n["node_id"], "host": n["hostname"], "mode": n["mode"],
             "caps": ", ".join(_json.loads(n["capabilities"] or "[]")),
             "loaded": ", ".join(_json.loads(n["loaded"] or "[]")),
+            "installed": ", ".join(installed),
+            "n_installed": len(installed),
             "seen": (n["last_heartbeat"] or "—"),
         })
     return templates.TemplateResponse(request, "partials/nodes.html", {"nodes": nodes})
