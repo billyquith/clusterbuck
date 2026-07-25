@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Clusterbuck.Worker/Clusterbuck.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Clusterbuck.Worker.Tests/Clusterbuck.Worker.Tests.csproj" />
+  </Folder>
+</Solution>

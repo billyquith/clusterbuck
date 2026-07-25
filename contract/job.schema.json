@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusterbuck.dev/contract/job.schema.json",
+  "title": "Job",
+  "description": "An enqueued clusterbuck job record — the payload the server (Python) writes onto a capability stream and the worker (C#) consumes. This is the cross-language seam (protocols.md §2); addressing has already been resolved to a concrete `capability` before enqueue.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "created_at",
+    "capability",
+    "params",
+    "urgency",
+    "privacy",
+    "result_key",
+    "attempts",
+    "max_attempts"
+  ],
+  "anyOf": [
+    { "required": ["messages"] },
+    { "required": ["prompt"] }
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque job id, e.g. \"job_01H…\"."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of submission."
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Resolved supply-side capability tier, e.g. \"8b-extract\". Names the queue `q:<capability>`. The coordinator resolves task_class+min_ability to this before enqueue."
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "description": "OpenAI-style chat messages. Present unless `prompt` is used.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "content"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["system", "user", "assistant"]
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Plain-text prompt. Alternative to `messages`."
+    },
+    "params": {
+      "type": "object",
+      "description": "Inference parameters passed through to the model server.",
+      "additionalProperties": true,
+      "properties": {
+        "temperature": { "type": "number", "minimum": 0 },
+        "max_tokens": { "type": "integer", "minimum": 1 },
+        "response_format": {
+          "type": "string",
+          "description": "Hint only; local model servers do not reliably honour structured-output flags (protocols.md §3). JSON shape is requested in the prompt and validated by the client."
+        }
+      }
+    },
+    "urgency": {
+      "type": "string",
+      "enum": ["urgent", "necessary", "waitable"],
+      "description": "A trajectory, not a static label (ADR 18). Carries wake rights."
+    },
+    "escalate_after_min": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "waitable only: patience bound (not a delay). Unserved after N minutes it escalates to necessary."
+    },
+    "privacy": {
+      "type": "string",
+      "enum": ["local_only", "cloud_ok"],
+      "default": "local_only",
+      "description": "local_only NEVER routes off-LAN, at any urgency (ADR 14)."
+    },
+    "deadline": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Optional hard expiry."
+    },
+    "result_key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Result-store key the worker writes the result under (write-once)."
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Delivery attempts so far."
+    },
+    "max_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "After this many attempts the job fails rather than requeues."
+    }
+  }
+}

@@ -10,7 +10,9 @@ LAN is capable and available — routing live requests now (sync plane), or queu
 work until a worker is contactable, waking one if worth it (async plane). The name is a
 nod to *"pass the buck"* — the broker hands each job to whichever worker is up.
 
-**Status: design only.** No application code yet. The deliverable so far is the design.
+**Status: M0 in progress.** The design is complete; the **M0 core loop is built and
+proven end-to-end** (submit → Redis Streams queue → C# worker → model server → result →
+poll), across the cross-language contract. See *Build / test / run* below.
 
 ## CRITICAL: keep it domain-agnostic
 
@@ -69,6 +71,39 @@ See [docs/decisions.md](../docs/decisions.md) ADR 7 (split rationale) and ADR 22
 
 Every seam is a **documented protocol** (see protocols.md) so the system stays polyglot:
 the C# worker is a *reference* implementation, not a constraint.
+
+## Build / test / run
+
+Two components, built independently; they meet only at `contract/` + Redis + HTTP.
+
+**Prereqs:** .NET 10 SDK, Python 3.12+, `uv`, Docker (for Redis), and a model server
+(Ollama for dev; a zero-weight stub for tests — `server/tools/fake_model_server.py`).
+
+```bash
+# Redis (broker + result store) — one container for dev
+docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine
+
+# --- server (Python) ---
+cd server
+uv venv && uv pip install -e ".[dev]"
+uv run pytest                 # contract conformance + submit/poll API (needs Redis)
+uv run cbk-server             # serve the job API (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH)
+
+# --- worker (C#/.NET) ---
+cd worker
+dotnet build                  # JIT for dev; AOT publish is a later packaging step (ADR 19)
+dotnet test                   # contract conformance + serialization round-trip (no infra)
+dotnet run --project src/Clusterbuck.Worker -- work    # start the worker loop
+# CLI: `cbk work | submit --prompt … | status <job_id>`
+
+# --- end-to-end (proves the whole M0 loop on one node) ---
+bash deploy/e2e/run.sh            # uses the fake model server
+USE_OLLAMA=1 bash deploy/e2e/run.sh   # drives real Ollama inference
+```
+
+The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests
+assert conformance so the two type definitions can't drift (ADR 22). CI should gate every
+PR on the contract + both conformance suites (see [docs/implementation.md](../docs/implementation.md) → CI/CD).
 
 ## Conventions
 

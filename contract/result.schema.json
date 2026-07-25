@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusterbuck.dev/contract/result.schema.json",
+  "title": "Result",
+  "description": "The terminal result record the worker (C#) writes once to the result store under the job's `result_key`, and the server (Python) reads to answer GET /jobs/{id} (protocols.md §2). Shape mirrors an OpenAI completion plus the clusterbuck envelope {status, error, worker}.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "status", "worker", "completed_at"],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The id of the job this result belongs to."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["done", "failed", "expired"],
+      "description": "Terminal state only. Non-terminal (queued/running) is queue state, assembled by the server, never stored here."
+    },
+    "worker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque node id of the worker that ran the job (diagnostics only; the client never learns the physical machine)."
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp the result was written."
+    },
+    "completion": {
+      "type": ["object", "null"],
+      "description": "OpenAI-style chat completion on success; null on failure/expiry. additionalProperties allowed so the model server's native fields pass through.",
+      "additionalProperties": true,
+      "required": ["choices"],
+      "properties": {
+        "choices": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["message"],
+            "properties": {
+              "index": { "type": "integer", "minimum": 0 },
+              "finish_reason": { "type": ["string", "null"] },
+              "message": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["role", "content"],
+                "properties": {
+                  "role": { "type": "string" },
+                  "content": { "type": ["string", "null"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Failure detail when status != done; null on success."
+    },
+    "usage": {
+      "type": ["object", "null"],
+      "description": "Token accounting, when the model server reports it.",
+      "additionalProperties": true,
+      "properties": {
+        "prompt_tokens": { "type": "integer", "minimum": 0 },
+        "completion_tokens": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "done" } } },
+      "then": {
+        "required": ["completion"],
+        "properties": { "completion": { "type": "object" } }
+      }
+    }
+  ]
+}

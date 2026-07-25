@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>cbk</AssemblyName>
+    <RootNamespace>Clusterbuck.Worker</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Native AOT is the shipping format (ADR 19) but is a packaging concern deferred
+         past the M0 core-loop proof; `dotnet run` (JIT) proves the loop. AOT publish is
+         wired via `dotnet publish -p:PublishAot=true` per RID in CI later. -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
+    <PackageReference Include="Spectre.Console.Cli" Version="0.49.1" />
+  </ItemGroup>
+
+</Project>

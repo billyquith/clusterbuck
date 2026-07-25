@@ -1,0 +1,19 @@
+{
+  "id": "job_01HZX9K2QJ8P4V7M3N6T5R0abc",
+  "created_at": "2026-07-24T18:30:00Z",
+  "capability": "8b-extract",
+  "messages": [
+    { "role": "system", "content": "You are a terse assistant." },
+    { "role": "user", "content": "Summarize: the quick brown fox jumps over the lazy dog." }
+  ],
+  "params": {
+    "temperature": 0.2,
+    "max_tokens": 256
+  },
+  "urgency": "waitable",
+  "escalate_after_min": 10,
+  "privacy": "local_only",
+  "result_key": "res_01HZX9K2QJ8P4V7M3N6T5R0abc",
+  "attempts": 0,
+  "max_attempts": 3
+}

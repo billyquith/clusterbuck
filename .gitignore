@@ -36,6 +36,17 @@ appsettings.*.local.json
 *.env
 secrets.json
 
+# Python (cbk-server)
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+
+# SQLite system-of-record (created at runtime)
+*.db
+
 # OS cruft
 .DS_Store
 Thumbs.db

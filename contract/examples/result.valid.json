@@ -1,0 +1,27 @@
+{
+  "job_id": "job_01HZX9K2QJ8P4V7M3N6T5R0abc",
+  "status": "done",
+  "worker": "node-a7f3",
+  "completed_at": "2026-07-24T18:30:04Z",
+  "completion": {
+    "id": "chatcmpl-abc123",
+    "object": "chat.completion",
+    "model": "llama3.2:3b",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "A fox jumps over a dog."
+        }
+      }
+    ]
+  },
+  "error": null,
+  "usage": {
+    "prompt_tokens": 28,
+    "completion_tokens": 7,
+    "total_tokens": 35
+  }
+}
