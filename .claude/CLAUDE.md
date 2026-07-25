@@ -10,23 +10,32 @@ LAN is capable and available — routing live requests now (sync plane), or queu
 work until a worker is contactable, waking one if worth it (async plane). The name is a
 nod to *"pass the buck"* — the broker hands each job to whichever worker is up.
 
-**Status: M2 complete.** The design is complete. **M0** (async core loop: submit →
-Redis Streams queue → C# worker → model server → result → poll), **M1** (sync plane —
-LiteLLM serving OpenAI-compatible `/v1/chat/completions` — + `fleet.yaml` registry +
-`cbk fleet`), and **M2** (availability) are built and proven end-to-end (fake stub +
-Ollama). M2 adds: the **escalation engine** (waitable → necessary on age; ADR 18), the
-**Wake-on-LAN** coordinator (wakes capable sleeping nodes when urgent/necessary work has
-no live consumer; liveness = consumer `idle`; ADR 24), and **basic reservations**
-(admission + a reconciler-tick lifecycle scheduled→warming→open→draining→closed; ADR 17).
-The escalation scan and reservation reconciler share one coordinator loop.
+**Status: M0–M5 complete** (the whole roadmap). The design is complete and the system is
+built and proven end-to-end (fake stub + Ollama), server + worker, across the
+cross-language contract. Milestones:
 
-**M3** (visibility) adds **usage metering** — the coordinator loop captures a per-job
-usage record (metadata only — no prompt/completion text) when a job completes, and
-`/usage` exposes rollups + the **avoided-cloud-spend headline** (local tokens × the
-`fleet.yaml` cloud-equivalent rate; budget burn is display-only scaffolding while metering
-is async-only) — and the **htmx dashboard** at `/` (server-rendered, vendored assets, no
-CDN; panels self-refresh via `hx-get` over `/ui/*`). See *Build / test / run* below.
-**M4** (self-managing fleet: enrollment + probe, presence ladder, signed self-update) is next.
+- **M0 — async core loop:** submit → Redis Streams queue → C# worker → model server →
+  result → poll.
+- **M1 — sync plane:** LiteLLM serving OpenAI-compatible `/v1/chat/completions` +
+  `fleet.yaml` registry + `cbk fleet`.
+- **M2 — availability:** escalation engine (waitable → necessary on age, ADR 18),
+  Wake-on-LAN coordinator (liveness = consumer `idle`, ADR 24), basic reservations
+  (reconciler-tick lifecycle, ADR 17).
+- **M3 — visibility:** usage metering (metadata-only) + `/usage` avoided-cloud-spend
+  headline + the htmx dashboard at `/` (vendored, no CDN).
+- **M4 — self-managing fleet:** dynamic registry (`/nodes/enroll` + heartbeat + join
+  tokens, ADR 9), client attention lease (§9), worker self-enrollment (hardware probe,
+  presence ladder + `cbk pause`, ADR 10), and signed self-update (cross-language ECDSA
+  P-256 verify + skew gate, ADR 13).
+- **M5 — optimisation:** ability matrix (ADR 15) + tier-1 programmatic eval + need-shaped
+  ability routing (ADR 16), with `/ability`.
+
+A single coordinator loop runs the escalation / reservation / attention / usage ticks.
+Deliberately deferred (needs real hardware, a judge model, real usage data, or multi-node —
+documented in code + ADRs): true Wake-on-LAN to real MACs, multi-node canary/rollback +
+binary self-replacement, OS presence detection, judge-based eval tiers (2/3) +
+Bradley-Terry/Elo + calibration, the model catalog + real weight downloads, and
+cost-quality-arbitrage planning. See *Build / test / run* below.
 
 ## CRITICAL: keep it domain-agnostic
 
@@ -120,6 +129,7 @@ bash deploy/e2e/escalation.sh     # M2a: waitable job escalates to necessary (no
 bash deploy/e2e/reservation.sh    # M2b: reservation confirmed → warming → open (reconciler)
 bash deploy/e2e/usage.sh          # M3a: completed job metered; avoided-cloud-spend > 0
 bash deploy/e2e/enroll.sh         # M4b: enroll → registry → heartbeat → pause
+bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} routing
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

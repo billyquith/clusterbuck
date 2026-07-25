@@ -65,6 +65,22 @@ async def ui_reservations(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "partials/reservations.html", {"rows": rows})
 
 
+@web_routes.get("/ui/ability", response_class=HTMLResponse)
+async def ui_ability(request: Request) -> HTMLResponse:
+    from .evaluation import SCALE_VERSION
+
+    rows = request.app.state.store.ability_matrix(SCALE_VERSION)
+    by_artifact: dict[str, list[float]] = {}
+    for r in rows:
+        by_artifact.setdefault(r["artifact"], []).append(r["score"])
+    arts = sorted(
+        ({"artifact": a, "headline": round(sum(s) / len(s), 1)} for a, s in by_artifact.items()),
+        key=lambda x: x["headline"], reverse=True,
+    )
+    return templates.TemplateResponse(
+        request, "partials/ability.html", {"arts": arts, "scale": SCALE_VERSION})
+
+
 @web_routes.get("/ui/nodes", response_class=HTMLResponse)
 async def ui_nodes(request: Request) -> HTMLResponse:
     import json as _json

@@ -27,6 +27,11 @@ def _fleet() -> Fleet:
     )
 
 
+@pytest.fixture()
+def store(tmp_path) -> Store:
+    return Store(str(tmp_path / "rsv.db"))
+
+
 class SpyWake:
     """Duck-typed WakeCoordinator that records maybe_wake calls (no Redis, no packets)."""
 
@@ -40,8 +45,8 @@ class SpyWake:
 
 # --- admission ---------------------------------------------------------------
 
-def test_admit_confirmed_when_capable_node_exists():
-    a = admit(_fleet(), task_class="x", min_ability=4, window_start="asap",
+def test_admit_confirmed_when_capable_node_exists(store):
+    a = admit(_fleet(), store, task_class="x", min_ability=4, window_start="asap",
               duration_min=30, now=1000.0, lead_s=300)
     assert a.status == "confirmed"
     assert a.capability == CAP and a.node == "node-a" and a.artifact == "m"
@@ -49,14 +54,15 @@ def test_admit_confirmed_when_capable_node_exists():
     assert a.ends == 1000.0 + 30 * 60
 
 
-def test_admit_declined_without_fleet():
-    assert admit(None, task_class="x", min_ability=4, window_start="asap",
+def test_admit_declined_without_fleet(store):
+    assert admit(None, store, task_class="x", min_ability=4, window_start="asap",
                  duration_min=30).status == "declined"
 
 
-def test_admit_declined_when_capability_unserved():
+def test_admit_declined_when_capability_unserved(store):
     # min_ability 9 resolves to 70b-reason, which the test fleet has no node for.
-    a = admit(_fleet(), task_class="x", min_ability=9, window_start="asap", duration_min=30)
+    a = admit(_fleet(), store, task_class="x", min_ability=9, window_start="asap",
+              duration_min=30)
     assert a.status == "declined"
 
 

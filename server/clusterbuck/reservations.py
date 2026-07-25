@@ -24,8 +24,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from .coordinator import resolve_capability
 from .fleet import Fleet
+from .routing import resolve_capability
 from .store import Store
 from .wake import WakeCoordinator
 
@@ -62,6 +62,7 @@ def window_start_epoch(start: str, now: float) -> float:
 
 def admit(
     fleet: Fleet | None,
+    store: Store,
     *,
     task_class: str,
     min_ability: int,
@@ -76,7 +77,7 @@ def admit(
         return Admission("declined", reason="no fleet registry")
 
     capability = resolve_capability(
-        capability=None, task_class=task_class, min_ability=min_ability
+        fleet, store, capability=None, task_class=task_class, min_ability=min_ability
     )
     spec = fleet.capabilities.get(capability)
     nodes = fleet.nodes_for(capability)

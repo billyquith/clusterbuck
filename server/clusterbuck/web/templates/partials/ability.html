@@ -1,0 +1,12 @@
+<h2>Model ability</h2>
+{% if arts %}
+<table>
+  <tr><th>artifact</th><th class="n">headline (1&ndash;10)</th></tr>
+  {% for a in arts %}
+  <tr><td>{{ a.artifact }}</td><td class="n">{{ "%.1f"|format(a.headline) }}</td></tr>
+  {% endfor %}
+</table>
+<p class="empty" style="margin-top:.6rem">scale {{ scale }} &middot; workload-weighted matrix drives routing</p>
+{% else %}
+<p class="empty">no ability data</p>
+{% endif %}

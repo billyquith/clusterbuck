@@ -28,6 +28,18 @@ CREATE TABLE IF NOT EXISTS jobs (
     promoted_by  TEXT             -- null | 'age' | 'attention' (escalation provenance)
 );
 
+-- Ability matrix (ADR 15 / model-evaluation.md): ability(artifact, task_class) on an
+-- anchored 1-10 scale, versioned. artifact = model + quantisation. Stored data the router
+-- reads; tier-1 programmatic eval writes it.
+CREATE TABLE IF NOT EXISTS ability (
+    artifact      TEXT NOT NULL,
+    task_class    TEXT NOT NULL,
+    score         REAL NOT NULL,
+    scale_version TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (artifact, task_class, scale_version)
+);
+
 -- Client attention leases (ADR 18 / protocols §9): a client's active-user signal that
 -- promotes its waitable backlog; expiry demotes the unstarted promotions gracefully.
 CREATE TABLE IF NOT EXISTS attention_leases (
@@ -252,6 +264,41 @@ class Store:
             return c.execute(
                 "SELECT client_key FROM attention_leases WHERE expires_at <= ?", (now,)
             ).fetchall()
+
+    # --- ability matrix (M5) ---
+
+    def set_ability(self, *, artifact: str, task_class: str, score: float,
+                    scale_version: str, updated_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO ability (artifact, task_class, score, scale_version, updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(artifact, task_class, scale_version) "
+                "DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at",
+                (artifact, task_class, score, scale_version, updated_at),
+            )
+
+    def get_ability(self, artifact: str, task_class: str, scale_version: str) -> float | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT score FROM ability WHERE artifact = ? AND task_class = ? "
+                "AND scale_version = ?",
+                (artifact, task_class, scale_version),
+            ).fetchone()
+            return float(row["score"]) if row else None
+
+    def ability_matrix(self, scale_version: str) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT artifact, task_class, score FROM ability WHERE scale_version = ? "
+                "ORDER BY artifact, task_class",
+                (scale_version,),
+            ).fetchall()
+
+    def ability_count(self, scale_version: str) -> int:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT COUNT(*) AS n FROM ability WHERE scale_version = ?", (scale_version,)
+            ).fetchone()["n"]
 
     # --- reservations (M2b) ---
 

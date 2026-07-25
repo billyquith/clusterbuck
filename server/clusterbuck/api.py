@@ -19,8 +19,10 @@ from fastapi.staticfiles import StaticFiles
 
 from .background import coordinator_loop
 from .config import settings
-from .coordinator import propose_capabilities, resolve_capability
+from .coordinator import propose_capabilities
+from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
 from .fleet import load_fleet
+from .routing import resolve_capability
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
 from .models import (
     AttentionRequest,
@@ -94,6 +96,9 @@ def create_app(
         app.state.update_signing_key = update_signing_key or settings.update_signing_key
         app.state.update_release = update_release or settings.update_release
 
+        # Seed the ability matrix with anchored defaults (overwritten by real eval runs).
+        seed_ability(app.state.store, now=_now_iso())
+
         # Wake coordinator (needs the fleet for MAC lookup + Redis for liveness).
         app.state.wake = WakeCoordinator(
             app.state.fleet,
@@ -155,6 +160,21 @@ def create_app(
         """Metering rollups + the avoided-cloud-spend headline (fleet-management → Usage)."""
         return build_usage_summary(app.state.store, settings.cloud_budget_monthly)
 
+    @app.get("/ability")
+    async def get_ability() -> dict:
+        """The ability matrix + a per-artifact headline scalar (ADR 15/16)."""
+        rows = app.state.store.ability_matrix(SCALE_VERSION)
+        matrix = [{"artifact": r["artifact"], "task_class": r["task_class"],
+                   "score": r["score"]} for r in rows]
+        # Headline scalar per artifact = mean over its measured task classes (equal-weight
+        # for now; a workload-weighted headline is the documented refinement).
+        by_artifact: dict[str, list[float]] = {}
+        for r in rows:
+            by_artifact.setdefault(r["artifact"], []).append(r["score"])
+        headline = {a: round(sum(s) / len(s), 1) for a, s in by_artifact.items()}
+        return {"scale_version": SCALE_VERSION, "task_classes": TASK_CLASSES,
+                "matrix": matrix, "headline": headline}
+
     @app.get("/queues")
     async def get_queues() -> dict:
         """Per-capability queue depth / pending / live consumers."""
@@ -210,9 +230,11 @@ def create_app(
                 )
 
         capability = resolve_capability(
+            app.state.fleet, app.state.store,
             capability=body.capability,
             task_class=body.task_class,
             min_ability=body.min_ability,
+            privacy=body.privacy.value,
         )
         job_id, result_key = new_ids()
         now = datetime.now(timezone.utc)
@@ -322,7 +344,7 @@ def create_app(
     @app.post("/reservations", status_code=201)
     async def create_reservation(body: ReservationSubmit) -> JSONResponse:
         decision = admit(
-            app.state.fleet,
+            app.state.fleet, app.state.store,
             task_class=body.task_class,
             min_ability=body.min_ability,
             window_start=body.window.start,

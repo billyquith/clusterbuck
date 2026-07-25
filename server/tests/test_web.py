@@ -43,3 +43,10 @@ def test_nodes_fragment(client):
     r = client.get("/ui/nodes")
     assert r.status_code == 200
     assert "nodes" in r.text.lower()
+
+
+def test_ability_fragment(client):
+    r = client.get("/ui/ability")
+    assert r.status_code == 200
+    assert "ability" in r.text.lower()
+    assert "llama3.1:70b" in r.text  # seeded artifact
