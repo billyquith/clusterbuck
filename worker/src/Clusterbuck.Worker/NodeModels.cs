@@ -50,6 +50,7 @@ public sealed record HeartbeatRequest
     [JsonPropertyName("mode")] public string Mode { get; init; } = "active";
     [JsonPropertyName("installed")] public List<string> Installed { get; init; } = new();
     [JsonPropertyName("loaded")] public List<string> Loaded { get; init; } = new();
+    [JsonPropertyName("digests")] public Dictionary<string, string>? Digests { get; init; }
     [JsonPropertyName("queues")] public List<string> Queues { get; init; } = new();
     [JsonPropertyName("stats")] public HeartbeatStats Stats { get; init; } = new();
     [JsonPropertyName("protocol_version")] public int? ProtocolVersion { get; init; }

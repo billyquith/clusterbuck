@@ -36,6 +36,12 @@
     .pill.ok { color: var(--accent); border-color: #204d33; }
     .pill.warn { color: var(--warn); border-color: #4d3f16; }
     .empty { color: var(--muted); font-style: italic; }
+    button {
+      background: #1f2530; color: var(--ink); border: 1px solid var(--line);
+      border-radius: 6px; padding: .25rem .6rem; font: inherit; font-size: .8rem;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent); }
     .kv { display: flex; justify-content: space-between; padding: .25rem 0; }
     .kv .k { color: var(--muted); }
   </style>
@@ -47,6 +53,8 @@
   </header>
   <main>
     <div id="headline" hx-get="/ui/headline" hx-trigger="load, every 4s">…</div>
+    <section class="panel" style="margin-bottom:1rem"
+             hx-get="/ui/proposals" hx-trigger="load, every 8s">…</section>
     <div class="grid">
       <section class="panel" hx-get="/ui/queues" hx-trigger="load, every 3s">…</section>
       <section class="panel" hx-get="/ui/nodes" hx-trigger="load, every 5s">…</section>

@@ -13,6 +13,11 @@
       "type": "array", "items": { "type": "string" }, "default": [],
       "description": "Warm right now — enables model-affinity routing."
     },
+    "digests": {
+      "type": "object",
+      "description": "Optional artifact → content digest, where the model server exposes it. Ability is pinned to an artifact (ADR 15), so a changed digest means a NEW artifact whose score must be re-measured rather than inherited.",
+      "additionalProperties": { "type": "string" }
+    },
     "queues": { "type": "array", "items": { "type": "string" }, "default": [] },
     "stats": {
       "type": "object",

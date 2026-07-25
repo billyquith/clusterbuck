@@ -97,11 +97,13 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
                     // actually has, and what is warm right now.
                     var installed = await inventory.InstalledAsync(ct);
                     var loaded = await inventory.LoadedAsync(ct);
+                    var digests = await inventory.DigestsAsync(ct);
                     await registry.HeartbeatAsync(s.NodeId, s.NodeKey, new HeartbeatRequest
                     {
                         Mode = effective,
                         Installed = installed,
                         Loaded = loaded,
+                        Digests = digests.Count > 0 ? digests : null,
                         Queues = caps.Select(c => WorkLoop.StreamKey(c)).ToList(),
                         ProtocolVersion = 1,
                     }, ct);

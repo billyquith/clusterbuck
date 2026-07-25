@@ -1,0 +1,28 @@
+<h2>Planner proposals</h2>
+{% if props %}
+<table>
+  <tr><th>what</th><th>node</th><th></th></tr>
+  {% for p in props %}
+  <tr>
+    <td>
+      {% if p.kind == "upgrade" %}<span class="pill ok">upgrade</span>
+      {% elif p.kind == "reeval" %}<span class="pill warn">re-eval</span>
+      {% else %}<span class="pill">reclaim</span>{% endif %}
+      <strong>{{ p.artifact }}</strong>
+      <br><span style="color:var(--muted);font-size:.78rem">{{ p.rationale }}</span>
+    </td>
+    <td>{{ p.node }}</td>
+    <td style="white-space:nowrap">
+      <button hx-post="/ui/proposals/{{ p.id }}/approve" hx-target="closest section"
+              hx-swap="innerHTML">approve</button>
+      <button hx-post="/ui/proposals/{{ p.id }}/deny" hx-target="closest section"
+              hx-swap="innerHTML">deny</button>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="empty" style="margin-top:.6rem">weights are never fetched without a decision here
+(unless a node opts into auto-approve)</p>
+{% else %}
+<p class="empty">no pending proposals</p>
+{% endif %}

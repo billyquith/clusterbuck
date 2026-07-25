@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .background import coordinator_loop
+from .catalog import propose_reeval, quota_for, scan_all, seed_catalog
 from .config import settings
 from .coordinator import propose_capabilities
 from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
@@ -96,8 +97,10 @@ def create_app(
         app.state.update_signing_key = update_signing_key or settings.update_signing_key
         app.state.update_release = update_release or settings.update_release
 
-        # Seed the ability matrix with anchored defaults (overwritten by real eval runs).
+        # Seed the ability matrix with anchored defaults (overwritten by real eval runs)
+        # and the model catalog with generic known-good artifacts.
         seed_ability(app.state.store, now=_now_iso())
+        seed_catalog(app.state.store, now=_now_iso())
 
         # Wake coordinator (needs the fleet for MAC lookup + Redis for liveness).
         app.state.wake = WakeCoordinator(
@@ -424,15 +427,26 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown node")
         if x_cbk_node_key != node["node_key"]:
             raise HTTPException(status_code=401, detail="bad node key")
-        app.state.store.record_heartbeat(
+        now = _now_iso()
+        store = app.state.store
+        store.record_heartbeat(
             node_id=node_id, mode=body.mode,
             installed=json.dumps(body.installed), loaded=json.dumps(body.loaded),
             queues=json.dumps(body.queues),
             jobs_done=body.stats.get("jobs_done"), tps=body.stats.get("tps"),
-            last_heartbeat=_now_iso(),
+            last_heartbeat=now,
         )
-        # Self-update manifest (M4c) and planner notes (M5) are wired in later milestones.
-        return {"update": None, "planner_notes": []}
+
+        # Record observed artifacts + digests; a changed digest is a NEW artifact whose
+        # stored ability is stale, so it earns a re-eval proposal (ADR 15).
+        observed = {a: (body.digests or {}).get(a) for a in body.installed}
+        notes: list[str] = []
+        for artifact, old, new in store.observe_node_models(node_id, observed, now):
+            if propose_reeval(store, node_id, artifact, old, new, now=now):
+                notes.append(f"{artifact} changed upstream — re-evaluation proposed")
+
+        # Self-update manifest delivery (M4c apply path) is deferred; see ADR 13.
+        return {"update": None, "planner_notes": notes}
 
     @app.get("/updates/manifest")
     async def update_manifest(rid: str) -> dict:
@@ -453,6 +467,65 @@ def create_app(
             channel=release.get("channel", "stable"),
             protocol_version=release.get("protocol_version", 1),
         )
+
+    # --- model catalog & planner proposals (M6b) ---
+
+    @app.get("/catalog")
+    async def get_catalog() -> dict:
+        return {"artifacts": [
+            {"artifact": r["artifact"], "family": r["family"], "params_b": r["params_b"],
+             "quant": r["quant"], "size_gb": r["size_gb"], "min_ram_gb": r["min_ram_gb"],
+             "source": r["source"], "registry_ref": r["registry_ref"],
+             "expected_ability": r["expected_ability"]}
+            for r in app.state.store.list_catalog()]}
+
+    @app.get("/proposals")
+    async def get_proposals(status: str | None = None) -> dict:
+        return {"proposals": [
+            {"id": r["id"], "kind": r["kind"], "node_id": r["node_id"],
+             "artifact": r["artifact"], "task_class": r["task_class"],
+             "rationale": r["rationale"], "status": r["status"],
+             "created_at": r["created_at"], "decided_at": r["decided_at"]}
+            for r in app.state.store.list_proposals(status)]}
+
+    @app.post("/proposals/scan")
+    async def scan_proposals() -> dict:
+        """Force a planner pass (it also runs on the coordinator tick)."""
+        ids = scan_all(app.state.store, now=_now_iso())
+        return {"created": ids}
+
+    @app.post("/proposals/{proposal_id}/approve")
+    async def approve_proposal(proposal_id: str) -> dict:
+        return _decide(proposal_id, "approved")
+
+    @app.post("/proposals/{proposal_id}/deny")
+    async def deny_proposal(proposal_id: str) -> dict:
+        return _decide(proposal_id, "denied")
+
+    def _decide(proposal_id: str, status: str) -> dict:
+        store = app.state.store
+        if store.get_proposal(proposal_id) is None:
+            raise HTTPException(status_code=404, detail="unknown proposal id")
+        if not store.decide_proposal(proposal_id, status, _now_iso()):
+            raise HTTPException(status_code=409, detail="proposal already decided")
+        row = store.get_proposal(proposal_id)
+        return {"id": row["id"], "status": row["status"], "decided_at": row["decided_at"]}
+
+    @app.post("/nodes/{node_id}/policy")
+    async def set_node_policy(
+        node_id: str, disk_quota_gb: float | None = None, auto_approve: bool | None = None,
+    ) -> dict:
+        """The owner's contract for this node: storage quota and whether installs may be
+        applied without a human decision (opt-in, off by default)."""
+        store = app.state.store
+        node = store.get_node(node_id)
+        if node is None:
+            raise HTTPException(status_code=404, detail="unknown node")
+        store.set_node_flags(node_id, disk_quota_gb=disk_quota_gb, auto_approve=auto_approve)
+        node = store.get_node(node_id)
+        return {"node_id": node_id,
+                "disk_quota_gb": quota_for(node["profile"], node["disk_quota_gb"]),
+                "auto_approve": bool(node["auto_approve"])}
 
     @app.get("/nodes")
     async def list_nodes() -> dict:

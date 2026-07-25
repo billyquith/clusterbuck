@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from datetime import datetime, timezone
+
 from .attention import attention_tick
+from .catalog import scan_all
 from .escalation import escalation_scan
 from .fleet import Fleet
 from .queue import Queue
@@ -31,14 +34,21 @@ async def coordinator_loop(
     *,
     interval_s: float,
     stop: asyncio.Event,
+    planner_every: int = 30,
 ) -> None:
-    """Tick escalation + reservations + usage capture every interval_s until stopped."""
+    """Tick escalation + reservations + attention + usage + the planner until stopped."""
+    ticks = 0
     while not stop.is_set():
         try:
             await escalation_scan(store, queue, wake)
             await reservation_tick(store, wake)
             await attention_tick(store, queue)
             await usage_scan(store, queue, fleet)
+            # The planner is advisory and compares slow-moving state, so it runs far less
+            # often than the latency-sensitive ticks above.
+            ticks += 1
+            if ticks % planner_every == 0:
+                scan_all(store, now=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         except Exception:  # a tick failure must not kill the loop
             _log.exception("coordinator tick failed")
         try:

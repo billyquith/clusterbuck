@@ -28,6 +28,48 @@ CREATE TABLE IF NOT EXISTS jobs (
     promoted_by  TEXT             -- null | 'age' | 'attention' (escalation provenance)
 );
 
+-- Model catalog (fleet-management.md → Model catalog): curated known-good artifacts with
+-- the metadata the "fits" gate needs. `expected_ability` is an admin-curated hint used only
+-- to RANK proposals — the real gate is measured ability after install (ADR 15).
+CREATE TABLE IF NOT EXISTS catalog (
+    artifact         TEXT PRIMARY KEY,
+    family           TEXT,
+    params_b         REAL,
+    quant            TEXT,
+    size_gb          REAL NOT NULL,
+    min_ram_gb       REAL NOT NULL,
+    source           TEXT NOT NULL,     -- model-manager that can install it (e.g. ollama)
+    registry_ref     TEXT NOT NULL,     -- what to ask the model manager to pull
+    expected_ability REAL,
+    added_at         TEXT NOT NULL
+);
+
+-- What each node's model server actually reports having, with digests, so an artifact
+-- changing upstream is detectable (ADR 15: a new digest is a NEW artifact).
+CREATE TABLE IF NOT EXISTS node_models (
+    node_id    TEXT NOT NULL,
+    artifact   TEXT NOT NULL,
+    digest     TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen  TEXT NOT NULL,
+    PRIMARY KEY (node_id, artifact)
+);
+
+-- Planner proposals (fleet-management.md): SUGGESTIONS, never silent changes. Multi-GB
+-- weights are never fetched without a human decision (per-node auto_approve is opt-in).
+CREATE TABLE IF NOT EXISTS proposals (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,           -- upgrade | reeval | reclaim
+    node_id    TEXT NOT NULL,
+    artifact   TEXT NOT NULL,
+    incumbent  TEXT,
+    task_class TEXT,
+    rationale  TEXT NOT NULL,
+    status     TEXT NOT NULL,           -- pending | approved | denied | applied | failed
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+
 -- Ability matrix (ADR 15 / model-evaluation.md): ability(artifact, task_class) on an
 -- anchored 1-10 scale, versioned. artifact = model + quantisation. Stored data the router
 -- reads; tier-1 programmatic eval writes it.
@@ -63,6 +105,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     ram_gb         REAL, accelerator TEXT, vram_gb REAL, disk_free_gb REAL, bench_tps_small REAL,
     profile        TEXT,
     capabilities   TEXT,          -- json array
+    disk_quota_gb  REAL,          -- owner's contract for model storage (profile-derived)
+    auto_approve   INTEGER NOT NULL DEFAULT 0,  -- opt-in: install without asking a human
     mode           TEXT,
     installed      TEXT, loaded TEXT, queues TEXT,  -- json arrays
     jobs_done      INTEGER DEFAULT 0,
@@ -109,16 +153,23 @@ CREATE TABLE IF NOT EXISTS reservations (
 );
 """
 
-# Columns added after the initial M0 schema; applied to pre-existing dev DBs.
+# Columns added after a table's initial schema; applied to pre-existing dev DBs.
+# {table: {column: ALTER statement}}
 _MIGRATIONS = {
-    "urgency": "ALTER TABLE jobs ADD COLUMN urgency TEXT NOT NULL DEFAULT 'waitable'",
-    "escalate_at": "ALTER TABLE jobs ADD COLUMN escalate_at REAL",
-    "escalated": "ALTER TABLE jobs ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0",
-    "reservation": "ALTER TABLE jobs ADD COLUMN reservation TEXT",
-    "deadline_epoch": "ALTER TABLE jobs ADD COLUMN deadline_epoch REAL",
-    "client_key": "ALTER TABLE jobs ADD COLUMN client_key TEXT",
-    "task_class": "ALTER TABLE jobs ADD COLUMN task_class TEXT",
-    "promoted_by": "ALTER TABLE jobs ADD COLUMN promoted_by TEXT",
+    "jobs": {
+        "urgency": "ALTER TABLE jobs ADD COLUMN urgency TEXT NOT NULL DEFAULT 'waitable'",
+        "escalate_at": "ALTER TABLE jobs ADD COLUMN escalate_at REAL",
+        "escalated": "ALTER TABLE jobs ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0",
+        "reservation": "ALTER TABLE jobs ADD COLUMN reservation TEXT",
+        "deadline_epoch": "ALTER TABLE jobs ADD COLUMN deadline_epoch REAL",
+        "client_key": "ALTER TABLE jobs ADD COLUMN client_key TEXT",
+        "task_class": "ALTER TABLE jobs ADD COLUMN task_class TEXT",
+        "promoted_by": "ALTER TABLE jobs ADD COLUMN promoted_by TEXT",
+    },
+    "nodes": {
+        "disk_quota_gb": "ALTER TABLE nodes ADD COLUMN disk_quota_gb REAL",
+        "auto_approve": "ALTER TABLE nodes ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0",
+    },
 }
 
 
@@ -127,10 +178,11 @@ class Store:
         self._db_path = db_path
         with self._conn() as c:
             c.executescript(_SCHEMA)
-            existing = {row["name"] for row in c.execute("PRAGMA table_info(jobs)")}
-            for col, ddl in _MIGRATIONS.items():
-                if col not in existing:
-                    c.execute(ddl)
+            for table, columns in _MIGRATIONS.items():
+                existing = {row["name"] for row in c.execute(f"PRAGMA table_info({table})")}
+                for col, ddl in columns.items():
+                    if col not in existing:
+                        c.execute(ddl)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -293,6 +345,143 @@ class Store:
                 "ORDER BY artifact, task_class",
                 (scale_version,),
             ).fetchall()
+
+    # --- catalog / observed models / proposals (M6b) ---
+
+    def upsert_catalog(self, *, artifact: str, family: str | None, params_b: float | None,
+                       quant: str | None, size_gb: float, min_ram_gb: float, source: str,
+                       registry_ref: str, expected_ability: float | None,
+                       added_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO catalog (artifact, family, params_b, quant, size_gb, "
+                "min_ram_gb, source, registry_ref, expected_ability, added_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(artifact) DO UPDATE SET "
+                "family=excluded.family, params_b=excluded.params_b, quant=excluded.quant, "
+                "size_gb=excluded.size_gb, min_ram_gb=excluded.min_ram_gb, "
+                "source=excluded.source, registry_ref=excluded.registry_ref, "
+                "expected_ability=excluded.expected_ability",
+                (artifact, family, params_b, quant, size_gb, min_ram_gb, source,
+                 registry_ref, expected_ability, added_at),
+            )
+
+    def list_catalog(self) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute("SELECT * FROM catalog ORDER BY min_ram_gb, artifact").fetchall()
+
+    def catalog_count(self) -> int:
+        with self._conn() as c:
+            return c.execute("SELECT COUNT(*) AS n FROM catalog").fetchone()["n"]
+
+    def observe_node_models(self, node_id: str, artifacts: dict[str, str | None],
+                            now: str) -> list[tuple[str, str | None, str | None]]:
+        """Record what a node reports having. Returns (artifact, old_digest, new_digest)
+        for artifacts whose digest CHANGED — i.e. the artifact was updated upstream."""
+        changed: list[tuple[str, str | None, str | None]] = []
+        with self._conn() as c:
+            for artifact, digest in artifacts.items():
+                row = c.execute(
+                    "SELECT digest FROM node_models WHERE node_id = ? AND artifact = ?",
+                    (node_id, artifact),
+                ).fetchone()
+                if row is None:
+                    c.execute(
+                        "INSERT INTO node_models (node_id, artifact, digest, first_seen, "
+                        "last_seen) VALUES (?,?,?,?,?)",
+                        (node_id, artifact, digest, now, now),
+                    )
+                else:
+                    old = row["digest"]
+                    if digest is not None and old is not None and digest != old:
+                        changed.append((artifact, old, digest))
+                    c.execute(
+                        "UPDATE node_models SET digest = COALESCE(?, digest), last_seen = ? "
+                        "WHERE node_id = ? AND artifact = ?",
+                        (digest, now, node_id, artifact),
+                    )
+        return changed
+
+    def node_models(self, node_id: str) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM node_models WHERE node_id = ? ORDER BY artifact", (node_id,)
+            ).fetchall()
+
+    def insert_proposal(self, *, id: str, kind: str, node_id: str, artifact: str,
+                        incumbent: str | None, task_class: str | None, rationale: str,
+                        status: str, created_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO proposals (id, kind, node_id, artifact, incumbent, task_class, "
+                "rationale, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (id, kind, node_id, artifact, incumbent, task_class, rationale, status,
+                 created_at),
+            )
+
+    def open_proposal_exists(self, *, kind: str, node_id: str, artifact: str) -> bool:
+        """True if an undecided/approved proposal already covers this — keeps the scan
+        idempotent so a repeating tick can't spam duplicates."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM proposals WHERE kind = ? AND node_id = ? AND artifact = ? "
+                "AND status IN ('pending', 'approved') LIMIT 1",
+                (kind, node_id, artifact),
+            ).fetchone()
+            return row is not None
+
+    def list_proposals(self, status: str | None = None) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            if status:
+                return c.execute(
+                    "SELECT * FROM proposals WHERE status = ? ORDER BY created_at DESC",
+                    (status,),
+                ).fetchall()
+            return c.execute("SELECT * FROM proposals ORDER BY created_at DESC").fetchall()
+
+    def get_proposal(self, id: str) -> sqlite3.Row | None:
+        with self._conn() as c:
+            return c.execute("SELECT * FROM proposals WHERE id = ?", (id,)).fetchone()
+
+    def decide_proposal(self, id: str, status: str, decided_at: str) -> bool:
+        """Approve/deny a pending proposal. False if it wasn't pending (already decided)."""
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE proposals SET status = ?, decided_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (status, decided_at, id),
+            )
+            return cur.rowcount > 0
+
+    def set_proposal_status(self, id: str, status: str) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE proposals SET status = ? WHERE id = ?", (status, id))
+
+    def approved_proposals_for_node(self, node_id: str, kind: str) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM proposals WHERE node_id = ? AND kind = ? AND status = 'approved' "
+                "ORDER BY created_at",
+                (node_id, kind),
+            ).fetchall()
+
+    def set_node_flags(self, node_id: str, *, disk_quota_gb: float | None = None,
+                       auto_approve: bool | None = None) -> None:
+        with self._conn() as c:
+            if disk_quota_gb is not None:
+                c.execute("UPDATE nodes SET disk_quota_gb = ? WHERE node_id = ?",
+                          (disk_quota_gb, node_id))
+            if auto_approve is not None:
+                c.execute("UPDATE nodes SET auto_approve = ? WHERE node_id = ?",
+                          (1 if auto_approve else 0, node_id))
+
+    def models_used_since(self, day: str) -> set[str]:
+        """Models that served at least one job on/after `day` (for reclaim proposals)."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT model FROM usage WHERE model IS NOT NULL AND day >= ?",
+                (day,),
+            ).fetchall()
+            return {r["model"] for r in rows}
 
     def ability_count(self, scale_version: str) -> int:
         with self._conn() as c:

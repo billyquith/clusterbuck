@@ -6,6 +6,7 @@ serve) rather than self-calling over HTTP.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -63,6 +64,26 @@ async def ui_fleet(request: Request) -> HTMLResponse:
 async def ui_reservations(request: Request) -> HTMLResponse:
     rows = request.app.state.store.list_reservations(limit=20)
     return templates.TemplateResponse(request, "partials/reservations.html", {"rows": rows})
+
+
+@web_routes.get("/ui/proposals", response_class=HTMLResponse)
+async def ui_proposals(request: Request) -> HTMLResponse:
+    rows = request.app.state.store.list_proposals("pending")
+    props = [{"id": r["id"], "kind": r["kind"], "artifact": r["artifact"],
+              "node": r["node_id"], "rationale": r["rationale"]} for r in rows]
+    return templates.TemplateResponse(request, "partials/proposals.html", {"props": props})
+
+
+@web_routes.post("/ui/proposals/{proposal_id}/{decision}", response_class=HTMLResponse)
+async def ui_decide(request: Request, proposal_id: str, decision: str) -> HTMLResponse:
+    """Approve/deny from the dashboard, then re-render the panel (htmx swap)."""
+    store = request.app.state.store
+    if decision in {"approve", "deny"} and store.get_proposal(proposal_id) is not None:
+        status = "approved" if decision == "approve" else "denied"
+        store.decide_proposal(
+            proposal_id, status,
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    return await ui_proposals(request)
 
 
 @web_routes.get("/ui/ability", response_class=HTMLResponse)

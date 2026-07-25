@@ -148,6 +148,8 @@ class HeartbeatRequest(BaseModel):
     mode: Literal["active", "away", "paused"]
     installed: list[str] = Field(default_factory=list)
     loaded: list[str] = Field(default_factory=list)
+    # artifact → content digest, where the model server exposes it (drives re-eval, ADR 15).
+    digests: dict[str, str] | None = None
     queues: list[str] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
     protocol_version: int | None = None
