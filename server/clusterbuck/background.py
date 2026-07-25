@@ -12,9 +12,11 @@ import asyncio
 import logging
 
 from .escalation import escalation_scan
+from .fleet import Fleet
 from .queue import Queue
 from .reservations import reservation_tick
 from .store import Store
+from .usage import usage_scan
 from .wake import WakeCoordinator
 
 _log = logging.getLogger("clusterbuck.coordinator")
@@ -24,15 +26,17 @@ async def coordinator_loop(
     store: Store,
     queue: Queue,
     wake: WakeCoordinator,
+    fleet: Fleet | None,
     *,
     interval_s: float,
     stop: asyncio.Event,
 ) -> None:
-    """Tick escalation + reservations every interval_s until stopped."""
+    """Tick escalation + reservations + usage capture every interval_s until stopped."""
     while not stop.is_set():
         try:
             await escalation_scan(store, queue, wake)
             await reservation_tick(store, wake)
+            await usage_scan(store, queue, fleet)
         except Exception:  # a tick failure must not kill the loop
             _log.exception("coordinator tick failed")
         try:

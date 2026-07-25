@@ -22,16 +22,25 @@ nodes:
     wake: opportunistic
     capabilities: [8b-extract, 32b-reason, 70b-reason]
 
+# price_*_per_1k are the CLOUD-EQUIVALENT rates a local run avoids paying (USD per 1k
+# tokens), used for the avoided-cloud-spend headline. Example values only — set them to the
+# rates of the cloud model you'd otherwise fall back to for each tier.
 capabilities:
   8b-extract:
     queue: "q:8b-extract"
     model_server: "http://localhost:11434/v1"
     model: "llama3.2:3b"
+    price_in_per_1k: 0.0002
+    price_out_per_1k: 0.0006
   32b-reason:
     queue: "q:32b-reason"
     model_server: "http://localhost:11434/v1"
     model: "qwen2.5:32b"
+    price_in_per_1k: 0.0009
+    price_out_per_1k: 0.0027
   70b-reason:
     queue: "q:70b-reason"
     model_server: "http://localhost:11434/v1"
     model: "llama3.1:70b"
+    price_in_per_1k: 0.0027
+    price_out_per_1k: 0.0035

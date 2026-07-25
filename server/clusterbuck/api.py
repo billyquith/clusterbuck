@@ -25,6 +25,7 @@ from .queue import Queue
 from .reservations import admit, iso
 from .store import Store
 from .sync import build_router, sync_routes
+from .usage import build_usage_summary
 from .wake import WakeCoordinator
 
 # Terminal statuses live in the result blob; anything else is queue state.
@@ -85,7 +86,7 @@ def create_app(
         if start_scheduler:
             task = asyncio.create_task(
                 coordinator_loop(
-                    app.state.store, app.state.queue, app.state.wake,
+                    app.state.store, app.state.queue, app.state.wake, app.state.fleet,
                     interval_s=settings.escalation_interval_s, stop=stop,
                 )
             )
@@ -121,6 +122,11 @@ def create_app(
                 for n in fleet.nodes
             ],
         }
+
+    @app.get("/usage")
+    async def get_usage() -> dict:
+        """Metering rollups + the avoided-cloud-spend headline (fleet-management → Usage)."""
+        return build_usage_summary(app.state.store, settings.cloud_budget_monthly)
 
     @app.post("/jobs", status_code=202)
     async def submit_job(body: JobSubmit) -> JSONResponse:
@@ -161,6 +167,15 @@ def create_app(
         if body.urgency is Urgency.waitable and body.escalate_after_min is not None:
             escalate_at = (now + timedelta(minutes=body.escalate_after_min)).timestamp()
 
+        deadline_epoch = None
+        if body.deadline:
+            try:
+                deadline_epoch = datetime.fromisoformat(
+                    body.deadline.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                deadline_epoch = None
+
         app.state.store.insert(
             id=job_id,
             result_key=result_key,
@@ -169,6 +184,7 @@ def create_app(
             urgency=body.urgency.value,
             escalate_at=escalate_at,
             reservation=body.reservation,
+            deadline_epoch=deadline_epoch,
         )
         await app.state.queue.enqueue(record.to_wire())
 

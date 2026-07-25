@@ -33,6 +33,12 @@ class Settings:
     wol_port: int = int(os.environ.get("CBK_WOL_PORT", "9"))
     # Reservations: wake + pre-load this long before a window opens (ADR 17).
     warm_lead_s: int = int(os.environ.get("CBK_WARM_LEAD_S", "300"))
+    # Monthly cloud budget cap (USD) for the /usage burn display. Unset ⇒ no cap shown.
+    cloud_budget_monthly: float | None = (
+        float(os.environ["CBK_CLOUD_BUDGET_MONTHLY"])
+        if os.environ.get("CBK_CLOUD_BUDGET_MONTHLY")
+        else None
+    )
 
 
 settings = Settings()

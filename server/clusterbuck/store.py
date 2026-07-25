@@ -21,7 +21,25 @@ CREATE TABLE IF NOT EXISTS jobs (
     urgency      TEXT NOT NULL DEFAULT 'waitable',
     escalate_at  REAL,            -- epoch seconds; only set for waitable(N)
     escalated    INTEGER NOT NULL DEFAULT 0,
-    reservation  TEXT             -- opt-in reservation id this job queues against
+    reservation  TEXT,            -- opt-in reservation id this job queues against
+    deadline_epoch REAL           -- epoch seconds; for expiry sweep
+);
+
+-- Usage metering (fleet-management.md → Usage accounting): METADATA ONLY. No prompt or
+-- completion text ever lands here; `outcome` is a status enum, not the error string
+-- (errors can echo input). One row per job (PRIMARY KEY) ⇒ capture is idempotent.
+CREATE TABLE IF NOT EXISTS usage (
+    job_id       TEXT PRIMARY KEY,
+    ts           TEXT NOT NULL,
+    capability   TEXT,
+    model        TEXT,
+    node         TEXT,             -- worker id, or 'cloud:<provider>' (future)
+    venue        TEXT NOT NULL,    -- local | cloud
+    tokens_in    INTEGER NOT NULL DEFAULT 0,
+    tokens_out   INTEGER NOT NULL DEFAULT 0,
+    outcome      TEXT NOT NULL,    -- done | failed | expired  (enum, never error text)
+    cost         REAL NOT NULL DEFAULT 0,  -- local: avoided (tokens×cloud rate); cloud: actual
+    day          TEXT NOT NULL     -- YYYY-MM-DD, for rollups
 );
 
 CREATE TABLE IF NOT EXISTS reservations (
@@ -51,6 +69,7 @@ _MIGRATIONS = {
     "escalate_at": "ALTER TABLE jobs ADD COLUMN escalate_at REAL",
     "escalated": "ALTER TABLE jobs ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0",
     "reservation": "ALTER TABLE jobs ADD COLUMN reservation TEXT",
+    "deadline_epoch": "ALTER TABLE jobs ADD COLUMN deadline_epoch REAL",
 }
 
 
@@ -84,13 +103,16 @@ class Store:
         urgency: str = "waitable",
         escalate_at: float | None = None,
         reservation: str | None = None,
+        deadline_epoch: float | None = None,
     ) -> None:
         with self._conn() as c:
             c.execute(
                 "INSERT INTO jobs "
-                "(id, result_key, capability, status, created_at, urgency, escalate_at, reservation) "
-                "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
-                (id, result_key, capability, created_at, urgency, escalate_at, reservation),
+                "(id, result_key, capability, status, created_at, urgency, escalate_at, "
+                "reservation, deadline_epoch) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
+                (id, result_key, capability, created_at, urgency, escalate_at,
+                 reservation, deadline_epoch),
             )
 
     def get(self, id: str) -> sqlite3.Row | None:
@@ -170,3 +192,64 @@ class Store:
                 (id,),
             )
             return cur.rowcount > 0
+
+    # --- usage metering (M3a) ---
+
+    def jobs_awaiting_usage(self) -> list[sqlite3.Row]:
+        """Jobs with no usage record yet. Capture is gated on this (not job status), so a
+        client's GET flipping status to done can't make the scan miss a job. Rows drop out
+        once a usage row exists, keeping the scan bounded to uncaptured work."""
+        with self._conn() as c:
+            return c.execute(
+                "SELECT j.id, j.result_key, j.capability, j.deadline_epoch "
+                "FROM jobs j LEFT JOIN usage u ON u.job_id = j.id "
+                "WHERE u.job_id IS NULL"
+            ).fetchall()
+
+    def record_usage(self, *, job_id: str, ts: str, capability: str | None,
+                     model: str | None, node: str | None, venue: str,
+                     tokens_in: int, tokens_out: int, outcome: str, cost: float,
+                     day: str) -> None:
+        """Write one usage record. INSERT OR IGNORE ⇒ idempotent under tick/GET races."""
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO usage (job_id, ts, capability, model, node, venue, "
+                "tokens_in, tokens_out, outcome, cost, day) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, ts, capability, model, node, venue, tokens_in, tokens_out,
+                 outcome, cost, day),
+            )
+
+    def usage_headline(self) -> sqlite3.Row:
+        """Totals + local/cloud cost split for the avoided-cloud-spend headline."""
+        with self._conn() as c:
+            return c.execute(
+                "SELECT COUNT(*) AS jobs, "
+                "COALESCE(SUM(tokens_in), 0) AS tokens_in, "
+                "COALESCE(SUM(tokens_out), 0) AS tokens_out, "
+                "COALESCE(SUM(CASE WHEN venue='local' THEN cost ELSE 0 END), 0) AS local_cost, "
+                "COALESCE(SUM(CASE WHEN venue='cloud' THEN cost ELSE 0 END), 0) AS cloud_cost "
+                "FROM usage"
+            ).fetchone()
+
+    def usage_rollup(self, group: str) -> list[sqlite3.Row]:
+        """Aggregate usage by 'model', 'node', 'capability', or 'day'."""
+        if group not in {"model", "node", "capability", "day"}:
+            raise ValueError(f"invalid rollup group: {group!r}")
+        with self._conn() as c:
+            return c.execute(
+                f"SELECT {group} AS key, COUNT(*) AS jobs, "
+                "COALESCE(SUM(tokens_in), 0) AS tokens_in, "
+                "COALESCE(SUM(tokens_out), 0) AS tokens_out, "
+                "COALESCE(SUM(cost), 0) AS cost "
+                f"FROM usage GROUP BY {group} ORDER BY cost DESC"
+            ).fetchall()
+
+    def cloud_spend_in_month(self, month_prefix: str) -> float:
+        """Actual cloud spend for a 'YYYY-MM' prefix (budget burn)."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COALESCE(SUM(cost), 0) AS spent FROM usage "
+                "WHERE venue = 'cloud' AND day LIKE ?",
+                (f"{month_prefix}%",),
+            ).fetchone()
+            return float(row["spent"])

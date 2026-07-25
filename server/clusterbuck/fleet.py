@@ -21,6 +21,11 @@ class CapabilitySpec(BaseModel):
     queue: str
     model_server: str  # OpenAI-compatible base URL the sync plane (LiteLLM) calls directly
     model: str  # served model name at that endpoint
+    # Cloud-equivalent price per 1k tokens: the rate a local run *avoids* paying. Split
+    # input/output because output typically runs several times pricier — and this feeds
+    # the headline avoided-cloud-spend number (fleet-management.md → Usage accounting).
+    price_in_per_1k: float = 0.0
+    price_out_per_1k: float = 0.0
 
 
 class NodeSpec(BaseModel):
@@ -40,6 +45,11 @@ class Fleet(BaseModel):
 
     def nodes_for(self, capability: str) -> list[NodeSpec]:
         return [n for n in self.nodes if capability in n.capabilities]
+
+    def price(self, capability: str) -> tuple[float, float]:
+        """(input, output) cloud-equivalent price per 1k tokens; (0, 0) if unpriced."""
+        spec = self.capabilities.get(capability)
+        return (spec.price_in_per_1k, spec.price_out_per_1k) if spec else (0.0, 0.0)
 
 
 def load_fleet(path: str | Path) -> Fleet:

@@ -18,8 +18,14 @@ Ollama). M2 adds: the **escalation engine** (waitable → necessary on age; ADR 
 **Wake-on-LAN** coordinator (wakes capable sleeping nodes when urgent/necessary work has
 no live consumer; liveness = consumer `idle`; ADR 24), and **basic reservations**
 (admission + a reconciler-tick lifecycle scheduled→warming→open→draining→closed; ADR 17).
-The escalation scan and reservation reconciler share one coordinator loop. See
-*Build / test / run* below. **M3** (dashboard + usage metering) is next.
+The escalation scan and reservation reconciler share one coordinator loop.
+
+**M3a** (visibility) adds **usage metering**: the coordinator loop captures a per-job
+usage record (metadata only — no prompt/completion text) when a job completes, and
+`/usage` exposes rollups + the **avoided-cloud-spend headline** (local tokens × the
+`fleet.yaml` cloud-equivalent rate). Budget burn is display-only scaffolding (async-only
+metering ⇒ no cloud path to gate yet). The **htmx dashboard (M3b)** is next. See
+*Build / test / run* below.
 
 ## CRITICAL: keep it domain-agnostic
 
@@ -111,6 +117,7 @@ bash deploy/e2e/queue-and-wait.sh # async: job parks as queued, drains when a wo
 bash deploy/e2e/sync.sh           # M1 sync: /v1/chat/completions via LiteLLM
 bash deploy/e2e/escalation.sh     # M2a: waitable job escalates to necessary (no worker)
 bash deploy/e2e/reservation.sh    # M2b: reservation confirmed → warming → open (reconciler)
+bash deploy/e2e/usage.sh          # M3a: completed job metered; avoided-cloud-spend > 0
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests
