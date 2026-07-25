@@ -34,7 +34,7 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         PresenceLadder? ladder = null;
         if (state is not null)
         {
-            ladder = new PresenceLadder(state.Ladder, state.Capabilities);
+            ladder = new PresenceLadder(state.Ladder, state.Capabilities, cfg.LadderHysteresisS);
             ladder.Update(state.Mode);
             cfg = cfg with
             {

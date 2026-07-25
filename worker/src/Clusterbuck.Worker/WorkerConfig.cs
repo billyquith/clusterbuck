@@ -16,6 +16,10 @@ public sealed record WorkerConfig
     /// <summary>Which model-manager adapter to use for the non-OpenAI bits (loaded state,
     /// digests, installs): auto | ollama | none. `none` = discovery via /v1/models only.</summary>
     public string ModelManager { get; init; } = "auto";
+    /// <summary>How long the owner must be stably away before the ladder climbs to the big
+    /// models (ADR 10). Cold loads are expensive, so this is damped by default; tune it per
+    /// node (a dedicated box wants it near zero, a laptop wants minutes).</summary>
+    public double LadderHysteresisS { get; init; } = 120;
 
     public static WorkerConfig FromEnvironment()
     {
@@ -38,6 +42,7 @@ public sealed record WorkerConfig
             ResultTtlSeconds = int.TryParse(Env("CBK_RESULT_TTL_S"), out var t) ? t : 86400,
             HeartbeatMs = int.TryParse(Env("CBK_HEARTBEAT_MS"), out var h) ? h : 10000,
             ModelManager = Env("CBK_MODEL_MANAGER") ?? "auto",
+            LadderHysteresisS = double.TryParse(Env("CBK_LADDER_HYSTERESIS_S"), out var lh) ? lh : 120,
         };
     }
 

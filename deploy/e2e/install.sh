@@ -57,8 +57,11 @@ import json, sys
 p = sys.argv[1]; s = json.load(open(p)); s["mode"] = "away"; json.dump(s, open(p, "w"))
 PY
 
+# The presence ladder damps the climb to `away` by 120s in production (cold loads are
+# expensive, ADR 10). Shorten it here so the test exercises the install path rather than
+# spending two minutes waiting out a timer.
 CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
-  CBK_MODEL_SERVER_URL="$MODEL_URL" CBK_HEARTBEAT_MS=1000 \
+  CBK_MODEL_SERVER_URL="$MODEL_URL" CBK_HEARTBEAT_MS=1000 CBK_LADDER_HYSTERESIS_S=1 \
   dotnet "$WORKER_DLL" work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)
 
 installed_of(){ curl -fsS "$URL/nodes" | python3 -c "
