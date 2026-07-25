@@ -33,6 +33,7 @@ from .models import (
 )
 from .queue import Queue
 from .reservations import admit, iso
+from .signing import build_manifest, load_private_pem
 from .store import Store
 from .sync import build_router, sync_routes
 from .usage import build_usage_summary
@@ -61,6 +62,8 @@ def create_app(
     db_path: str | None = None,
     fleet_path: str | None = None,
     start_scheduler: bool = True,
+    update_signing_key: str | None = None,
+    update_release: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -87,6 +90,9 @@ def create_app(
                 "sync plane disabled: no fleet file at %s (set CBK_FLEET_PATH); "
                 "/v1/* will return 503, async plane unaffected", path.resolve(),
             )
+
+        app.state.update_signing_key = update_signing_key or settings.update_signing_key
+        app.state.update_release = update_release or settings.update_release
 
         # Wake coordinator (needs the fleet for MAC lookup + Redis for liveness).
         app.state.wake = WakeCoordinator(
@@ -405,6 +411,26 @@ def create_app(
         )
         # Self-update manifest (M4c) and planner notes (M5) are wired in later milestones.
         return {"update": None, "planner_notes": []}
+
+    @app.get("/updates/manifest")
+    async def update_manifest(rid: str) -> dict:
+        """Signed release manifest for a runtime id (protocols.md §7). 404 if no update
+        channel is configured (no signing key / release). The worker verifies the
+        signature against its pinned public key before applying anything (ADR 13)."""
+        signing_key = app.state.update_signing_key
+        release_path = app.state.update_release
+        if not signing_key or not release_path:
+            raise HTTPException(status_code=404, detail="update channel not configured")
+        release = json.loads(Path(release_path).read_text())
+        art = release.get("artifacts", {}).get(rid)
+        if art is None:
+            raise HTTPException(status_code=404, detail=f"no artifact for rid {rid}")
+        key = load_private_pem(Path(signing_key).read_text())
+        return build_manifest(
+            key, version=release["version"], rid=rid, url=art["url"], sha256=art["sha256"],
+            channel=release.get("channel", "stable"),
+            protocol_version=release.get("protocol_version", 1),
+        )
 
     @app.get("/nodes")
     async def list_nodes() -> dict:

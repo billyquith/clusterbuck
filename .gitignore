@@ -47,6 +47,12 @@ __pycache__/
 # SQLite system-of-record (created at runtime)
 *.db
 
+# Update-signing PRIVATE keys must never be committed (RCE if leaked). The public key
+# fixture (update-signing.pub.pem) IS committed for verification.
+*.key.pem
+signing*.pem
+!*.pub.pem
+
 # OS cruft
 .DS_Store
 Thumbs.db

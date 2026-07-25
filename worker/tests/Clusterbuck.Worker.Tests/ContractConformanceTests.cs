@@ -54,6 +54,10 @@ public sealed class ContractConformanceTests
         Assert.False(Schema("result.schema.json").Evaluate(Fixture("result.invalid.json")).IsValid);
 
     [Fact]
+    public void UpdateManifestSchema_Accepts_Fixture() =>
+        Assert.True(Schema("update-manifest.schema.json").Evaluate(Fixture("update-manifest.valid.json")).IsValid);
+
+    [Fact]
     public void Worker_Job_RoundTrips_Against_Schema()
     {
         // Deserialize the shared fixture into the worker's own type, re-serialize, and it

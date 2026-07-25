@@ -33,6 +33,10 @@ class Settings:
     wol_port: int = int(os.environ.get("CBK_WOL_PORT", "9"))
     # Reservations: wake + pre-load this long before a window opens (ADR 17).
     warm_lead_s: int = int(os.environ.get("CBK_WARM_LEAD_S", "300"))
+    # Self-update (ADR 13). Both unset ⇒ /updates/manifest returns 404 (no update channel).
+    # The signing key is operator-held and must live OUTSIDE the repo (it's RCE if leaked).
+    update_signing_key: str | None = os.environ.get("CBK_UPDATE_SIGNING_KEY") or None
+    update_release: str | None = os.environ.get("CBK_UPDATE_RELEASE") or None
     # Monthly cloud budget cap (USD) for the /usage burn display. Unset ⇒ no cap shown.
     cloud_budget_monthly: float | None = (
         float(os.environ["CBK_CLOUD_BUDGET_MONTHLY"])

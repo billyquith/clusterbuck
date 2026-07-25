@@ -60,6 +60,7 @@ public sealed record Result
 [JsonSerializable(typeof(HeartbeatRequest))]
 [JsonSerializable(typeof(HeartbeatResponse))]
 [JsonSerializable(typeof(NodeState))]
+[JsonSerializable(typeof(UpdateManifest))]
 public partial class CbkJsonContext : JsonSerializerContext
 {
 }

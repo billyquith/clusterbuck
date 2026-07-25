@@ -95,6 +95,7 @@ def test_pydantic_prompt_form_matches_schema(contract_dir):
     ("enroll-response.schema.json", "enroll-response.valid.json"),
     ("heartbeat-request.schema.json", "heartbeat-request.valid.json"),
     ("heartbeat-response.schema.json", "heartbeat-response.valid.json"),
+    ("update-manifest.schema.json", "update-manifest.valid.json"),
 ])
 def test_registry_schemas_accept_valid(contract_dir, schema, example):
     _validator(contract_dir, schema).validate(load_json(contract_dir / "examples" / example))

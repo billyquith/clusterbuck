@@ -1,0 +1,9 @@
+{
+  "version": "1.4.0",
+  "rid": "osx-arm64",
+  "url": "https://releases.invalid/cbk/1.4.0/cbk-osx-arm64",
+  "sha256": "a2a505074f72004f55572ec51703349f3e8c20b879aeb8667289c8b977bea520",
+  "channel": "stable",
+  "protocol_version": 1,
+  "signature": "MEYCIQCEEOckuVWOuxcaF2FB1trmWXWxuMA2hPMT80/Ix/ViMQIhAKg/E+bAhvEiKNus4iRtPdusLWeaKMqXST34Dx51p2Y/"
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusterbuck.dev/contract/update-manifest.schema.json",
+  "title": "UpdateManifest",
+  "description": "A signed worker release manifest (protocols.md §7, ADR 13). The coordinator produces it; the worker verifies the signature against a pinned public key before touching a byte. The signature (ECDSA P-256 / SHA-256, base64 DER) covers the newline-joined version, rid, sha256, channel — pinning a specific artifact by sha256.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "rid", "url", "sha256", "channel", "signature"],
+  "properties": {
+    "version": { "type": "string", "minLength": 1 },
+    "rid": { "type": "string", "minLength": 1, "description": ".NET runtime identifier, e.g. osx-arm64." },
+    "url": { "type": "string", "minLength": 1, "description": "Where to fetch the artifact." },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Artifact digest; the worker verifies the download against it." },
+    "channel": { "type": "string", "enum": ["canary", "stable"] },
+    "protocol_version": { "type": "integer", "minimum": 1, "description": "Queue-contract protocol the release speaks (skew gating)." },
+    "signature": { "type": "string", "minLength": 1, "description": "base64(DER ECDSA-P256/SHA-256) over version\\nrid\\nsha256\\nchannel." }
+  }
+}
