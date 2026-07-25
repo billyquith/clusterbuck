@@ -1,0 +1,37 @@
+# fleet.yaml — the static model/capability registry seed (protocols.md §5).
+#
+# This is the MVP seed. In the fleet-management phase (M4) the same shape becomes the
+# seed for a coordinator-held dynamic registry maintained by enrollment + heartbeats.
+#
+# Two access paths to each node hang off a capability:
+#   - `queue`        — the async plane: workers consume q:<...> (the C# worker, env-configured).
+#   - `model_server` — the sync plane: LiteLLM calls this OpenAI-compatible endpoint directly
+#                      (the worker is NOT in the sync path).
+#
+# Example fleet only — generic ids, placeholder MACs, localhost endpoints. Edit for a real
+# deployment. On a single dev node every model_server is localhost; per-node LAN addresses
+# arrive with the multi-node registry.
+
+nodes:
+  - id: node-a
+    mac: "aa:bb:cc:dd:ee:ff"        # for Wake-on-LAN (M2)
+    wake: on-demand                 # opportunistic | scheduled | on-demand
+    capabilities: [8b-extract]
+  - id: node-b
+    mac: "11:22:33:44:55:66"
+    wake: opportunistic
+    capabilities: [8b-extract, 32b-reason, 70b-reason]
+
+capabilities:
+  8b-extract:
+    queue: "q:8b-extract"
+    model_server: "http://localhost:11434/v1"
+    model: "llama3.2:3b"
+  32b-reason:
+    queue: "q:32b-reason"
+    model_server: "http://localhost:11434/v1"
+    model: "qwen2.5:32b"
+  70b-reason:
+    queue: "q:70b-reason"
+    model_server: "http://localhost:11434/v1"
+    model: "llama3.1:70b"

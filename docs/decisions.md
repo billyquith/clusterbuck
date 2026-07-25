@@ -254,3 +254,18 @@ because the server is JIT, not AOT (ADR 19).
 **Considered:** a React/Vite SPA (build chain + dependency mass unwarranted for an admin
 panel); Blazor from the start (heavier than needed for mostly-readonly views, but the
 sanctioned upgrade).
+
+## 23. Sync-plane cloud control is coarse (config-level), not per-request
+**Decision:** on the sync plane (the OpenAI-compatible `/v1/chat/completions`), cloud
+fallback is a **server-config** setting (`CBK_CLOUD_FALLBACK_MODEL`), **default off** ⇒
+local-only. It is *not* a per-request invariant the way async jobs carry `privacy`
+(ADR 14).
+**Why:** the standard OpenAI request shape has no privacy field, and clusterbuck stays a
+drop-in for any OpenAI SDK (protocols.md §1a) — so we can't demand a per-request privacy
+class there without breaking compatibility. Defaulting fallback **off** keeps the sync
+plane local-only unless an operator deliberately enables cloud, which is the safe cut.
+The strong per-job `local_only` guarantee remains where the shape allows it: the async
+job API. Recorded so the asymmetry is a deliberate design choice, not an oversight.
+**Considered:** a custom header (`x-cbk-privacy`) to carry per-request privacy on the sync
+plane (viable later; unneeded while fallback defaults off); mirroring async's default-
+`local_only` per request (impossible without a field in the request shape).

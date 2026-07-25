@@ -11,5 +11,7 @@ app.Configure(config =>
         .WithDescription("Submit an async job to the server (convenience client).");
     config.AddCommand<StatusCommand>("status")
         .WithDescription("Poll a job's status/result by id.");
+    config.AddCommand<FleetCommand>("fleet")
+        .WithDescription("List the server's capability/node registry.");
 });
 return await app.RunAsync(args);

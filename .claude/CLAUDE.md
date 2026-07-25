@@ -10,9 +10,12 @@ LAN is capable and available — routing live requests now (sync plane), or queu
 work until a worker is contactable, waking one if worth it (async plane). The name is a
 nod to *"pass the buck"* — the broker hands each job to whichever worker is up.
 
-**Status: M0 in progress.** The design is complete; the **M0 core loop is built and
-proven end-to-end** (submit → Redis Streams queue → C# worker → model server → result →
-poll), across the cross-language contract. See *Build / test / run* below.
+**Status: M1 in progress.** The design is complete. **M0** (async core loop: submit →
+Redis Streams queue → C# worker → model server → result → poll) is built and proven
+end-to-end across the cross-language contract. **M1** adds the **sync plane** (LiteLLM
+in-process serving OpenAI-compatible `/v1/chat/completions`), the **`fleet.yaml`**
+registry seed, and `cbk fleet`. Both planes are proven end-to-end (fake stub + Ollama).
+See *Build / test / run* below.
 
 ## CRITICAL: keep it domain-agnostic
 
@@ -86,19 +89,22 @@ docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine
 # --- server (Python) ---
 cd server
 uv venv && uv pip install -e ".[dev]"
-uv run pytest                 # contract conformance + submit/poll API (needs Redis)
-uv run cbk-server             # serve the job API (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH)
+uv run pytest                 # contract conformance + submit/poll API + sync plane + fleet
+uv run cbk-server             # serve async job API + sync /v1/chat/completions
+                              #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
+                              #    CBK_CLOUD_FALLBACK_MODEL — sync cloud fallback, default off)
 
 # --- worker (C#/.NET) ---
 cd worker
 dotnet build                  # JIT for dev; AOT publish is a later packaging step (ADR 19)
 dotnet test                   # contract conformance + serialization round-trip (no infra)
 dotnet run --project src/Clusterbuck.Worker -- work    # start the worker loop
-# CLI: `cbk work | submit --prompt … | status <job_id>`
+# CLI: `cbk work | submit --prompt … | status <job_id> | fleet`
 
-# --- end-to-end (proves the whole M0 loop on one node) ---
-bash deploy/e2e/run.sh            # uses the fake model server
-USE_OLLAMA=1 bash deploy/e2e/run.sh   # drives real Ollama inference
+# --- end-to-end (proves the loop on one node; USE_OLLAMA=1 for real inference) ---
+bash deploy/e2e/run.sh            # M0 async: submit → queue → worker → result → poll
+bash deploy/e2e/queue-and-wait.sh # async: job parks as queued, drains when a worker joins
+bash deploy/e2e/sync.sh           # M1 sync: /v1/chat/completions via LiteLLM
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

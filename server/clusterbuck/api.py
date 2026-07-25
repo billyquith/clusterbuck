@@ -6,38 +6,88 @@ GET  /jobs/{id} → assemble lifecycle state from SQLite + the result blob in Re
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from .config import settings
 from .coordinator import resolve_capability
+from .fleet import load_fleet
 from .ids import new_ids
 from .models import JobRecord, JobSubmit
 from .queue import Queue
 from .store import Store
+from .sync import build_router, sync_routes
 
 # Terminal statuses live in the result blob; anything else is queue state.
 _TERMINAL = {"done", "failed", "expired"}
 
+_log = logging.getLogger("clusterbuck")
 
-def create_app(redis_url: str | None = None, db_path: str | None = None) -> FastAPI:
+
+def create_app(
+    redis_url: str | None = None,
+    db_path: str | None = None,
+    fleet_path: str | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.queue = Queue.from_url(redis_url)
         app.state.store = Store(db_path or settings.db_path)
+
+        # Sync plane: load the fleet registry and build the LiteLLM router if present.
+        # Absent fleet.yaml ⇒ sync endpoints return 503; the async plane still works.
+        path = Path(fleet_path or settings.fleet_path)
+        if path.exists():
+            app.state.fleet = load_fleet(path)
+            app.state.sync_router = build_router(
+                app.state.fleet, settings.cloud_fallback_model
+            )
+            _log.info(
+                "sync plane up: %d capabilities from %s",
+                len(app.state.fleet.capabilities), path.resolve(),
+            )
+        else:
+            app.state.fleet = None
+            app.state.sync_router = None
+            # Relative default resolves against CWD — a common silent-503 footgun.
+            _log.warning(
+                "sync plane disabled: no fleet file at %s (set CBK_FLEET_PATH); "
+                "/v1/* will return 503, async plane unaffected", path.resolve(),
+            )
+
         try:
             yield
         finally:
             await app.state.queue.aclose()
 
     app = FastAPI(title="clusterbuck server", version="0.0.1", lifespan=lifespan)
+    app.include_router(sync_routes)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/fleet")
+    async def get_fleet() -> dict:
+        """The capability/node registry (MACs omitted — not needed for listing)."""
+        fleet = app.state.fleet
+        if fleet is None:
+            return {"capabilities": {}, "nodes": []}
+        return {
+            "capabilities": {
+                name: {"queue": c.queue, "model": c.model, "model_server": c.model_server}
+                for name, c in fleet.capabilities.items()
+            },
+            "nodes": [
+                {"id": n.id, "wake": n.wake, "capabilities": n.capabilities}
+                for n in fleet.nodes
+            ],
+        }
 
     @app.post("/jobs", status_code=202)
     async def submit_job(body: JobSubmit) -> JSONResponse:
