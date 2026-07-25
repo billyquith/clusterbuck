@@ -1,0 +1,20 @@
+<h2>Enrolled nodes</h2>
+{% if nodes %}
+<table>
+  <tr><th>node</th><th>mode</th><th>loaded</th><th>capabilities</th></tr>
+  {% for n in nodes %}
+  <tr>
+    <td>{{ n.id }}<br><span class="sub" style="color:var(--muted);font-size:.75rem">{{ n.host }}</span></td>
+    <td>
+      {% if n.mode == "active" %}<span class="pill">active</span>
+      {% elif n.mode == "away" %}<span class="pill ok">away</span>
+      {% else %}<span class="pill warn">{{ n.mode }}</span>{% endif %}
+    </td>
+    <td>{{ n.loaded or "—" }}</td>
+    <td>{{ n.caps }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">no enrolled nodes yet — the fleet.yaml seed still applies</p>
+{% endif %}

@@ -37,3 +37,9 @@ def test_reservations_fragment(client):
     r = client.get("/ui/reservations")
     assert r.status_code == 200
     assert "Reservations" in r.text
+
+
+def test_nodes_fragment(client):
+    r = client.get("/ui/nodes")
+    assert r.status_code == 200
+    assert "nodes" in r.text.lower()

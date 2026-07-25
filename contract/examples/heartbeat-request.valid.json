@@ -1,0 +1,8 @@
+{
+  "mode": "away",
+  "installed": ["llama3.2:3b", "qwen2.5:32b"],
+  "loaded": ["qwen2.5:32b"],
+  "queues": ["q:8b-extract", "q:32b-reason"],
+  "stats": { "jobs_done": 12, "tps": 38.5 },
+  "protocol_version": 1
+}

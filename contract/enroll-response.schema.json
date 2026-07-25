@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusterbuck.dev/contract/enroll-response.schema.json",
+  "title": "EnrollResponse",
+  "description": "The coordinator's reply to enrollment (protocols.md §6): a node identity + per-node key, and a proposed capability set the owner confirms/edits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["node_id", "node_key", "proposed"],
+  "properties": {
+    "node_id": { "type": "string", "minLength": 1 },
+    "node_key": { "type": "string", "minLength": 1, "description": "Per-node auth key for all subsequent requests." },
+    "proposed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capabilities"],
+      "properties": {
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "ladder": {
+          "type": "object",
+          "description": "Optional presence-mode → capability-set map (mode name → capability list).",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

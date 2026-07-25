@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusterbuck.dev/contract/heartbeat-response.schema.json",
+  "title": "HeartbeatResponse",
+  "description": "The coordinator's heartbeat reply (protocols.md §6): an optional self-update manifest and planner notes. `update` conforms to update-manifest.schema.json when present (defined with the self-update channel, §7).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["update", "planner_notes"],
+  "properties": {
+    "update": {
+      "type": ["object", "null"],
+      "description": "null ⇒ up to date; otherwise an update-manifest (see §7)."
+    },
+    "planner_notes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Advisory suggestions from the planner (never silent changes)."
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusterbuck.dev/contract/enroll-request.schema.json",
+  "title": "EnrollRequest",
+  "description": "A worker agent's one-time enrollment request (protocols.md §6). Produced by the C# worker, consumed by the Python coordinator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["join_token", "hostname", "os", "arch", "hw", "profile"],
+  "properties": {
+    "join_token": { "type": "string", "minLength": 1, "description": "One-time; burned on use." },
+    "hostname": { "type": "string", "minLength": 1 },
+    "os": { "type": "string", "minLength": 1 },
+    "arch": { "type": "string", "minLength": 1 },
+    "hw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ram_gb", "accelerator", "disk_free_gb"],
+      "properties": {
+        "ram_gb": { "type": "number", "minimum": 0 },
+        "accelerator": { "type": "string", "enum": ["metal", "cuda", "cpu"] },
+        "vram_gb": { "type": ["number", "null"], "minimum": 0 },
+        "disk_free_gb": { "type": "number", "minimum": 0 },
+        "bench_tps_small": {
+          "type": ["number", "null"], "minimum": 0,
+          "description": "Optional micro-benchmark: tokens/sec on a tiny model."
+        }
+      }
+    },
+    "profile": { "type": "string", "enum": ["dedicated", "shared", "background"] }
+  }
+}

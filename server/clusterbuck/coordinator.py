@@ -25,3 +25,21 @@ def resolve_capability(
     if min_ability <= 7:
         return "32b-reason"
     return "70b-reason"
+
+
+def propose_capabilities(ram_gb: float) -> tuple[list[str], dict[str, list[str]]]:
+    """Map a probed RAM size to a proposed capability set + presence-mode ladder.
+
+    M4 STUB: the real proposal weighs accelerator, measured throughput, and the model
+    catalog (fleet-management.md). Until that exists, RAM thresholds stand in. The owner
+    confirms or edits the proposal — it's a default, not a mandate.
+    """
+    if ram_gb >= 64:
+        caps = ["8b-extract", "32b-reason", "70b-reason"]
+    elif ram_gb >= 32:
+        caps = ["8b-extract", "32b-reason"]
+    else:
+        caps = ["8b-extract"]
+    # A shared machine runs a small model while active, the big ones when away.
+    ladder = {"active": caps[:1], "away": caps}
+    return caps, ladder

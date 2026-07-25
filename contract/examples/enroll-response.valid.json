@@ -1,0 +1,8 @@
+{
+  "node_id": "node-a7f3",
+  "node_key": "nk_9f8e7d6c5b4a39281706",
+  "proposed": {
+    "capabilities": ["8b-extract", "32b-reason", "70b-reason"],
+    "ladder": { "active": ["8b-extract"], "away": ["8b-extract", "32b-reason", "70b-reason"] }
+  }
+}

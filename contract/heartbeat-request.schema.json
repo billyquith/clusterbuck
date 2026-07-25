@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clusterbuck.dev/contract/heartbeat-request.schema.json",
+  "title": "HeartbeatRequest",
+  "description": "Periodic worker heartbeat (protocols.md §6): presence mode, installed vs loaded models, current queue subscriptions, and rolling stats. Also the poll point for updates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode"],
+  "properties": {
+    "mode": { "type": "string", "enum": ["active", "away", "paused"] },
+    "installed": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "loaded": {
+      "type": "array", "items": { "type": "string" }, "default": [],
+      "description": "Warm right now — enables model-affinity routing."
+    },
+    "queues": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "stats": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "jobs_done": { "type": "integer", "minimum": 0 },
+        "tps": { "type": "number", "minimum": 0 }
+      }
+    },
+    "protocol_version": {
+      "type": "integer", "minimum": 1,
+      "description": "Queue-contract protocol version the worker speaks (skew gating, §7)."
+    }
+  }
+}

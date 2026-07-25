@@ -103,6 +103,44 @@ class ReservationSubmit(BaseModel):
         return self
 
 
+class HwProbe(BaseModel):
+    """Hardware probe (contract/enroll-request.schema.json → hw)."""
+
+    model_config = {"extra": "forbid"}
+
+    ram_gb: float = Field(ge=0)
+    accelerator: Literal["metal", "cuda", "cpu"]
+    vram_gb: float | None = Field(default=None, ge=0)
+    disk_free_gb: float = Field(ge=0)
+    bench_tps_small: float | None = Field(default=None, ge=0)
+
+
+class EnrollRequest(BaseModel):
+    """Worker enrollment request — mirrors contract/enroll-request.schema.json."""
+
+    model_config = {"extra": "forbid"}
+
+    join_token: str
+    hostname: str
+    os: str
+    arch: str
+    hw: HwProbe
+    profile: Literal["dedicated", "shared", "background"]
+
+
+class HeartbeatRequest(BaseModel):
+    """Worker heartbeat — mirrors contract/heartbeat-request.schema.json."""
+
+    model_config = {"extra": "forbid"}
+
+    mode: Literal["active", "away", "paused"]
+    installed: list[str] = Field(default_factory=list)
+    loaded: list[str] = Field(default_factory=list)
+    queues: list[str] = Field(default_factory=list)
+    stats: dict[str, Any] = Field(default_factory=dict)
+    protocol_version: int | None = None
+
+
 class JobRecord(BaseModel):
     """The enqueued job record — mirrors contract/job.schema.json."""
 

@@ -11,9 +11,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
-from clusterbuck.models import JobRecord, Message, Privacy, Urgency
+from clusterbuck.models import (
+    EnrollRequest,
+    HeartbeatRequest,
+    HwProbe,
+    JobRecord,
+    Message,
+    Privacy,
+    Urgency,
+)
 
 
 def load_json(path: Path) -> dict:
@@ -79,3 +88,31 @@ def test_pydantic_prompt_form_matches_schema(contract_dir):
         result_key="res_def",
     )
     v.validate(record.to_wire())
+
+
+@pytest.mark.parametrize("schema,example", [
+    ("enroll-request.schema.json", "enroll-request.valid.json"),
+    ("enroll-response.schema.json", "enroll-response.valid.json"),
+    ("heartbeat-request.schema.json", "heartbeat-request.valid.json"),
+    ("heartbeat-response.schema.json", "heartbeat-response.valid.json"),
+])
+def test_registry_schemas_accept_valid(contract_dir, schema, example):
+    _validator(contract_dir, schema).validate(load_json(contract_dir / "examples" / example))
+
+
+def test_pydantic_enroll_matches_schema(contract_dir):
+    v = _validator(contract_dir, "enroll-request.schema.json")
+    req = EnrollRequest(
+        join_token="jt_x", hostname="h", os="darwin", arch="arm64",
+        hw=HwProbe(ram_gb=64, accelerator="metal", disk_free_gb=512), profile="shared",
+    )
+    v.validate(req.model_dump(mode="json", exclude_none=True))
+
+
+def test_pydantic_heartbeat_matches_schema(contract_dir):
+    v = _validator(contract_dir, "heartbeat-request.schema.json")
+    hb = HeartbeatRequest(
+        mode="away", installed=["m"], loaded=["m"], queues=["q:8b-extract"],
+        stats={"jobs_done": 1, "tps": 10.0}, protocol_version=1,
+    )
+    v.validate(hb.model_dump(mode="json", exclude_none=True))

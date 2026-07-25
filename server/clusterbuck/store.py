@@ -25,6 +25,29 @@ CREATE TABLE IF NOT EXISTS jobs (
     deadline_epoch REAL           -- epoch seconds; for expiry sweep
 );
 
+-- Dynamic registry (ADR 9): nodes self-enroll and heartbeat; fleet.yaml is only the seed.
+CREATE TABLE IF NOT EXISTS join_tokens (
+    token       TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    used        INTEGER NOT NULL DEFAULT 0,
+    used_by     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS nodes (
+    node_id        TEXT PRIMARY KEY,
+    node_key       TEXT NOT NULL,
+    hostname       TEXT, os TEXT, arch TEXT,
+    ram_gb         REAL, accelerator TEXT, vram_gb REAL, disk_free_gb REAL, bench_tps_small REAL,
+    profile        TEXT,
+    capabilities   TEXT,          -- json array
+    mode           TEXT,
+    installed      TEXT, loaded TEXT, queues TEXT,  -- json arrays
+    jobs_done      INTEGER DEFAULT 0,
+    tps            REAL,
+    last_heartbeat TEXT,
+    enrolled_at    TEXT NOT NULL
+);
+
 -- Usage metering (fleet-management.md → Usage accounting): METADATA ONLY. No prompt or
 -- completion text ever lands here; `outcome` is a status enum, not the error string
 -- (errors can echo input). One row per job (PRIMARY KEY) ⇒ capture is idempotent.
@@ -259,3 +282,54 @@ class Store:
                 (f"{month_prefix}%",),
             ).fetchone()
             return float(row["spent"])
+
+    # --- dynamic registry (M4a) ---
+
+    def mint_token(self, token: str, created_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO join_tokens (token, created_at) VALUES (?, ?)",
+                (token, created_at),
+            )
+
+    def claim_token(self, token: str, used_by: str) -> bool:
+        """Atomically burn a one-time join token. True only on the first claim."""
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE join_tokens SET used = 1, used_by = ? WHERE token = ? AND used = 0",
+                (used_by, token),
+            )
+            return cur.rowcount > 0
+
+    def enroll_node(self, *, node_id: str, node_key: str, req, capabilities: str,
+                    enrolled_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO nodes (node_id, node_key, hostname, os, arch, ram_gb, "
+                "accelerator, vram_gb, disk_free_gb, bench_tps_small, profile, "
+                "capabilities, mode, enrolled_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (node_id, node_key, req.hostname, req.os, req.arch, req.hw.ram_gb,
+                 req.hw.accelerator, req.hw.vram_gb, req.hw.disk_free_gb,
+                 req.hw.bench_tps_small, req.profile, capabilities, "active", enrolled_at),
+            )
+
+    def get_node(self, node_id: str) -> sqlite3.Row | None:
+        with self._conn() as c:
+            return c.execute("SELECT * FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
+
+    def list_nodes(self) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute("SELECT * FROM nodes ORDER BY enrolled_at").fetchall()
+
+    def record_heartbeat(self, *, node_id: str, mode: str, installed: str, loaded: str,
+                         queues: str, jobs_done: int | None, tps: float | None,
+                         last_heartbeat: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE nodes SET mode = ?, installed = ?, loaded = ?, queues = ?, "
+                "jobs_done = COALESCE(?, jobs_done), tps = COALESCE(?, tps), "
+                "last_heartbeat = ? WHERE node_id = ?",
+                (mode, installed, loaded, queues, jobs_done, tps, last_heartbeat, node_id),
+            )
+            return cur.rowcount > 0

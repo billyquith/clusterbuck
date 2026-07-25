@@ -7,21 +7,29 @@ GET  /jobs/{id} → assemble lifecycle state from SQLite + the result blob in Re
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .background import coordinator_loop
 from .config import settings
-from .coordinator import resolve_capability
+from .coordinator import propose_capabilities, resolve_capability
 from .fleet import load_fleet
-from .ids import new_ids, new_reservation_id
-from .models import JobRecord, JobSubmit, ReservationSubmit, Urgency
+from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
+from .models import (
+    EnrollRequest,
+    HeartbeatRequest,
+    JobRecord,
+    JobSubmit,
+    ReservationSubmit,
+    Urgency,
+)
 from .queue import Queue
 from .reservations import admit, iso
 from .store import Store
@@ -37,6 +45,10 @@ _TERMINAL = {"done", "failed", "expired"}
 _WAKE_RIGHTS = {Urgency.urgent, Urgency.necessary}
 
 _log = logging.getLogger("clusterbuck")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def create_app(
@@ -308,6 +320,64 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown reservation id")
         app.state.store.cancel_reservation(rsv_id)
         return _reservation_view(app.state.store.get_reservation(rsv_id))
+
+    # --- dynamic registry: enrollment + heartbeat (protocols.md §6) ---
+
+    @app.post("/nodes/tokens", status_code=201)
+    async def mint_join_token() -> dict:
+        """Admin mints a one-time join token (LAN admin auth is a later concern)."""
+        token = new_join_token()
+        app.state.store.mint_token(token, _now_iso())
+        return {"join_token": token}
+
+    @app.post("/nodes/enroll", status_code=201)
+    async def enroll_node(body: EnrollRequest) -> JSONResponse:
+        node_id = new_node_id()
+        if not app.state.store.claim_token(body.join_token, used_by=node_id):
+            raise HTTPException(status_code=401, detail="invalid or already-used join token")
+        node_key = new_node_key()
+        caps, ladder = propose_capabilities(body.hw.ram_gb)
+        app.state.store.enroll_node(
+            node_id=node_id, node_key=node_key, req=body,
+            capabilities=json.dumps(caps), enrolled_at=_now_iso(),
+        )
+        return JSONResponse(status_code=201, content={
+            "node_id": node_id, "node_key": node_key,
+            "proposed": {"capabilities": caps, "ladder": ladder},
+        })
+
+    @app.post("/nodes/{node_id}/heartbeat")
+    async def heartbeat(
+        node_id: str, body: HeartbeatRequest,
+        x_cbk_node_key: str | None = Header(default=None),
+    ) -> dict:
+        node = app.state.store.get_node(node_id)
+        if node is None:
+            raise HTTPException(status_code=404, detail="unknown node")
+        if x_cbk_node_key != node["node_key"]:
+            raise HTTPException(status_code=401, detail="bad node key")
+        app.state.store.record_heartbeat(
+            node_id=node_id, mode=body.mode,
+            installed=json.dumps(body.installed), loaded=json.dumps(body.loaded),
+            queues=json.dumps(body.queues),
+            jobs_done=body.stats.get("jobs_done"), tps=body.stats.get("tps"),
+            last_heartbeat=_now_iso(),
+        )
+        # Self-update manifest (M4c) and planner notes (M5) are wired in later milestones.
+        return {"update": None, "planner_notes": []}
+
+    @app.get("/nodes")
+    async def list_nodes() -> dict:
+        def view(n) -> dict:  # never expose node_key
+            return {
+                "node_id": n["node_id"], "hostname": n["hostname"],
+                "os": n["os"], "arch": n["arch"], "profile": n["profile"],
+                "ram_gb": n["ram_gb"], "accelerator": n["accelerator"],
+                "capabilities": json.loads(n["capabilities"] or "[]"),
+                "mode": n["mode"], "loaded": json.loads(n["loaded"] or "[]"),
+                "last_heartbeat": n["last_heartbeat"],
+            }
+        return {"nodes": [view(n) for n in app.state.store.list_nodes()]}
 
     return app
 

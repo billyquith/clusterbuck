@@ -1,0 +1,14 @@
+{
+  "join_token": "jt_01HZX9K2QJ8P4V7M3N6T5R0abc",
+  "hostname": "node-42",
+  "os": "darwin",
+  "arch": "arm64",
+  "hw": {
+    "ram_gb": 64,
+    "accelerator": "metal",
+    "vram_gb": null,
+    "disk_free_gb": 512,
+    "bench_tps_small": 42.5
+  },
+  "profile": "shared"
+}

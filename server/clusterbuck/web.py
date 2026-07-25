@@ -63,3 +63,18 @@ async def ui_fleet(request: Request) -> HTMLResponse:
 async def ui_reservations(request: Request) -> HTMLResponse:
     rows = request.app.state.store.list_reservations(limit=20)
     return templates.TemplateResponse(request, "partials/reservations.html", {"rows": rows})
+
+
+@web_routes.get("/ui/nodes", response_class=HTMLResponse)
+async def ui_nodes(request: Request) -> HTMLResponse:
+    import json as _json
+
+    nodes = []
+    for n in request.app.state.store.list_nodes():
+        nodes.append({
+            "id": n["node_id"], "host": n["hostname"], "mode": n["mode"],
+            "caps": ", ".join(_json.loads(n["capabilities"] or "[]")),
+            "loaded": ", ".join(_json.loads(n["loaded"] or "[]")),
+            "seen": (n["last_heartbeat"] or "—"),
+        })
+    return templates.TemplateResponse(request, "partials/nodes.html", {"nodes": nodes})

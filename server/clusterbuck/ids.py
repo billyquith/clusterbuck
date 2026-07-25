@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
 
 
@@ -13,3 +14,15 @@ def new_ids() -> tuple[str, str]:
 
 def new_reservation_id() -> str:
     return f"rsv_{uuid.uuid4().hex}"
+
+
+def new_node_id() -> str:
+    return f"node-{uuid.uuid4().hex[:8]}"
+
+
+def new_node_key() -> str:
+    return f"nk_{secrets.token_urlsafe(24)}"
+
+
+def new_join_token() -> str:
+    return f"jt_{secrets.token_urlsafe(18)}"
