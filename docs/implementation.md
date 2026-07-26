@@ -3,7 +3,7 @@
 The concrete stack for building clusterbuck. The design docs define *what* and *why*;
 this is *how*. Choices favour a small dependency surface, the no-vendor-SDK rule the
 protocols impose (everything spoken over documented wire protocols), and playing each
-component to its strength. Nothing here is built yet — this is the plan the MVP follows.
+component to its strength. This describes the **implemented** stack; where it differs from the code, the code wins.
 
 ## Two components, two languages
 
@@ -34,7 +34,7 @@ drift. Schema change → both sides update or their contract tests fail.
 
 | Concern | Choice | Notes |
 |---|---|---|
-| Runtime | **Python 3.13** | |
+| Runtime | **Python 3.12+** | |
 | Web framework | **FastAPI** + Uvicorn | async, OpenAPI emitted for free (→ any-language clients), Pydantic models validate the contract |
 | Sync gateway | **LiteLLM** — in-process (library) or as the proxy | native fit now the server is Python; routing/fallback/spend to local workers + cloud. Provider keys held here |
 | Broker / queue | **Redis** via **redis-py**, using **Streams + consumer groups** | Streams' pending-entries list + `XAUTOCLAIM` give visibility-timeout / reaper semantics *natively* — no hand-rolled in-flight tracking (ADR 20) |
@@ -44,7 +44,7 @@ drift. Schema change → both sides update or their contract tests fail.
 | Wake-on-LAN | ~10 lines of `socket` | magic packet = 6×`0xFF` + 16×MAC |
 | Update signing | **ECDSA P-256** (`cryptography`) | server signs release manifests with a key the workers pin |
 | Packaging / deploy | **uv** for env + lockfile; launchd/systemd unit | one box, so a venv + service is fine — no bundling needed |
-| Tests | **pytest** + **Testcontainers** (real Redis) + FastAPI `TestClient` | plus the cross-language contract test |
+| Tests | **pytest** + a real Redis (CI service container; `CBK_TEST_REDIS_URL` makes an unreachable broker a failure rather than a skip) + FastAPI `TestClient` | plus the cross-language contract test |
 
 ## Worker stack (C#/.NET)
 
@@ -53,11 +53,11 @@ drift. Schema change → both sides update or their contract tests fail.
 | Runtime | **.NET 10 (LTS)**, Native AOT single-file per RID | lean, instant-start, no runtime install on the node |
 | Redis | **StackExchange.Redis** | consumes the same Streams consumer-group contract |
 | HTTP out (local model server) | `HttpClient` + `System.Text.Json` (source-gen, AOT-friendly) | speaks the OpenAI wire protocol to Ollama/llama.cpp/etc. — **no vendor SDK** |
-| CLI | **Spectre.Console.Cli** | `cbk work / submit / status / fleet / enroll-token / pause` |
+| CLI | **Spectre.Console.Cli** | `cbk work / submit / status / fleet / enroll / pause / resume` (join tokens are minted by the server, `POST /nodes/tokens`) |
 | Hardware probe | small per-OS shims (`sysctl` / `/proc+/sys` / WMI); throughput bench = a timed call to the local model server | no heavyweight hardware-info dependency |
 | Update verify | **ECDSA P-256** (`System.Security.Cryptography`) | verifies the server's signed manifest against a pinned public key before applying |
 | mDNS | OS-native responder files in `deploy/`; browse via **Zeroconf** later | MVP uses a configured coordinator URL — the designed fallback |
-| Tests | **xUnit** + Testcontainers (Redis) | plus the shared contract test |
+| Tests | **xUnit**, driving real subprocesses/HTTP where it matters | plus the shared contract test |
 
 ### Worker footprint (the levers that make it lightweight)
 
@@ -130,8 +130,19 @@ clusterbuck/
   budget governor.
 - **M4 — self-managing.** Enrollment + hardware probe; presence ladder; signed
   self-update with canary + rollback.
-- **M5 — optimisation.** Model catalog + eval-gated upgrades; planner suggestions;
-  cost-quality arbitrage.
+- **M5 — optimisation.** Ability matrix (ADR 15) + tier-1 programmatic eval + need-shaped
+  `{task_class, min_ability}` routing (ADR 16).
+- **M6 — model management (ADR 25).** Workers discover their models over the generic
+  `/v1/models`; the coordinator holds a catalog and raises proposals through three gates
+  (fits → beats the incumbent's measured ability → human approval); an approved install is
+  executed by the worker via a per-server model-manager adapter, presence-gated.
+- **M7 — eval harness.** Unmeasured artifacts are measured as *ordinary fleet jobs*, so a
+  freshly installed model earns a score and becomes routable.
+- **Hardening.** Shared-secret auth (ADR 26), the visibility-timeout reaper (ADR 20), CI, and
+  the contract validator.
+
+Cost-quality arbitrage, and judge-based eval tiers 2/3, remain deferred — they need real usage
+data and a judge model respectively.
 
 Evaluation and the catalog come last deliberately: they need real usage data and a real
 model mix to produce anything worth acting on.

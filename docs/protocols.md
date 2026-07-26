@@ -2,8 +2,9 @@
 
 Every boundary in clusterbuck is a documented protocol, which is what keeps the system
 polyglot and open (see [`../DESIGN.md`](../DESIGN.md) → *Implementation language &
-boundaries*). This document specifies each seam. Shapes below are **design intent**, not
-a frozen spec — field names may change before the first implementation.
+boundaries*). This document specifies each seam. The shapes below describe the **implemented** system;
+where a machine-readable schema exists in [`contract/`](../contract/) that schema is
+authoritative and this document is its prose companion.
 
 ## 1. Client ↔ clusterbuck
 
@@ -61,32 +62,57 @@ The client never learns which machine ran the job beyond an opaque id (diagnosti
 ## 2. clusterbuck server ↔ worker (Redis queue contract)
 
 The server and the reference worker communicate **only** through Redis. Any worker in
-any language that honours this contract can join the fleet.
+any language that honours this contract can join the fleet — this section is the spec you
+would write one from, so it states the concrete names and commands rather than intent.
 
-- **Queues:** one list per capability, `q:<capability>` (e.g. `q:8b`, `q:32b`). A worker
-  consumes from the queues it can satisfy (blocking pop, e.g. `BLPOP`).
-- **Job payload on the queue:** the job record —
+Implemented on **Redis Streams + consumer groups** (ADR 20), *not* plain lists: the
+pending-entries list and `XAUTOCLAIM` provide the visibility-timeout / at-least-once
+semantics natively.
+
+- **Stream per capability:** `q:<capability>` (e.g. `q:8b-extract`). The job JSON is the
+  single field **`job`** of each entry. The server appends with
+  `XADD q:<capability> MAXLEN ~ <cap> * job <json>`.
+- **Consumer group:** one shared group named **`cbk-workers`** (`CBK_CONSUMER_GROUP`) per
+  stream, created with `XGROUP CREATE … $ MKSTREAM` (tolerate `BUSYGROUP`). Every worker
+  joins the *same* group, so each job is delivered to exactly one of them.
+- **Claiming:** `XREADGROUP GROUP cbk-workers <worker-id> COUNT n STREAMS q:<capability> >`.
+  Note the reference worker polls rather than blocking, because StackExchange.Redis exposes
+  no blocking read; a blocking `BLOCK` argument is equally valid for the contract.
+- **Job payload** (authoritative schema: [`contract/job.schema.json`](../contract/job.schema.json)) —
 
   ```
   {
     id, created_at,
     capability,
     messages | prompt,
-    params,
+    params,                 # forwarded to the model server; see the `model` pin below
     urgency, escalate_after_min, privacy, deadline,
     result_key,
     attempts, max_attempts
   }
   ```
 
-- **In-flight tracking:** a claimed job moves to a per-worker processing list with a
-  **visibility timeout**; if the worker doesn't acknowledge before it expires, a reaper
-  returns the job to `q:<capability>` (bounded by `max_attempts`). This is what makes a
-  laptop closing its lid mid-job safe.
-- **Result:** written once to the result store under `result_key` (a Redis key with a
-  TTL), shape mirroring an OpenAI completion plus `{status, error, worker}`.
-- **Idempotency:** results are write-once under `result_key`; a re-run of the same job
-  overwrites deterministically rather than duplicating.
+- **`params.model` is a REQUIREMENT, not a hint.** If present it names the exact artifact the
+  job must run on, overriding the worker's configured default model. The eval harness relies
+  on it to attribute a measurement to the artifact under test; a worker that ignores it will
+  silently mis-attribute scores.
+- **Completion:** write the result (below), then `XACK q:<capability> cbk-workers <entry-id>`.
+  Acknowledge on failure too, having written a `failed` result — an unacked entry is
+  indistinguishable from an abandoned one.
+- **Recovery:** entries left pending longer than the coordinator's idle threshold
+  (`CBK_REAPER_MIN_IDLE_MS`, default 10 min) are reclaimed with `XAUTOCLAIM`, re-appended to
+  the stream with `attempts` incremented, and the stale delivery acked away. Past
+  `max_attempts` the coordinator writes a terminal `failed` result instead. This is what makes
+  a laptop closing its lid mid-job safe. The threshold necessarily exceeds the longest
+  plausible inference, because a worker mid-generation is not reading from Redis.
+- **Result:** written to a plain Redis key named by `result_key`, with a TTL
+  (`CBK_RESULT_TTL_S`). Authoritative schema:
+  [`contract/result.schema.json`](../contract/result.schema.json) — it *requires*
+  `{job_id, status, worker, completed_at}` and nests the OpenAI-shaped body under
+  **`completion`**, with optional `usage`. `status` is `done | failed | expired`.
+- **Idempotency:** a re-run overwrites the same `result_key` rather than duplicating. Delivery
+  is at-least-once, so a job may legitimately run twice; the coordinator skips re-running a
+  reclaimed entry whose result already exists.
 
 ## 3. Worker ↔ model server (OpenAI HTTP)
 
@@ -241,3 +267,32 @@ POST /attention
 Effect: the client's `waitable` backlog (within scope) promotes to `necessary`,
 coalesced into a warm window rather than per-job wakes; artifacts that backlog needs may
 pre-warm. On lease expiry, unstarted promoted jobs return to `waitable`.
+
+## 10. Coordinator/operator endpoints
+
+The sections above specify the load-bearing seams. These are the remaining HTTP endpoints the
+coordinator serves — mostly read-only views over state described elsewhere, listed here so
+"the concrete spec of every boundary" is true rather than aspirational. All of them sit behind
+the operator shared secret (ADR 26) except where noted.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | Liveness. **Unauthenticated** (probe). |
+| `GET /fleet` | The static registry as loaded from `fleet.yaml` (§5). |
+| `GET /queues` | Per-capability depth, pending (claimed-unacked) count, and live consumers. |
+| `GET /nodes` | Enrolled nodes: profile, mode, probed hardware, installed/loaded models, last heartbeat. Never exposes `node_key`. |
+| `POST /nodes/tokens` | Mint a one-time join token for §6 enrollment. |
+| `POST /nodes/{id}/policy` | The owner's contract for a node — `{disk_quota_gb, auto_approve}` as a **JSON body**. `auto_approve` opts that node out of human approval for installs. |
+| `GET /usage` | Metering rollups + the avoided-cloud-spend headline + budget burn (fleet-management.md → Usage accounting). Budget is **displayed, not enforced**. |
+| `GET /ability` | The ability matrix `ability(artifact, task_class)` with its scale version, each row marked `seed` or `measured`, plus a per-artifact headline scalar (ADR 15/16). |
+| `GET /eval` | Eval-harness state: artifacts still needing measurement, and per-batch progress. |
+| `POST /eval/run` | Run one harness pass now instead of waiting for the coordinator cadence. |
+| `GET /catalog` | Known-good artifacts with the metadata the "fits" gate needs (ADR 25). |
+| `GET /proposals` | Planner proposals (`upgrade` / `reeval` / `reclaim`), filterable by status. |
+| `POST /proposals/scan` | Re-run the planner immediately. |
+| `POST /proposals/{id}/approve` \| `/deny` | The human gate. Single-shot: deciding twice is a conflict, not a silent overwrite. |
+| `GET /updates/manifest?rid=…` | A signed release manifest (§7). 404 when no update channel is configured. |
+| `GET /` and `GET /ui/*` | The htmx dashboard and its fragments (ADR 21). Browser clients exchange `?key=…` for a cookie once. |
+
+`GET /jobs/{id}` additionally returns `urgency`, which is not in §1b: it reflects the
+escalation trajectory (ADR 18), so a client can see that its `waitable` work was promoted.

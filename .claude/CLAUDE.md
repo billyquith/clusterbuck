@@ -10,7 +10,7 @@ LAN is capable and available — routing live requests now (sync plane), or queu
 work until a worker is contactable, waking one if worth it (async plane). The name is a
 nod to *"pass the buck"* — the broker hands each job to whichever worker is up.
 
-**Status: M0–M5 complete** (the whole roadmap). The design is complete and the system is
+**Status: M0–M7 complete, plus a hardening pass.** The design is complete and the system is
 built and proven end-to-end (fake stub + Ollama), server + worker, across the
 cross-language contract. Milestones:
 
@@ -44,8 +44,17 @@ cross-language contract. Milestones:
   per job**, drained by real workers, scored deterministically, ability recorded, artifact
   then routable. Endpoints `/eval` + `POST /eval/run`.
 
+**Hardening (post-audit).** An audit of the finished system found real defects, since fixed:
+shared-secret auth (ADR 26) closing an anonymous chain that reached model installs and
+deletions; the **visibility-timeout reaper** (ADR 20) that ADR 20 existed to justify but was
+never built, so an abandoned job was stranded forever; a changed digest silently inheriting a
+stale ability score; eval scoring on a shrunken sample; seeded scores exempting the shipped
+fleet from measurement; `min_ability` under-serving instead of failing explicitly; and an
+unenforced `privacy` filter. CI plus a contract validator now gate all of it, and Redis-backed
+tests **fail** rather than skip when `CBK_TEST_REDIS_URL` is set.
+
 A single coordinator loop runs the escalation / reservation / attention / usage / eval /
-planner ticks. Deliberately deferred (needs real hardware, a judge model, real usage data,
+reaper / planner ticks. Deliberately deferred (needs real hardware, a judge model, real usage data,
 or multi-node — documented in code + ADRs): true Wake-on-LAN to real MACs, multi-node
 canary/rollback + binary self-replacement, OS presence detection, judge-based eval tiers
 (2/3) + Bradley-Terry/Elo + anchor calibration, real multi-GB weight downloads (the pull
@@ -86,15 +95,16 @@ Treat any leak of the above as a bug.
 - [docs/related-projects.md](../docs/related-projects.md) — survey of adjacent projects and
   why they don't fit this niche (keep collating).
 
-## Planned stack (once code starts)
+## Stack (as built)
 
-Full plan in [docs/implementation.md](../docs/implementation.md). In brief — **two
+Detail in [docs/implementation.md](../docs/implementation.md). In brief — **two
 components, two languages**, meeting only at documented seams (Redis queue contract +
 HTTP), never in shared code:
 
 - **`cbk-server` — Python** (one always-on box; ecosystem-heavy): FastAPI, **LiteLLM**
   (native fit now the server is Python), redis-py (Redis **Streams + consumer groups**),
-  SQLite as durable system of record, APScheduler, uv. Serves the htmx dashboard.
+  SQLite as durable system of record, a plain asyncio coordinator loop (no APScheduler), uv.
+  Serves the htmx dashboard.
 - **`cbk` — C#/.NET Native AOT** (fans out to every node; single-file self-update):
   worker loop + hardware probe + updater + Spectre.Console CLI; StackExchange.Redis;
   `HttpClient` to the local model server (**no vendor SDK**).

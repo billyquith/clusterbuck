@@ -80,9 +80,13 @@ LiteLLM as a C# sidecar meant a Python process anyway, duplicating coordinator s
 
 ## 22. Cross-language contract via JSON Schema source of truth
 **Decision:** because server (Python) and worker (C#) can't share a type library, the
-wire contract lives as a machine-readable **JSON Schema in `contract/`** (job, result,
-enrollment, heartbeat, reservation, attention, update-manifest), with a **conformance
-test on each side** asserting round-trip agreement.
+wire contract lives as a machine-readable **JSON Schema in `contract/`**, with a
+**conformance test on each side** asserting round-trip agreement.
+**Scope in practice:** only the seams the C# worker actually parses or produces are in
+`contract/` — job, result, enroll request/response, heartbeat request/response,
+update-manifest. Reservations and attention are *server-only* HTTP shapes that no worker
+touches, so they stay Pydantic models rather than shared schemas; adding them would imply a
+cross-language contract that does not exist.
 **Why:** the split (ADR 7) gives up the compile-time shared-types safety a single language
 would have had; a schema + two conformance tests restores it — the type definitions
 cannot silently drift, and [protocols.md](protocols.md) gains a machine-checkable
@@ -249,8 +253,9 @@ always-on node, no gain at this scale).
 existing JSON endpoints, vendored (no CDN), served by `cbk-server`.
 **Why:** no separate frontend build chain on an infrastructure repo; reuses the APIs
 that already exist for the CLI and clients; LAN-only so vendoring is natural. Blazor
-remains the C#-native upgrade path if real interactivity is later needed — available
-because the server is JIT, not AOT (ADR 19).
+remains a possible upgrade path if real interactivity is later needed, though it would mean
+a second runtime beside the Python server (this ADR originally justified it by the server
+being JIT C#, which ADR 7 superseded).
 **Considered:** a React/Vite SPA (build chain + dependency mass unwarranted for an admin
 panel); Blazor from the start (heavier than needed for mostly-readonly views, but the
 sanctioned upgrade).
