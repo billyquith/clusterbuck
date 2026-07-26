@@ -42,6 +42,13 @@ class Settings:
     # Shared-secret for the coordinator API (DESIGN.md → Security). Unset ⇒ auth disabled
     # (dev default, warned at startup).
     api_key: str | None = os.environ.get("CBK_API_KEY") or None
+    # Worker version governance (ADR 27). All unset ⇒ every worker is judged `ok`, so a
+    # fleet works before an operator has opinions. `blocked` is a comma-separated list of
+    # exact versions known to be broken — bugs are not monotonic, so a floor alone cannot
+    # express "1.4.2 is bad but 1.4.1 and 1.4.3 are fine".
+    worker_current_version: str | None = os.environ.get("CBK_WORKER_CURRENT_VERSION") or None
+    worker_min_version: str | None = os.environ.get("CBK_WORKER_MIN_VERSION") or None
+    worker_blocked_versions: str | None = os.environ.get("CBK_WORKER_BLOCKED_VERSIONS") or None
     # Self-update (ADR 13). Both unset ⇒ /updates/manifest returns 404 (no update channel).
     # The signing key is operator-held and must live OUTSIDE the repo (it's RCE if leaked).
     update_signing_key: str | None = os.environ.get("CBK_UPDATE_SIGNING_KEY") or None

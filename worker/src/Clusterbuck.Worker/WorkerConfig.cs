@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace Clusterbuck.Worker;
 
 /// <summary>Worker configuration, from environment with LAN-dev defaults.</summary>
@@ -20,6 +22,19 @@ public sealed record WorkerConfig
     /// models (ADR 10). Cold loads are expensive, so this is damped by default; tune it per
     /// node (a dedicated box wants it near zero, a laptop wants minutes).</summary>
     public double LadderHysteresisS { get; init; } = 120;
+
+    /// <summary>
+    /// This agent's version, read from the assembly's build-time stamp (csproj `&lt;Version&gt;`).
+    /// The coordinator uses it to decide whether this worker is fit to run jobs — a version can
+    /// be protocol-compatible yet carry bugs that produce wrong results, so "suitable" is a
+    /// stronger question than "can it speak the contract".
+    /// </summary>
+    public static string AgentVersion =>
+        System.Reflection.Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion.Split('+')[0]          // strip any +buildmetadata
+        ?? System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
+        ?? "0.0.0";
 
     /// <summary>Operator shared secret for the coordinator API (CBK_API_KEY). Needed by the
     /// admin CLI verbs; the worker loop itself does not use it, because enroll is

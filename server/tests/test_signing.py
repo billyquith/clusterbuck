@@ -26,6 +26,11 @@ def test_sign_verify_roundtrip():
     assert signing.verify_manifest(pub, m)
     assert not signing.verify_manifest(pub, dict(m, sha256="0" * 64))     # tampered artifact
     assert not signing.verify_manifest(pub, dict(m, version="9.9.9"))     # tampered version
+    # url and protocol_version are inside the signed payload: without that, an on-path
+    # attacker could redirect the fetch host, or stall every worker via skew gating.
+    assert not signing.verify_manifest(pub, dict(m, url="https://evil.invalid/cbk"))
+    assert not signing.verify_manifest(pub, dict(m, protocol_version=99))
+    assert not signing.verify_manifest(pub, dict(m, channel="canary"))
 
 
 def test_committed_fixture_verifies():

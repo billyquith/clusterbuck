@@ -7,5 +7,12 @@
     "registry_ref": "qwen2.5:14b",
     "source": "ollama"
   },
-  "planner_notes": ["queue q:32b-reason waited 40 min on average — consider the away-mode ladder"]
+  "planner_notes": [
+    "queue q:32b-reason waited 40 min on average \u2014 consider the away-mode ladder"
+  ],
+  "fitness": {
+    "status": "ok",
+    "reason": null,
+    "current_version": "0.7.0"
+  }
 }

@@ -2,32 +2,101 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clusterbuck.dev/contract/heartbeat-response.schema.json",
   "title": "HeartbeatResponse",
-  "description": "The coordinator's heartbeat reply (protocols.md §6): an optional self-update manifest and planner notes. `update` conforms to update-manifest.schema.json when present (defined with the self-update channel, §7).",
+  "description": "The coordinator's heartbeat reply (protocols.md \u00a76): an optional self-update manifest and planner notes. `update` conforms to update-manifest.schema.json when present (defined with the self-update channel, \u00a77).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["update", "planner_notes"],
+  "required": [
+    "update",
+    "planner_notes"
+  ],
   "properties": {
     "update": {
-      "type": ["object", "null"],
-      "description": "null ⇒ up to date; otherwise an update-manifest (see §7)."
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "null \u21d2 up to date; otherwise an update-manifest (see \u00a77)."
     },
     "action": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "An approved model-management action for this node to execute, or null. Only ever issued for a proposal a human (or an explicit per-node auto_approve opt-in) has approved.",
       "additionalProperties": false,
-      "required": ["proposal_id", "kind", "artifact", "source"],
+      "required": [
+        "proposal_id",
+        "kind",
+        "artifact",
+        "source"
+      ],
       "properties": {
-        "proposal_id": { "type": "string", "minLength": 1 },
-        "kind": { "type": "string", "enum": ["install", "remove"] },
-        "artifact": { "type": "string", "minLength": 1 },
-        "registry_ref": { "type": "string", "description": "What to ask the model manager to pull (install only)." },
-        "source": { "type": "string", "description": "Model-manager the action targets, e.g. \"ollama\"." }
+        "proposal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "install",
+            "remove"
+          ]
+        },
+        "artifact": {
+          "type": "string",
+          "minLength": 1
+        },
+        "registry_ref": {
+          "type": "string",
+          "description": "What to ask the model manager to pull (install only)."
+        },
+        "source": {
+          "type": "string",
+          "description": "Model-manager the action targets, e.g. \"ollama\"."
+        }
       }
     },
     "planner_notes": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Advisory suggestions from the planner (never silent changes)."
+    },
+    "fitness": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "The coordinator's verdict on whether this worker build may run jobs. Enforcement is COOPERATIVE \u2014 workers claim straight from Redis, so a worker that ignores this cannot be hard-blocked (ADR 27).",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "stale",
+            "quarantine"
+          ],
+          "description": "ok = fit; stale = behind but usable; quarantine = must not claim jobs."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The version the coordinator considers current."
+        }
+      }
     }
   }
 }

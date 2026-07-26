@@ -2,45 +2,99 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clusterbuck.dev/contract/heartbeat-request.schema.json",
   "title": "HeartbeatRequest",
-  "description": "Periodic worker heartbeat (protocols.md §6): presence mode, installed vs loaded models, current queue subscriptions, and rolling stats. Also the poll point for updates.",
+  "description": "Periodic worker heartbeat (protocols.md \u00a76): presence mode, installed vs loaded models, current queue subscriptions, and rolling stats. Also the poll point for updates.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["mode"],
+  "required": [
+    "mode"
+  ],
   "properties": {
-    "mode": { "type": "string", "enum": ["active", "away", "paused"] },
-    "installed": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "active",
+        "away",
+        "paused"
+      ]
+    },
+    "installed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
     "loaded": {
-      "type": "array", "items": { "type": "string" }, "default": [],
-      "description": "Warm right now — enables model-affinity routing."
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [],
+      "description": "Warm right now \u2014 enables model-affinity routing."
     },
     "digests": {
       "type": "object",
-      "description": "Optional artifact → content digest, where the model server exposes it. Ability is pinned to an artifact (ADR 15), so a changed digest means a NEW artifact whose score must be re-measured rather than inherited.",
-      "additionalProperties": { "type": "string" }
+      "description": "Optional artifact \u2192 content digest, where the model server exposes it. Ability is pinned to an artifact (ADR 15), so a changed digest means a NEW artifact whose score must be re-measured rather than inherited.",
+      "additionalProperties": {
+        "type": "string"
+      }
     },
-    "queues": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "queues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
     "stats": {
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "jobs_done": { "type": "integer", "minimum": 0 },
-        "tps": { "type": "number", "minimum": 0 }
+        "jobs_done": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tps": {
+          "type": "number",
+          "minimum": 0
+        }
       }
     },
     "protocol_version": {
-      "type": "integer", "minimum": 1,
-      "description": "Queue-contract protocol version the worker speaks (skew gating, §7)."
+      "type": "integer",
+      "minimum": 1,
+      "description": "Queue-contract protocol version the worker speaks (skew gating, \u00a77)."
     },
     "action_result": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Outcome of the model-management action the previous heartbeat response issued. Closes the loop so the coordinator can mark the proposal applied or failed.",
       "additionalProperties": false,
-      "required": ["proposal_id", "ok"],
+      "required": [
+        "proposal_id",
+        "ok"
+      ],
       "properties": {
-        "proposal_id": { "type": "string", "minLength": 1 },
-        "ok": { "type": "boolean" },
-        "error": { "type": ["string", "null"] }
+        "proposal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
+    },
+    "agent_version": {
+      "type": "string",
+      "description": "The worker's build-stamped release version (semver-ish, e.g. 0.7.0). The coordinator judges FITNESS from this, not just protocol compatibility: a version can speak the contract correctly and still carry bugs that produce wrong results."
     }
   }
 }

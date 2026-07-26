@@ -1,13 +1,29 @@
 {
   "mode": "away",
-  "installed": ["llama3.2:3b", "qwen2.5:32b"],
-  "loaded": ["qwen2.5:32b"],
+  "installed": [
+    "llama3.2:3b",
+    "qwen2.5:32b"
+  ],
+  "loaded": [
+    "qwen2.5:32b"
+  ],
   "digests": {
     "llama3.2:3b": "sha256:a80c4f17acd5b0f1c9e3d2b8f7a6519e4c3d2b1a09f8e7d6c5b4a39281706f5e4",
     "qwen2.5:32b": "sha256:b91d5e28bd6c1f2a0df4e3c9a8b7620f5d4e3c2b1a09f8e7d6c5b4a3928170615"
   },
-  "queues": ["q:8b-extract", "q:32b-reason"],
-  "stats": { "jobs_done": 12, "tps": 38.5 },
+  "queues": [
+    "q:8b-extract",
+    "q:32b-reason"
+  ],
+  "stats": {
+    "jobs_done": 12,
+    "tps": 38.5
+  },
   "protocol_version": 1,
-  "action_result": { "proposal_id": "prop_4f2e5d118409", "ok": true, "error": null }
+  "action_result": {
+    "proposal_id": "prop_4f2e5d118409",
+    "ok": true,
+    "error": null
+  },
+  "agent_version": "0.7.0"
 }

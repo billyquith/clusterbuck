@@ -20,8 +20,17 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 
-def signing_payload(*, version: str, rid: str, sha256: str, channel: str) -> bytes:
-    return "\n".join([version, rid, sha256, channel]).encode()
+def signing_payload(*, version: str, rid: str, sha256: str, channel: str,
+                    url: str, protocol_version: int) -> bytes:
+    """The exact bytes a signature covers.
+
+    `url` and `protocol_version` are inside the payload deliberately. Signing only
+    version/rid/sha256/channel left two gaps: an on-path attacker could rewrite `url` to
+    choose which host a worker fetches from (the digest still catches a swapped binary, but
+    the fetch itself goes wherever they say), and could inflate `protocol_version` to make
+    every worker pause pulling — a fleet-wide stall that bypasses the signed channel.
+    """
+    return "\n".join([version, rid, sha256, channel, url, str(protocol_version)]).encode()
 
 
 def generate_keypair() -> ec.EllipticCurvePrivateKey:
@@ -53,10 +62,11 @@ def load_private_pem(pem: str | bytes) -> ec.EllipticCurvePrivateKey:
 
 
 def sign_manifest(private_key: ec.EllipticCurvePrivateKey, *, version: str, rid: str,
-                  sha256: str, channel: str) -> str:
+                  sha256: str, channel: str, url: str, protocol_version: int) -> str:
     """Return the base64 DER ECDSA signature over the manifest's signing payload."""
     sig = private_key.sign(
-        signing_payload(version=version, rid=rid, sha256=sha256, channel=channel),
+        signing_payload(version=version, rid=rid, sha256=sha256, channel=channel,
+                        url=url, protocol_version=protocol_version),
         ec.ECDSA(hashes.SHA256()),
     )
     return base64.b64encode(sig).decode()
@@ -69,6 +79,7 @@ def verify_manifest(public_key: ec.EllipticCurvePublicKey, manifest: dict) -> bo
             signing_payload(
                 version=manifest["version"], rid=manifest["rid"],
                 sha256=manifest["sha256"], channel=manifest["channel"],
+                url=manifest["url"], protocol_version=int(manifest["protocol_version"]),
             ),
             ec.ECDSA(hashes.SHA256()),
         )
@@ -85,5 +96,6 @@ def build_manifest(private_key: ec.EllipticCurvePrivateKey, *, version: str, rid
         "version": version, "rid": rid, "url": url, "sha256": sha256,
         "channel": channel, "protocol_version": protocol_version,
         "signature": sign_manifest(private_key, version=version, rid=rid,
-                                    sha256=sha256, channel=channel),
+                                    sha256=sha256, channel=channel, url=url,
+                                    protocol_version=protocol_version),
     }

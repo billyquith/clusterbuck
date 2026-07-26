@@ -78,6 +78,30 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         return 0;
     }
 
+    /// <summary>
+    /// Apply the coordinator's fitness verdict. Returns true when this worker must not claim
+    /// jobs. Enforcement is COOPERATIVE: workers claim straight from Redis, so the
+    /// coordinator cannot hard-block one that ignores this — see ADR 27.
+    /// </summary>
+    private static bool ApplyFitness(Fitness? fitness, Action<string> log)
+    {
+        if (fitness is null) return false;
+        switch (fitness.Status)
+        {
+            case "quarantine":
+                log($"QUARANTINED by coordinator — not claiming jobs: {fitness.Reason}. " +
+                    $"Update to {fitness.CurrentVersion ?? "the current release"} " +
+                    $"(this agent is {WorkerConfig.AgentVersion}).");
+                return true;
+            case "stale":
+                log($"version {WorkerConfig.AgentVersion} is behind " +
+                    $"{fitness.CurrentVersion ?? "current"}: {fitness.Reason}. Still serving.");
+                return false;
+            default:
+                return false;
+        }
+    }
+
     /// <summary>Periodic heartbeat: re-read the persisted mode, drive the ladder (which
     /// resubscribes capabilities and toggles pause), take a model inventory, and report to
     /// the coordinator.</summary>
@@ -86,7 +110,8 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         ModelInventory inventory, ModelManager manager, string statePath, WorkerConfig cfg,
         CancellationToken ct)
     {
-        ActionResult? pendingResult = null;   // reported on the next beat, then cleared
+        ActionResult? pendingResult = null;
+        var quarantined = false;   // reported on the next beat, then cleared
         while (!ct.IsCancellationRequested)
         {
             try
@@ -111,14 +136,23 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
                             Loaded = loaded,
                             Digests = digests.Count > 0 ? digests : null,
                             Queues = caps.Select(c => WorkLoop.StreamKey(c)).ToList(),
-                            ProtocolVersion = 1,
+                            ProtocolVersion = UpdateVerifier.ProtocolVersion,
+                            AgentVersion = WorkerConfig.AgentVersion,
                             ActionResult = pendingResult,
                         }, ct);
                     pendingResult = null;   // reported; don't repeat it
 
+                    // The coordinator judges whether this build is fit to run jobs. A
+                    // quarantined worker stops claiming: a version with known-bad behaviour
+                    // producing plausible-looking wrong results is worse than an idle node.
+                    quarantined = ApplyFitness(resp.Fitness, s2 =>
+                        AnsiConsole.MarkupLineInterpolated($"[yellow]{s2}[/]"));
+                    loop.Paused = quarantined || effective == "paused";
+
                     // Execute an approved model-management action, if one was issued. The
                     // worker never decides this — it only carries out an approved proposal.
-                    if (resp.Action is { } action)
+                    // A quarantined worker installs nothing.
+                    if (!quarantined && resp.Action is { } action)
                         pendingResult = await ExecuteActionAsync(manager, action, ct);
                 }
             }

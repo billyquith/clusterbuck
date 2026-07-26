@@ -381,3 +381,38 @@ are done, `IsAotCompatible=true` in the csproj is an analyzer setting, not a shi
 node — exactly what ADR 19 rejected); fixing AOT first (blocks all releases on a CLI rewrite);
 per-OS native runners for every RID (unnecessary once cross-publish was shown to work, and
 slower).
+
+## 27. The coordinator judges worker *fitness*, not just protocol compatibility
+**Decision:** every worker reports a **build-stamped** `agent_version` (read from the
+assembly, not a constant) plus its `protocol_version` on each heartbeat. The coordinator
+assesses it against three knobs — `current` (behind ⇒ **stale**, flagged but serving),
+`minimum` (below ⇒ **quarantine**), and a **block-list** of specific releases (⇒
+**quarantine**) — and returns a `fitness` verdict the worker honours by ceasing to claim
+jobs. Unset policy ⇒ everything is `ok`, so a fleet works before an operator has opinions.
+Version and verdict are shown on `/nodes` and the dashboard.
+**Why:** protocols.md §7 only ever gated *protocol skew*, and even that was unimplemented —
+the worker sent `protocol_version` and the server parsed and discarded it. But protocol
+compatibility is **necessary, not sufficient**: a worker can speak the contract perfectly and
+still carry bugs that produce plausible-looking wrong results. The concrete case from this
+codebase: a worker predating the `params.model` requirement ignores the artifact pin, so eval
+jobs are measured on whatever model that node defaults to and **ability scores are attributed
+to the wrong artifact**, silently corrupting routing. No protocol check catches that.
+The **block-list is the load-bearing knob**, because **bugs are not monotonic** — 1.4.2 can be
+broken while 1.4.1 and 1.4.3 are fine, which a floor cannot express. Version *visibility* also
+matters independently: before this, `GET /nodes` showed hardware and models but not what code
+a node ran, so a three-week-old worker looked identical to a fresh one.
+**Consequences:** an unfit worker is also denied model-management actions — a build that may
+misbehave should not be installing multi-GB weights. Unparseable versions are treated as
+`stale` normally, but `quarantine` when a floor is declared: a worker that cannot be *shown*
+to meet the floor fails it rather than being assumed adequate.
+**Enforcement is COOPERATIVE, and that is a real limit.** Workers claim straight from Redis
+(ADR 2, pull-based), so the coordinator cannot hard-block one that ignores its verdict — it
+can only withhold what it controls and ask the worker to stand down. That is adequate for the
+threat model here (buggy builds, not hostile ones). Hard enforcement would require per-node
+Redis credentials issued at enrollment and revocable on quarantine, which would also give
+Redis auth a purpose it currently lacks; noted as the upgrade path, not built.
+**Considered:** protocol-version gating alone (cannot express "this build is buggy"); a
+minimum-version floor alone (cannot express non-monotonic bugs); refusing enrollment to unfit
+workers (too late — the fleet's problem is *running* workers that drifted); hard-failing
+heartbeats from unfit workers (loses the telemetry that shows you the drift, and gives the
+worker no instruction).

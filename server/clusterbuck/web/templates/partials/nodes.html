@@ -1,10 +1,16 @@
 <h2>Enrolled nodes</h2>
 {% if nodes %}
 <table>
-  <tr><th>node</th><th>mode</th><th>models (installed / warm)</th><th>capabilities</th></tr>
+  <tr><th>node</th><th>version</th><th>mode</th><th>models (installed / warm)</th><th>capabilities</th></tr>
   {% for n in nodes %}
   <tr>
     <td>{{ n.id }}<br><span class="sub" style="color:var(--muted);font-size:.75rem">{{ n.host }}</span></td>
+    <td>
+      {{ n.version }}
+      {% if n.fitness == "quarantine" %}<br><span class="pill warn" title="{{ n.fitness_reason }}">quarantined</span>
+      {% elif n.fitness == "stale" %}<br><span class="pill" title="{{ n.fitness_reason }}">stale</span>
+      {% endif %}
+    </td>
     <td>
       {% if n.mode == "active" %}<span class="pill">active</span>
       {% elif n.mode == "away" %}<span class="pill ok">away</span>

@@ -170,6 +170,10 @@ class HeartbeatRequest(BaseModel):
     loaded: list[str] = Field(default_factory=list)
     # artifact → content digest, where the model server exposes it (drives re-eval, ADR 15).
     digests: dict[str, str] | None = None
+    # The worker's build-stamped release version. The coordinator judges FITNESS from this,
+    # not just protocol compatibility (ADR 27) — optional so a worker predating the field
+    # still heartbeats rather than 422-ing, and is assessed as unverifiable instead.
+    agent_version: str | None = None
     queues: list[str] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
     protocol_version: int | None = None

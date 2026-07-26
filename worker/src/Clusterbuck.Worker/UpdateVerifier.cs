@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -32,8 +33,12 @@ public static class UpdateVerifier
 
     public static bool Verify(UpdateManifest manifest, string publicKeyPem)
     {
-        var payload = Encoding.UTF8.GetBytes(
-            string.Join("\n", manifest.Version, manifest.Rid, manifest.Sha256, manifest.Channel));
+        // Must match signing.py::signing_payload exactly, including url and
+        // protocol_version — signing only the first four fields let an attacker redirect the
+        // fetch host or stall the fleet via an inflated protocol_version.
+        var payload = Encoding.UTF8.GetBytes(string.Join("\n",
+            manifest.Version, manifest.Rid, manifest.Sha256, manifest.Channel,
+            manifest.Url, (manifest.ProtocolVersion ?? 1).ToString(CultureInfo.InvariantCulture)));
         byte[] signature;
         try
         {

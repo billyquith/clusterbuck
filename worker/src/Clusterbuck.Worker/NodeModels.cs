@@ -54,6 +54,7 @@ public sealed record HeartbeatRequest
     [JsonPropertyName("queues")] public List<string> Queues { get; init; } = new();
     [JsonPropertyName("stats")] public HeartbeatStats Stats { get; init; } = new();
     [JsonPropertyName("protocol_version")] public int? ProtocolVersion { get; init; }
+    [JsonPropertyName("agent_version")] public string? AgentVersion { get; init; }
     [JsonPropertyName("action_result")] public ActionResult? ActionResult { get; init; }
 }
 
@@ -75,11 +76,25 @@ public sealed record ActionResult
     [JsonPropertyName("error")] public string? Error { get; init; }
 }
 
+/// <summary>
+/// The coordinator's verdict on whether this worker is fit to run jobs.
+/// `ok` — fit. `stale` — usable but behind; keep working, warn the operator.
+/// `quarantine` — do NOT claim jobs: this version is below the supported floor or is
+/// explicitly blocked as buggy, so anything it produced would be suspect.
+/// </summary>
+public sealed record Fitness
+{
+    [JsonPropertyName("status")] public string Status { get; init; } = "ok";
+    [JsonPropertyName("reason")] public string? Reason { get; init; }
+    [JsonPropertyName("current_version")] public string? CurrentVersion { get; init; }
+}
+
 /// <summary>Heartbeat response the worker parses (contract/heartbeat-response.schema.json).</summary>
 public sealed record HeartbeatResponse
 {
     [JsonPropertyName("update")] public JsonElement? Update { get; init; }
     [JsonPropertyName("action")] public ModelAction? Action { get; init; }
+    [JsonPropertyName("fitness")] public Fitness? Fitness { get; init; }
     [JsonPropertyName("planner_notes")] public List<string> PlannerNotes { get; init; } = new();
 }
 

@@ -126,5 +126,9 @@ async def ui_nodes(request: Request) -> HTMLResponse:
             "installed": ", ".join(installed),
             "n_installed": len(installed),
             "seen": (n["last_heartbeat"] or "—"),
+            # Version governance (ADR 27): drift and unfitness must be visible, not buried.
+            "version": n["agent_version"] or "unknown",
+            "fitness": n["fitness"] or "unknown",
+            "fitness_reason": n["fitness_reason"],
         })
     return templates.TemplateResponse(request, "partials/nodes.html", {"nodes": nodes})

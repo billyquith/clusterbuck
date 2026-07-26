@@ -6,6 +6,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>cbk</AssemblyName>
+
+    <!-- The agent version the coordinator uses to judge whether this worker is fit to run
+         jobs. Stamped at build time and read back at runtime, so it can never drift from the
+         binary the way a hardcoded constant can. Bump on any release that changes worker
+         behaviour the coordinator cares about. -->
+    <Version>0.7.0</Version>
     <RootNamespace>Clusterbuck.Worker</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
 

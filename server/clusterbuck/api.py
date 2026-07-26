@@ -50,6 +50,7 @@ from .signing import build_manifest, load_private_pem
 from .store import Store
 from .sync import build_router, sync_routes
 from .usage import build_usage_summary
+from .versions import assess, policy_from_settings
 from .wake import WakeCoordinator
 from .web import WEB_DIR, web_routes
 
@@ -474,12 +475,28 @@ def create_app(
             raise HTTPException(status_code=401, detail="bad node key")
         now = _now_iso()
         store = app.state.store
+
+        # Is this build fit to run jobs? Protocol compatibility is necessary but NOT
+        # sufficient — a worker can speak the contract correctly and still carry bugs that
+        # produce plausible-looking wrong results, so the coordinator judges the reported
+        # build version too (ADR 27).
+        fitness = assess(
+            policy_from_settings(settings),
+            agent_version=body.agent_version,
+            protocol_version=body.protocol_version,
+        )
+        if fitness.status != "ok":
+            _log.warning("node %s is %s: %s", node_id, fitness.status, fitness.reason)
+
         store.record_heartbeat(
             node_id=node_id, mode=body.mode,
             installed=json.dumps(body.installed), loaded=json.dumps(body.loaded),
             queues=json.dumps(body.queues),
             jobs_done=body.stats.get("jobs_done"), tps=body.stats.get("tps"),
             last_heartbeat=now,
+            agent_version=body.agent_version,
+            protocol_version=body.protocol_version,
+            fitness=fitness.status, fitness_reason=fitness.reason,
         )
 
         # Record observed artifacts + digests; a changed digest is a NEW artifact whose
@@ -502,7 +519,11 @@ def create_app(
         action = next_action(store, store.get_node(node_id), mode=body.mode)
 
         # Self-update manifest delivery (M4c apply path) is deferred; see ADR 13.
-        return {"update": None, "action": action, "planner_notes": notes}
+        if fitness.status == "quarantine":
+            action = None   # an unfit build installs nothing
+
+        return {"update": None, "action": action, "fitness": fitness.to_wire(),
+                "planner_notes": notes}
 
     @app.get("/updates/manifest")
     async def update_manifest(rid: str) -> dict:
@@ -599,6 +620,11 @@ def create_app(
                 "installed": json.loads(n["installed"] or "[]"),
                 "loaded": json.loads(n["loaded"] or "[]"),
                 "last_heartbeat": n["last_heartbeat"],
+                # Version governance (ADR 27): what it runs and whether that is acceptable.
+                "agent_version": n["agent_version"],
+                "protocol_version": n["protocol_version"],
+                "fitness": n["fitness"] or "unknown",
+                "fitness_reason": n["fitness_reason"],
             }
         return {"nodes": [view(n) for n in app.state.store.list_nodes()]}
 
