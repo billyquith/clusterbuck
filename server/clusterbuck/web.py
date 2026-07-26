@@ -98,8 +98,18 @@ async def ui_ability(request: Request) -> HTMLResponse:
         ({"artifact": a, "headline": round(sum(s) / len(s), 1)} for a, s in by_artifact.items()),
         key=lambda x: x["headline"], reverse=True,
     )
+    # In-flight / outstanding measurement, so an unscored model is visibly *being* handled
+    # rather than silently absent.
+    from .eval_runner import artifacts_needing_eval
+
+    measuring = sorted(
+        {r["artifact"] for r in request.app.state.store.eval_runs_summary() if r["pending"]}
+    )
+    unmeasured = [a for a, _caps in artifacts_needing_eval(request.app.state.store)]
     return templates.TemplateResponse(
-        request, "partials/ability.html", {"arts": arts, "scale": SCALE_VERSION})
+        request, "partials/ability.html",
+        {"arts": arts, "scale": SCALE_VERSION,
+         "measuring": measuring, "unmeasured": unmeasured})
 
 
 @web_routes.get("/ui/nodes", response_class=HTMLResponse)

@@ -7,6 +7,7 @@ work without re-reading the queue payloads.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from typing import Iterator
@@ -80,6 +81,20 @@ CREATE TABLE IF NOT EXISTS ability (
     scale_version TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
     PRIMARY KEY (artifact, task_class, scale_version)
+);
+
+-- Eval runs (M7): one row per dispatched tier-1 eval item. Evals are ordinary jobs on the
+-- fleet (model-evaluation.md — "the harness is just another client"), so this table is what
+-- correlates a job back to the item it was measuring.
+CREATE TABLE IF NOT EXISTS eval_runs (
+    job_id      TEXT PRIMARY KEY,
+    artifact    TEXT NOT NULL,
+    task_class  TEXT NOT NULL,
+    item_index  INTEGER NOT NULL,
+    result_key  TEXT NOT NULL,
+    state       TEXT NOT NULL DEFAULT 'pending',   -- pending | scored | failed
+    passed      INTEGER,                            -- 1/0 once scored
+    created_at  TEXT NOT NULL
 );
 
 -- Client attention leases (ADR 18 / protocols §9): a client's active-user signal that
@@ -482,6 +497,76 @@ class Store:
                 (day,),
             ).fetchall()
             return {r["model"] for r in rows}
+
+    # --- eval runs (M7) ---
+
+    def add_eval_run(self, *, job_id: str, artifact: str, task_class: str,
+                     item_index: int, result_key: str, created_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO eval_runs "
+                "(job_id, artifact, task_class, item_index, result_key, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (job_id, artifact, task_class, item_index, result_key, created_at),
+            )
+
+    def pending_eval_runs(self) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM eval_runs WHERE state = 'pending' ORDER BY created_at"
+            ).fetchall()
+
+    def score_eval_run(self, job_id: str, passed: bool) -> None:
+        with self._conn() as c:
+            c.execute(
+                "UPDATE eval_runs SET state = 'scored', passed = ? WHERE job_id = ?",
+                (1 if passed else 0, job_id),
+            )
+
+    def fail_eval_run(self, job_id: str) -> None:
+        """The job itself failed/expired — the item yields no signal, so don't score it."""
+        with self._conn() as c:
+            c.execute("UPDATE eval_runs SET state = 'failed' WHERE job_id = ?", (job_id,))
+
+    def eval_progress(self, artifact: str, task_class: str) -> tuple[int, int, int]:
+        """(pending, scored, passed) counts for one (artifact, task_class) batch."""
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT "
+                "SUM(state = 'pending') AS pending, "
+                "SUM(state = 'scored') AS scored, "
+                "SUM(passed = 1) AS passed "
+                "FROM eval_runs WHERE artifact = ? AND task_class = ?",
+                (artifact, task_class),
+            ).fetchone()
+            return (r["pending"] or 0, r["scored"] or 0, r["passed"] or 0)
+
+    def artifacts_under_eval(self) -> set[str]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT artifact FROM eval_runs WHERE state = 'pending'"
+            ).fetchall()
+            return {r["artifact"] for r in rows}
+
+    def eval_runs_summary(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT artifact, task_class, "
+                "SUM(state = 'pending') AS pending, SUM(state = 'scored') AS scored, "
+                "SUM(state = 'failed') AS failed, SUM(passed = 1) AS passed "
+                "FROM eval_runs GROUP BY artifact, task_class "
+                "ORDER BY artifact, task_class LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    def installed_artifacts(self) -> list[tuple[str, str, list[str]]]:
+        """(node_id, artifact, node_capabilities) for every artifact observed on a node."""
+        out: list[tuple[str, str, list[str]]] = []
+        for n in self.list_nodes():
+            caps = json.loads(n["capabilities"] or "[]")
+            for artifact in json.loads(n["installed"] or "[]"):
+                out.append((n["node_id"], artifact, caps))
+        return out
 
     def ability_count(self, scale_version: str) -> int:
         with self._conn() as c:

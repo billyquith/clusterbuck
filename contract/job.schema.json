@@ -66,6 +66,10 @@
       "properties": {
         "temperature": { "type": "number", "minimum": 0 },
         "max_tokens": { "type": "integer", "minimum": 1 },
+        "model": {
+          "type": "string",
+          "description": "Optional artifact pin: overrides the worker's configured model for this job. The eval harness relies on this to attribute a score to the artifact actually under test rather than to whatever the worker defaults to, so a worker MUST forward it to the model server."
+        },
         "response_format": {
           "type": "string",
           "description": "Hint only; local model servers do not reliably honour structured-output flags (protocols.md §3). JSON shape is requested in the prompt and validated by the client."

@@ -38,13 +38,19 @@ cross-language contract. Milestones:
   approved action is executed by the worker via a per-server **model-manager adapter**
   (Ollama), presence-gated so no multi-GB pull lands under an active owner. A fresh install
   or changed digest **never inherits** an ability score — it demands re-measurement.
+- **M7 — eval harness:** the coordinator closes that loop by **measuring unmeasured
+  artifacts as ordinary fleet jobs** (model-evaluation.md: "the harness is just another
+  client") — tier-1 items dispatched `waitable` + `local_only` with the artifact **pinned
+  per job**, drained by real workers, scored deterministically, ability recorded, artifact
+  then routable. Endpoints `/eval` + `POST /eval/run`.
 
-A single coordinator loop runs the escalation / reservation / attention / usage ticks.
-Deliberately deferred (needs real hardware, a judge model, real usage data, or multi-node —
-documented in code + ADRs): true Wake-on-LAN to real MACs, multi-node canary/rollback +
-binary self-replacement, OS presence detection, judge-based eval tiers (2/3) +
-Bradley-Terry/Elo + calibration, the model catalog + real weight downloads, and
-cost-quality-arbitrage planning. See *Build / test / run* below.
+A single coordinator loop runs the escalation / reservation / attention / usage / eval /
+planner ticks. Deliberately deferred (needs real hardware, a judge model, real usage data,
+or multi-node — documented in code + ADRs): true Wake-on-LAN to real MACs, multi-node
+canary/rollback + binary self-replacement, OS presence detection, judge-based eval tiers
+(2/3) + Bradley-Terry/Elo + anchor calibration, real multi-GB weight downloads (the pull
+path is built and stub-proven), and cost-quality-arbitrage planning. See *Build / test /
+run* below.
 
 ## CRITICAL: keep it domain-agnostic
 
@@ -141,6 +147,7 @@ bash deploy/e2e/enroll.sh         # M4b: enroll → registry → heartbeat → p
 bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} routing
 bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not config
 bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval
+bash deploy/e2e/eval.sh           # M7: unmeasured model → eval jobs → scored → routable
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

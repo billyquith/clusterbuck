@@ -28,6 +28,7 @@ from .catalog import (
 )
 from .config import settings
 from .coordinator import propose_capabilities
+from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
 from .fleet import load_fleet
 from .routing import resolve_capability
@@ -184,6 +185,33 @@ def create_app(
         headline = {a: round(sum(s) / len(s), 1) for a, s in by_artifact.items()}
         return {"scale_version": SCALE_VERSION, "task_classes": TASK_CLASSES,
                 "matrix": matrix, "headline": headline}
+
+    @app.get("/eval")
+    async def get_eval() -> dict:
+        """Eval-harness state: what's measured, what's in flight, what still needs a score."""
+        store = app.state.store
+        pending = [
+            {"artifact": a, "capabilities": caps}
+            for a, caps in artifacts_needing_eval(store)
+        ]
+        return {
+            "scale_version": SCALE_VERSION,
+            "needs_eval": pending,
+            "batches": [
+                {"artifact": r["artifact"], "task_class": r["task_class"],
+                 "pending": r["pending"], "scored": r["scored"],
+                 "failed": r["failed"], "passed": r["passed"]}
+                for r in store.eval_runs_summary()
+            ],
+        }
+
+    @app.post("/eval/run")
+    async def run_eval() -> dict:
+        """Trigger a harness pass now instead of waiting for the coordinator's cadence."""
+        collected, enqueued = await eval_tick(
+            app.state.store, app.state.queue, now=_now_iso()
+        )
+        return {"scored": collected, "dispatched": enqueued}
 
     @app.get("/queues")
     async def get_queues() -> dict:
