@@ -25,7 +25,7 @@ trap cleanup EXIT
 wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
 jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-docker exec cbk-redis redis-cli -n 0 FLUSHDB >/dev/null
+${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
 
 if [[ "${USE_OLLAMA:-0}" == "1" ]]; then
   MODEL_URL="http://localhost:11434/v1"

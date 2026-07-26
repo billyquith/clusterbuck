@@ -14,7 +14,7 @@ trap cleanup EXIT
 wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
 
 # fresh queue state
-docker exec cbk-redis redis-cli -n 0 FLUSHDB >/dev/null
+${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
 
 python3 "$REPO/server/tools/fake_model_server.py" --port 11436 & PIDS+=($!)
 wait_for "http://127.0.0.1:11436/healthz" "fake model"

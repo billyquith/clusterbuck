@@ -37,7 +37,7 @@ wait_for() {  # url, name
 
 # --- Redis reachable? -------------------------------------------------------
 redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1 \
-  || docker exec cbk-redis redis-cli ping >/dev/null 2>&1 \
+  || ${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} ping >/dev/null 2>&1 \
   || fail "no Redis reachable at $REDIS_URL"
 log "redis ok"
 

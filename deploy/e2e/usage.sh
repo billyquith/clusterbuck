@@ -17,7 +17,7 @@ trap cleanup EXIT
 wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
 jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-docker exec cbk-redis redis-cli -n 0 FLUSHDB >/dev/null
+${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
 
 python3 "$REPO/server/tools/fake_model_server.py" --port 11439 & PIDS+=($!)
 wait_for "http://127.0.0.1:11439/healthz" "fake model server"

@@ -18,6 +18,7 @@ os.environ.setdefault("CBK_WOL_BROADCAST", "127.0.0.1")
 import pytest
 
 CONTRACT_DIR = Path(__file__).resolve().parents[2] / "contract"
+REDIS_URL_EXPLICIT = bool(os.environ.get("CBK_TEST_REDIS_URL"))
 TEST_REDIS_URL = os.environ.get("CBK_TEST_REDIS_URL", "redis://localhost:6379/15")
 
 
@@ -32,13 +33,30 @@ def contract_dir() -> Path:
 
 @pytest.fixture()
 def redis_url() -> str:
+    """A flushed Redis DB for one test.
+
+    If CBK_TEST_REDIS_URL was set explicitly (CI, or a developer who means it), an
+    unreachable Redis is a **failure** — a suite that silently skips half its tests reports
+    green for work it never did. Without the variable we fall back to a local default and
+    skip, so `pytest` still works on a machine with no broker running.
+    """
     import redis
 
     client = redis.from_url(TEST_REDIS_URL)
     try:
         client.ping()
-    except redis.exceptions.ConnectionError:
-        pytest.skip(f"no Redis reachable at {TEST_REDIS_URL}")
+    except redis.exceptions.ConnectionError as e:
+        if REDIS_URL_EXPLICIT:
+            pytest.fail(
+                f"CBK_TEST_REDIS_URL is set to {TEST_REDIS_URL} but Redis is unreachable "
+                f"({e}). Refusing to skip: an explicitly configured broker that is down is "
+                f"a failure, not a reason to report green."
+            )
+        pytest.skip(
+            f"no Redis reachable at the default {TEST_REDIS_URL} — start one with "
+            f"`docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine`, or set "
+            f"CBK_TEST_REDIS_URL to make this a hard failure"
+        )
     client.flushdb()
     client.close()
     return TEST_REDIS_URL

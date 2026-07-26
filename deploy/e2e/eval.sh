@@ -27,7 +27,7 @@ trap cleanup EXIT
 wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
 jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-docker exec cbk-redis redis-cli -n 0 FLUSHDB >/dev/null
+${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
 
 # A model server advertising an artifact nobody has ever scored.
 python3 "$REPO/server/tools/fake_model_server.py" --port "$MODEL_PORT" --models "$ARTIFACT" \
@@ -110,7 +110,7 @@ curl -fsS -X POST "$URL/jobs" -H 'content-type: application/json' -d '{
   "urgency": "waitable"
 }' >/dev/null
 sleep 0.5
-BEFORE_DEPTH=$(docker exec cbk-redis redis-cli -n 0 XLEN "q:$CAP" | tr -d '\r')
+BEFORE_DEPTH=$(${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 XLEN "q:$CAP" | tr -d '\r')
 [[ "$BEFORE_DEPTH" -gt 0 ]] || fail "need-shaped job did not reach q:$CAP"
 log "min_ability 9 now routes to $CAP (backed by $ARTIFACT) ✓"
 
