@@ -349,7 +349,7 @@ def create_app(
                 "urgency": row["urgency"],  # reflects escalation (waitable → necessary)
                 "result": None,
                 "error": None,
-                "attempts": 0,
+                "attempts": row["attempts"],
                 "worker": None,
             }
 
@@ -363,7 +363,7 @@ def create_app(
             "urgency": row["urgency"],
             "result": result.get("completion"),
             "error": result.get("error"),
-            "attempts": result.get("attempts", 1),
+            "attempts": row["attempts"],
             "worker": result.get("worker"),
         }
 

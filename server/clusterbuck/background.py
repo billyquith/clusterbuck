@@ -15,10 +15,12 @@ from datetime import datetime, timezone
 
 from .attention import attention_tick
 from .catalog import scan_all
+from .config import settings
 from .escalation import escalation_scan
 from .eval_runner import eval_tick
 from .fleet import Fleet
 from .queue import Queue
+from .reaper import reaper_scan
 from .reservations import reservation_tick
 from .store import Store
 from .usage import usage_scan
@@ -41,6 +43,7 @@ async def coordinator_loop(
     stop: asyncio.Event,
     planner_every: int = 30,
     eval_every: int = 5,
+    reaper_every: int = 6,
 ) -> None:
     """Tick escalation + reservations + attention + usage + evals + the planner."""
     ticks = 0
@@ -51,6 +54,13 @@ async def coordinator_loop(
             await attention_tick(store, queue)
             await usage_scan(store, queue, fleet)
             ticks += 1
+            # Recover jobs abandoned by a worker that died mid-run (ADR 20). Runs on a slow
+            # cadence because the idle threshold it enforces is measured in minutes.
+            if ticks % reaper_every == 0:
+                await reaper_scan(
+                    store, queue, group=settings.consumer_group,
+                    min_idle_ms=settings.reaper_min_idle_ms,
+                )
             # Measuring an unmeasured artifact is background work: collect finished eval
             # jobs and dispatch new ones on a slower cadence than the live ticks.
             if ticks % eval_every == 0:

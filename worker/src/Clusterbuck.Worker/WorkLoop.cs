@@ -10,8 +10,8 @@ namespace Clusterbuck.Worker;
 ///
 /// StackExchange.Redis does not expose blocking reads, so the loop polls with a short
 /// delay; a truly idle-cheap block (implementation.md footprint note) is a later refinement.
-/// The visibility-timeout reaper (XAUTOCLAIM) that requeues a job abandoned mid-run is an
-/// M2 concern — M0 acks on both success and failure.
+/// A job abandoned mid-run (worker died before XACK) is recovered by the coordinator's
+/// XAUTOCLAIM reaper (server/clusterbuck/reaper.py); the worker acks on success and failure.
 /// </summary>
 public sealed class WorkLoop
 {

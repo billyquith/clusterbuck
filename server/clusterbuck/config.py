@@ -16,6 +16,12 @@ class Settings:
     # Shared consumer group name; workers for a capability share it so each job
     # is delivered to exactly one worker.
     consumer_group: str = os.environ.get("CBK_CONSUMER_GROUP", "cbk-workers")
+    # Reaper (ADR 20): a claimed entry idle longer than this is treated as abandoned and
+    # requeued. MUST exceed the longest plausible inference, or a merely-busy worker's job
+    # would be stolen and re-run. Default 10 min.
+    reaper_min_idle_ms: int = int(os.environ.get("CBK_REAPER_MIN_IDLE_MS", "600000"))
+    # Approximate cap on stream length, so the broker isn't a permanent log of every prompt.
+    stream_maxlen: int = int(os.environ.get("CBK_STREAM_MAXLEN", "10000"))
     # Static registry seed for the sync plane (protocols.md §5).
     fleet_path: str = os.environ.get("CBK_FLEET_PATH", "fleet.yaml")
     # Opt-in cloud fallback for the sync plane; unset ⇒ sync plane is local-only.

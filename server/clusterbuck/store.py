@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     deadline_epoch REAL,          -- epoch seconds; for expiry sweep
     client_key   TEXT,            -- optional client identity (for attention scoping)
     task_class   TEXT,            -- need-shaped task class (for attention scoping)
-    promoted_by  TEXT             -- null | 'age' | 'attention' (escalation provenance)
+    promoted_by  TEXT,            -- null | 'age' | 'attention' (escalation provenance)
+    attempts     INTEGER NOT NULL DEFAULT 0   -- delivery attempts, incremented by the reaper
 );
 
 -- Model catalog (fleet-management.md → Model catalog): curated known-good artifacts with
@@ -180,6 +181,7 @@ _MIGRATIONS = {
         "client_key": "ALTER TABLE jobs ADD COLUMN client_key TEXT",
         "task_class": "ALTER TABLE jobs ADD COLUMN task_class TEXT",
         "promoted_by": "ALTER TABLE jobs ADD COLUMN promoted_by TEXT",
+        "attempts": "ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
     },
     "nodes": {
         "disk_quota_gb": "ALTER TABLE nodes ADD COLUMN disk_quota_gb REAL",
@@ -247,6 +249,11 @@ class Store:
     def set_status(self, id: str, status: str) -> None:
         with self._conn() as c:
             c.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, id))
+
+    def set_attempts(self, id: str, attempts: int) -> None:
+        """Record a delivery attempt (the reaper's requeue count) so it is observable."""
+        with self._conn() as c:
+            c.execute("UPDATE jobs SET attempts = ? WHERE id = ?", (attempts, id))
 
     def due_for_escalation(self, now: float) -> list[sqlite3.Row]:
         """waitable jobs whose patience bound has expired and haven't escalated yet.
