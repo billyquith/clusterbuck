@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS ability (
     score         REAL NOT NULL,
     scale_version TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
+    -- 'seed' = an anchored placeholder so routing works before anything is measured;
+    -- 'measured' = earned from a real eval run. Seeds must never look measured, or the
+    -- fleet's own models are exempted from evaluation forever.
+    provenance    TEXT NOT NULL DEFAULT 'measured',
     PRIMARY KEY (artifact, task_class, scale_version)
 );
 
@@ -182,6 +186,9 @@ _MIGRATIONS = {
         "task_class": "ALTER TABLE jobs ADD COLUMN task_class TEXT",
         "promoted_by": "ALTER TABLE jobs ADD COLUMN promoted_by TEXT",
         "attempts": "ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    },
+    "ability": {
+        "provenance": "ALTER TABLE ability ADD COLUMN provenance TEXT NOT NULL DEFAULT 'measured'",
     },
     "nodes": {
         "disk_quota_gb": "ALTER TABLE nodes ADD COLUMN disk_quota_gb REAL",
@@ -342,14 +349,44 @@ class Store:
     # --- ability matrix (M5) ---
 
     def set_ability(self, *, artifact: str, task_class: str, score: float,
-                    scale_version: str, updated_at: str) -> None:
+                    scale_version: str, updated_at: str,
+                    provenance: str = "measured") -> None:
         with self._conn() as c:
             c.execute(
-                "INSERT INTO ability (artifact, task_class, score, scale_version, updated_at) "
-                "VALUES (?,?,?,?,?) ON CONFLICT(artifact, task_class, scale_version) "
-                "DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at",
-                (artifact, task_class, score, scale_version, updated_at),
+                "INSERT INTO ability "
+                "(artifact, task_class, score, scale_version, updated_at, provenance) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(artifact, task_class, scale_version) "
+                "DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at, "
+                "provenance = excluded.provenance",
+                (artifact, task_class, score, scale_version, updated_at, provenance),
             )
+
+    def ability_provenance(self, artifact: str, task_class: str,
+                           scale_version: str) -> str | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT provenance FROM ability WHERE artifact = ? AND task_class = ? "
+                "AND scale_version = ?", (artifact, task_class, scale_version),
+            ).fetchone()
+            return row["provenance"] if row else None
+
+    def clear_ability(self, artifact: str, scale_version: str) -> int:
+        """Drop an artifact's scores so it must be re-measured (ADR 15: a changed digest is
+        a NEW artifact and inherits nothing). Returns rows removed."""
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM ability WHERE artifact = ? AND scale_version = ?",
+                (artifact, scale_version),
+            )
+            return cur.rowcount
+
+    def failed_eval_runs(self, artifact: str, task_class: str) -> int:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT COUNT(*) AS n FROM eval_runs "
+                "WHERE artifact = ? AND task_class = ? AND state = 'failed'",
+                (artifact, task_class),
+            ).fetchone()["n"]
 
     def get_ability(self, artifact: str, task_class: str, scale_version: str) -> float | None:
         with self._conn() as c:
@@ -363,7 +400,8 @@ class Store:
     def ability_matrix(self, scale_version: str) -> list[sqlite3.Row]:
         with self._conn() as c:
             return c.execute(
-                "SELECT artifact, task_class, score FROM ability WHERE scale_version = ? "
+                "SELECT artifact, task_class, score, provenance FROM ability "
+                "WHERE scale_version = ? "
                 "ORDER BY artifact, task_class",
                 (scale_version,),
             ).fetchall()
@@ -535,18 +573,24 @@ class Store:
         with self._conn() as c:
             c.execute("UPDATE eval_runs SET state = 'failed' WHERE job_id = ?", (job_id,))
 
-    def eval_progress(self, artifact: str, task_class: str) -> tuple[int, int, int]:
-        """(pending, scored, passed) counts for one (artifact, task_class) batch."""
+    def eval_progress(self, artifact: str, task_class: str) -> tuple[int, int, int, int]:
+        """(pending, scored, passed, failed) for one (artifact, task_class) batch.
+
+        `failed` is reported separately and deliberately: a run that produced no signal is
+        neither pending nor scored, so omitting it made a partly-broken batch look finished
+        and recorded an ability from only the surviving items.
+        """
         with self._conn() as c:
             r = c.execute(
                 "SELECT "
                 "SUM(state = 'pending') AS pending, "
                 "SUM(state = 'scored') AS scored, "
-                "SUM(passed = 1) AS passed "
+                "SUM(passed = 1) AS passed, "
+                "SUM(state = 'failed') AS failed "
                 "FROM eval_runs WHERE artifact = ? AND task_class = ?",
                 (artifact, task_class),
             ).fetchone()
-            return (r["pending"] or 0, r["scored"] or 0, r["passed"] or 0)
+            return (r["pending"] or 0, r["scored"] or 0, r["passed"] or 0, r["failed"] or 0)
 
     def artifacts_under_eval(self) -> set[str]:
         with self._conn() as c:

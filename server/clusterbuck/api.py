@@ -31,7 +31,7 @@ from .coordinator import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
 from .fleet import load_fleet
-from .routing import resolve_capability
+from .routing import NoCapableArtifact, resolve_capability
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
 from .auth import install_auth
 from .models import (
@@ -272,13 +272,17 @@ def create_app(
                     status_code=400, detail="unknown or unconfirmed reservation"
                 )
 
-        capability = resolve_capability(
-            app.state.fleet, app.state.store,
-            capability=body.capability,
-            task_class=body.task_class,
-            min_ability=body.min_ability,
-            privacy=body.privacy.value,
-        )
+        try:
+            capability = resolve_capability(
+                app.state.fleet, app.state.store,
+                capability=body.capability,
+                task_class=body.task_class,
+                min_ability=body.min_ability,
+                privacy=body.privacy.value,
+            )
+        except NoCapableArtifact as e:
+            # Explicit failure beats silently serving below the requested ability floor.
+            raise HTTPException(status_code=422, detail=str(e)) from e
         job_id, result_key = new_ids()
         now = datetime.now(timezone.utc)
         created_at = now.isoformat().replace("+00:00", "Z")
@@ -392,6 +396,7 @@ def create_app(
             min_ability=body.min_ability,
             window_start=body.window.start,
             duration_min=body.duration_min,
+            privacy=body.privacy.value,
             lead_s=settings.warm_lead_s,
         )
         rsv_id = new_reservation_id()
@@ -482,6 +487,10 @@ def create_app(
         observed = {a: (body.digests or {}).get(a) for a in body.installed}
         notes: list[str] = []
         for artifact, old, new in store.observe_node_models(node_id, observed, now):
+            # The artifact changed upstream, so it is a NEW artifact (ADR 15): drop its
+            # scores outright. Merely raising a proposal left the stale score driving routing
+            # forever, because nothing consumed reeval proposals.
+            store.clear_ability(artifact, SCALE_VERSION)
             if propose_reeval(store, node_id, artifact, old, new, now=now):
                 notes.append(f"{artifact} changed upstream — re-evaluation proposed")
 

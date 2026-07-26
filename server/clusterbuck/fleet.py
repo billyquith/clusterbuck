@@ -26,6 +26,10 @@ class CapabilitySpec(BaseModel):
     # the headline avoided-cloud-spend number (fleet-management.md → Usage accounting).
     price_in_per_1k: float = 0.0
     price_out_per_1k: float = 0.0
+    # True for a capability served off-LAN (a hosted OpenAI-compatible endpoint or provider).
+    # `privacy: local_only` jobs never route here (ADR 14) — without this flag the invariant
+    # was unenforceable, since model_server is just a URL and could point anywhere.
+    cloud: bool = False
 
 
 class NodeSpec(BaseModel):

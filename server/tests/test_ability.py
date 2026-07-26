@@ -6,7 +6,7 @@ import pytest
 
 from clusterbuck.evaluation import SCALE_VERSION, seed_ability
 from clusterbuck.fleet import CapabilitySpec, Fleet, NodeSpec
-from clusterbuck.routing import resolve_capability
+from clusterbuck.routing import NoCapableArtifact, resolve_capability
 from clusterbuck.store import Store
 
 
@@ -63,17 +63,45 @@ def test_routing_explicit_capability_wins(seeded):
                               task_class=None, min_ability=None) == "32b-reason"
 
 
-def test_routing_falls_back_when_matrix_empty(tmp_path):
+def test_routing_fails_when_nothing_is_measured(tmp_path):
+    """An empty matrix cannot promise an ability floor, so it must refuse rather than guess."""
     empty = Store(str(tmp_path / "empty.db"))  # not seeded
-    # No measured ability → coarse RAM-tier stub (min_ability 6 → 32b-reason).
-    assert resolve_capability(_fleet(), empty, capability=None,
-                              task_class="summarize", min_ability=6) == "32b-reason"
+    with pytest.raises(NoCapableArtifact, match="none measured"):
+        resolve_capability(_fleet(), empty, capability=None,
+                           task_class="summarize", min_ability=6)
 
 
-def test_routing_falls_back_when_bar_unmeetable(seeded):
-    # reason tops out at 7.5; min_ability 10 clears nothing → stub (→ 70b-reason).
-    assert resolve_capability(_fleet(), seeded, capability=None,
-                              task_class="reason", min_ability=10) == "70b-reason"
+def test_routing_fails_explicitly_when_bar_unmeetable(seeded):
+    """reason tops out at 7.5. Asking for 10 must fail, not quietly serve a weaker model —
+    the client stated a floor and would otherwise never learn it was missed."""
+    with pytest.raises(NoCapableArtifact, match="no artifact reaches ability 10"):
+        resolve_capability(_fleet(), seeded, capability=None,
+                           task_class="reason", min_ability=10)
+
+
+def test_local_only_excludes_cloud_artifacts(seeded):
+    """privacy=local_only must never select a cloud-backed capability, whatever its ability."""
+    from clusterbuck.fleet import CapabilitySpec
+
+    f = _fleet()
+    f.capabilities["frontier"] = CapabilitySpec(
+        queue="q:frontier", model_server="https://api.example.invalid/v1",
+        model="frontier-x", cloud=True)
+    seeded.set_ability(artifact="frontier-x", task_class="reason", score=10.0,
+                       scale_version=SCALE_VERSION, updated_at="t")
+
+    # cloud_ok can use it…
+    assert resolve_capability(f, seeded, capability=None, task_class="reason",
+                              min_ability=9, privacy="cloud_ok") == "frontier"
+    # …local_only cannot, and says so.
+    with pytest.raises(NoCapableArtifact, match="excluded by privacy"):
+        resolve_capability(f, seeded, capability=None, task_class="reason",
+                           min_ability=9, privacy="local_only")
+
+
+def test_seeded_scores_are_labelled_as_seeds(seeded):
+    """Seeds keep routing working, but must not masquerade as measurements."""
+    assert seeded.ability_provenance("llama3.2:3b", "reason", SCALE_VERSION) == "seed"
 
 
 def test_ability_endpoint(client):

@@ -191,3 +191,72 @@ def test_eval_endpoint_shape(client):
 def test_eval_run_endpoint_triggers_a_pass(client):
     body = client.post("/eval/run").json()
     assert body == {"scored": 0, "dispatched": 0}   # nothing installed to measure
+
+
+# --- regressions: bugs an audit proved live, each previously passing three green tests ---
+
+async def test_mixed_batch_does_not_score_from_a_shrunken_sample(store, queue):
+    """A batch where some items yielded no signal must not record a score from the rest.
+
+    Previously eval_progress counted only pending/scored, so one infrastructure failure made
+    a 2-item batch look complete and recorded ability 10.0 from the single survivor.
+    """
+    _enroll_with(store, [ARTIFACT])
+    single = [SUITE[0], SUITE[0]]  # two items, one task class
+    await dispatch(store, queue, now="t", suite=single)
+    runs = store.pending_eval_runs()
+    assert len(runs) == 2
+
+    # One passes, one fails outright (job error, not a wrong answer).
+    await queue.client.set(runs[0]["result_key"], json.dumps({
+        "job_id": runs[0]["job_id"], "status": "done", "worker": "w", "completed_at": "t",
+        "completion": {"choices": [{"message": {"role": "a", "content": '{"n":1}'}}]}}))
+    await queue.client.set(runs[1]["result_key"], json.dumps({
+        "job_id": runs[1]["job_id"], "status": "failed", "worker": "w",
+        "completed_at": "t", "error": "model server down"}))
+
+    await collect(store, queue, now="t", suite=single)
+    pending, scored, passed, failed = store.eval_progress(ARTIFACT, "extract")
+    assert (pending, scored, failed) == (0, 1, 1)
+    # 1 of 2 items produced signal — below the majority threshold, so no score.
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None
+
+
+async def test_all_failed_batch_stops_redispatching(store, queue):
+    """An always-failing batch previously re-enqueued the whole suite every tick forever."""
+    _enroll_with(store, [ARTIFACT])
+    single = [SUITE[0]]
+
+    for _ in range(10):
+        await dispatch(store, queue, now="t", suite=single)
+        for run in store.pending_eval_runs():
+            await queue.client.set(run["result_key"], json.dumps({
+                "job_id": run["job_id"], "status": "failed", "worker": "w",
+                "completed_at": "t", "error": "always broken"}))
+        await collect(store, queue, now="t", suite=single)
+
+    # No score was invented from zero signal…
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None
+    # …and the retry loop is bounded rather than infinite.
+    assert store.failed_eval_runs(ARTIFACT, "extract") <= 8
+    assert artifacts_needing_eval(store, suite=single) == []
+
+
+async def test_seeded_artifacts_are_still_measured(store, queue):
+    """seed_ability previously exempted the shipped fleet from evaluation forever."""
+    from clusterbuck.evaluation import seed_ability
+
+    seed_ability(store, now="t")
+    _enroll_with(store, ["llama3.2:3b"])          # a seeded artifact, installed on a node
+
+    # It has a score, but only a seeded one — so it must still be queued for measurement.
+    assert store.get_ability("llama3.2:3b", "extract", SCALE_VERSION) is not None
+    assert [a for a, _ in artifacts_needing_eval(store, suite=SUITE)] == ["llama3.2:3b"]
+    assert await dispatch(store, queue, now="t", suite=SUITE) == 2
+
+    # A real measurement replaces the seed and is labelled as earned.
+    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r["task_class"] == "extract"
+                  else "a fox")
+    await collect(store, queue, now="t", suite=SUITE)
+    assert store.ability_provenance("llama3.2:3b", "extract", SCALE_VERSION) == "measured"
+    assert artifacts_needing_eval(store, suite=SUITE) == []

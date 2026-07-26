@@ -33,14 +33,21 @@ SEED_ABILITY: dict[str, dict[str, float]] = {
 
 
 def seed_ability(store: Store, *, now: str, scale_version: str = SCALE_VERSION) -> int:
-    """Populate the matrix with anchored defaults if empty. Returns rows written."""
+    """Populate the matrix with anchored defaults if empty. Returns rows written.
+
+    These are PLACEHOLDERS so need-shaped routing works before anything has been measured.
+    They are written with `provenance='seed'`, which the eval harness treats as unmeasured —
+    otherwise the fleet's own shipped models would be exempted from evaluation forever and
+    every routing decision would rest on a guess that merely looked authoritative.
+    """
     if store.ability_count(scale_version) > 0:
         return 0
     n = 0
     for artifact, by_class in SEED_ABILITY.items():
         for task_class, score in by_class.items():
             store.set_ability(artifact=artifact, task_class=task_class, score=score,
-                              scale_version=scale_version, updated_at=now)
+                              scale_version=scale_version, updated_at=now,
+                              provenance="seed")
             n += 1
     return n
 

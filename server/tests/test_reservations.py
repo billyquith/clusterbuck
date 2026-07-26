@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from clusterbuck.api import create_app
 from clusterbuck.fleet import Fleet, NodeSpec, CapabilitySpec
 from clusterbuck.reservations import admit, reservation_tick, window_start_epoch
+from clusterbuck.evaluation import SCALE_VERSION
 from clusterbuck.store import Store
 
 CAP = "8b-extract"
@@ -29,7 +30,12 @@ def _fleet() -> Fleet:
 
 @pytest.fixture()
 def store(tmp_path) -> Store:
-    return Store(str(tmp_path / "rsv.db"))
+    s = Store(str(tmp_path / "rsv.db"))
+    # Admission resolves through the ability matrix, so the test fleet's artifact needs a
+    # measured score — you cannot book capacity for an ability nobody has measured.
+    s.set_ability(artifact="m", task_class="x", score=5.0,
+                  scale_version=SCALE_VERSION, updated_at="t")
+    return s
 
 
 class SpyWake:
@@ -60,10 +66,12 @@ def test_admit_declined_without_fleet(store):
 
 
 def test_admit_declined_when_capability_unserved(store):
-    # min_ability 9 resolves to 70b-reason, which the test fleet has no node for.
+    # Nothing in the test fleet reaches ability 9, so the booking is declined outright
+    # rather than confirmed against a weaker artifact.
     a = admit(_fleet(), store, task_class="x", min_ability=9, window_start="asap",
               duration_min=30)
     assert a.status == "declined"
+    assert "ability 9" in (a.reason or "")
 
 
 def test_window_start_epoch():
@@ -148,7 +156,12 @@ def rsv_client(redis_url, tmp_path):
         "    model_server: 'http://127.0.0.1:1/v1'\n"
         "    model: 'm'\n"
     )
-    app = create_app(redis_url=redis_url, db_path=str(tmp_path / "t.db"),
+    db = str(tmp_path / "t.db")
+    seed = Store(db)
+    for task_class in ("x", "summarize"):
+        seed.set_ability(artifact="m", task_class=task_class, score=5.0,
+                         scale_version=SCALE_VERSION, updated_at="t")
+    app = create_app(redis_url=redis_url, db_path=db,
                      fleet_path=str(fleet), start_scheduler=False)
     with TestClient(app) as c:
         yield c

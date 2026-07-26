@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from .fleet import Fleet
-from .routing import resolve_capability
+from .routing import NoCapableArtifact, resolve_capability
 from .store import Store
 from .wake import WakeCoordinator
 
@@ -68,6 +68,7 @@ def admit(
     min_ability: int,
     window_start: str,
     duration_min: int,
+    privacy: str = "local_only",
     now: float | None = None,
     lead_s: int = DEFAULT_WARM_LEAD_S,
 ) -> Admission:
@@ -76,9 +77,15 @@ def admit(
     if fleet is None:
         return Admission("declined", reason="no fleet registry")
 
-    capability = resolve_capability(
-        fleet, store, capability=None, task_class=task_class, min_ability=min_ability
-    )
+    try:
+        capability = resolve_capability(
+            fleet, store, capability=None, task_class=task_class,
+            min_ability=min_ability, privacy=privacy,
+        )
+    except NoCapableArtifact as e:
+        # Admission control is exactly where an unmeetable need should surface, and the
+        # protocol already has a shape for it (§8: confirmed | counter | declined).
+        return Admission("declined", reason=str(e))
     spec = fleet.capabilities.get(capability)
     nodes = fleet.nodes_for(capability)
     if spec is None or not nodes:

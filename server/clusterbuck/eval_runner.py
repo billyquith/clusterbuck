@@ -37,6 +37,15 @@ EVAL_CLIENT_KEY = "cbk:eval"
 # Evals are cheap but not free; measure a couple of artifacts at a time rather than
 # flooding the queues the moment several models appear.
 MAX_ARTIFACTS_IN_FLIGHT = 2
+# After this many runs for one (artifact, task_class) have produced no signal, stop
+# re-dispatching. Without a cap, a batch that always fails (e.g. the pinned artifact isn't on
+# the node that drained the job) is re-enqueued every tick forever.
+MAX_FAILED_RUNS = 6
+# A score is recorded only if a STRICT majority of the batch produced signal, so one
+# infrastructure failure cannot promote a model on a shrunken sample. Exactly half is not
+# enough: 1-of-2 surviving is precisely the case that recorded a perfect 10.0 from a single
+# item, so the comparison is `>` this fraction, not `>=`.
+MIN_SIGNAL_FRACTION = 0.5
 
 
 def _suite_classes(suite: list[EvalItem]) -> set[str]:
@@ -59,7 +68,11 @@ def artifacts_needing_eval(
             continue
         missing = [
             tc for tc in sorted(classes)
-            if store.get_ability(artifact, tc, scale_version) is None
+            # Unscored, or scored only by a seeded placeholder — a seed is not a measurement.
+            if (store.get_ability(artifact, tc, scale_version) is None
+                or store.ability_provenance(artifact, tc, scale_version) == "seed")
+            # …but give up on a task class whose runs keep yielding nothing.
+            and store.failed_eval_runs(artifact, tc) < MAX_FAILED_RUNS
         ]
         if missing:
             seen[artifact] = caps
@@ -76,8 +89,13 @@ async def dispatch(
     for artifact, caps in candidates[:MAX_ARTIFACTS_IN_FLIGHT]:
         capability = caps[0]  # any capability this node serves reaches its model server
         for index, item in enumerate(suite):
-            if store.get_ability(artifact, item.task_class, scale_version) is not None:
-                continue  # this class is already measured for this artifact
+            measured = (
+                store.get_ability(artifact, item.task_class, scale_version) is not None
+                and store.ability_provenance(artifact, item.task_class, scale_version)
+                != "seed"
+            )
+            if measured:
+                continue  # genuinely measured already (a seed is not a measurement)
             job_id, result_key = new_ids()
             record = JobRecord(
                 id=job_id, created_at=now, capability=capability,
@@ -142,16 +160,30 @@ async def collect(
         scored += 1
         touched.add((run["artifact"], run["task_class"]))
 
-    # A batch whose items have all settled yields an ability score.
+    # A batch whose items have all settled yields an ability score — but only if enough of
+    # them actually produced signal.
     for artifact, task_class in touched:
-        pending, done, passed = store.eval_progress(artifact, task_class)
-        if pending or not done:
+        pending, done, passed, failed = store.eval_progress(artifact, task_class)
+        if pending:
+            continue  # still in flight
+        total = done + failed
+        if not done or total == 0:
+            # Every item failed: infrastructure, not the model. Record nothing; the
+            # MAX_FAILED_RUNS cap stops this being retried forever.
+            _log.warning("eval inconclusive: %s/%s — all %d item(s) failed, no score recorded",
+                         artifact, task_class, failed)
+            continue
+        if done / total <= MIN_SIGNAL_FRACTION:
+            _log.warning(
+                "eval inconclusive: %s/%s — only %d of %d items produced signal, "
+                "refusing to score on a shrunken sample", artifact, task_class, done, total)
             continue
         ability = score_to_ability(passed / done)
         store.set_ability(artifact=artifact, task_class=task_class, score=ability,
-                          scale_version=scale_version, updated_at=now)
-        _log.info("eval complete: %s/%s → ability %.1f (%d/%d passed)",
-                  artifact, task_class, ability, passed, done)
+                          scale_version=scale_version, updated_at=now,
+                          provenance="measured")
+        _log.info("eval complete: %s/%s → ability %.1f (%d/%d passed, %d no-signal)",
+                  artifact, task_class, ability, passed, done, failed)
 
     return scored
 

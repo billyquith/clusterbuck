@@ -218,6 +218,37 @@ def test_digest_change_via_heartbeat_raises_reeval(client):
     assert "reeval" in kinds
 
 
+def test_digest_change_actually_drops_the_stale_score(client):
+    """ADR 15: a changed digest is a NEW artifact and inherits nothing.
+
+    Raising a `reeval` proposal was not enough — nothing consumed those proposals and nothing
+    cleared the ability row, so the stale score kept driving routing forever. This asserts the
+    EFFECT (score gone, artifact re-queued for measurement), not the announcement.
+    """
+    from clusterbuck.evaluation import SCALE_VERSION
+
+    node = _enroll(client)
+    hdr = {"x-cbk-node-key": node["node_key"]}
+    url = f"/nodes/{node['node_id']}/heartbeat"
+    store = client.app.state.store
+
+    client.post(url, json={"mode": "active", "installed": ["m:7b"],
+                           "digests": {"m:7b": "sha256:aaa"}}, headers=hdr)
+    store.set_ability(artifact="m:7b", task_class="extract", score=9.0,
+                      scale_version=SCALE_VERSION, updated_at="t")
+    assert store.get_ability("m:7b", "extract", SCALE_VERSION) == 9.0
+
+    # The artifact changes upstream.
+    client.post(url, json={"mode": "active", "installed": ["m:7b"],
+                           "digests": {"m:7b": "sha256:bbb"}}, headers=hdr)
+
+    assert store.get_ability("m:7b", "extract", SCALE_VERSION) is None, \
+        "a changed digest must not inherit the previous artifact's score"
+    # And it is genuinely back in the measurement queue.
+    from clusterbuck.eval_runner import artifacts_needing_eval
+    assert "m:7b" in [a for a, _ in artifacts_needing_eval(store)]
+
+
 def test_node_policy_sets_quota_and_auto_approve(client):
     node = _enroll(client)
     # A JSON body, not query params — see ADR 26: as bare scalars these bound as query
