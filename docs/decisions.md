@@ -348,3 +348,36 @@ metering as billing, which ADR 11 excludes); mTLS (correct for a hostile network
 weight on a home LAN); binding to loopback only (breaks the whole point — other machines
 must reach the coordinator); leaving it open because the network is private (the destructive
 reclaim path and the cloud-key-burning sync plane make "private" too thin a guarantee).
+
+## 28. Ship the worker as self-contained single-file, not Native AOT (revises ADR 19)
+**Decision:** release `cbk` as a **self-contained single-file** binary per RID, built by a
+GitHub Actions matrix covering `win-x64`, `win-arm64`, `osx-arm64`, `osx-x64`, `linux-x64`
+and `linux-arm64`. Native AOT stays the aspiration, not the shipping format.
+**Why:** ADR 19 specified Native AOT, and the first actual `PublishAot=true` run — never
+attempted until now — **fails for two independent reasons**:
+1. The macOS link line requires `-lssl -lcrypto`, and Apple no longer ships OpenSSL as a
+   linkable library (the platform's crypto is Security.framework), so `ld: library 'ssl' not
+   found`. Fixable with a Homebrew OpenSSL and linker flags, but that is a build-host
+   dependency on every macOS builder.
+2. **`Spectre.Console.Cli` is not AOT-safe** — it emits IL2104/IL3053 trim and AOT-analysis
+   warnings because its command binding is reflection-based, and IL3000 for
+   `Assembly.Location` under single-file. Warnings here mean the CLI could fail at *runtime*
+   after a clean link, which is the worst failure shape.
+Self-contained preserves the property that actually motivated ADR 19 — **no .NET runtime
+installed on the node** — for a heterogeneous fleet. It costs binary size (~72–79 MB vs an
+expected ~15–25 MB) and gives up AOT's instant start and smaller baseline heap. Note ADR 19's
+footprint target was *resident memory*, not artifact size, so the regression is on disk and
+cold start rather than the thing the target named.
+**Verified, not assumed:** all six RIDs were cross-published from a single macOS host,
+producing genuine `PE32+ (x86-64)`, `PE32+ (Aarch64)`, `Mach-O x86_64`, `ELF x86-64` and
+`ELF aarch64` executables; the osx-arm64 artifact runs and parses CLI arguments. Because
+self-contained cross-publishes cleanly, one CI runner builds every platform — but each
+artifact is still smoke-tested on its native OS, since "it linked" and "it runs" are
+different claims.
+**To get AOT later:** replace Spectre.Console.Cli with a small hand-rolled parser (the CLI
+surface is seven verbs, so this is modest), then resolve the macOS OpenSSL link. Until both
+are done, `IsAotCompatible=true` in the csproj is an analyzer setting, not a shipping claim.
+**Considered:** framework-dependent (smallest artifact, but requires a .NET runtime on every
+node — exactly what ADR 19 rejected); fixing AOT first (blocks all releases on a CLI rewrite);
+per-OS native runners for every RID (unnecessary once cross-publish was shown to work, and
+slower).
