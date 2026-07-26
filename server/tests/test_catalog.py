@@ -220,10 +220,16 @@ def test_digest_change_via_heartbeat_raises_reeval(client):
 
 def test_node_policy_sets_quota_and_auto_approve(client):
     node = _enroll(client)
+    # A JSON body, not query params — see ADR 26: as bare scalars these bound as query
+    # parameters, which made flipping the human-approval gate a one-line request.
     r = client.post(f"/nodes/{node['node_id']}/policy",
-                    params={"disk_quota_gb": 12.5, "auto_approve": True}).json()
+                    json={"disk_quota_gb": 12.5, "auto_approve": True}).json()
     assert r["disk_quota_gb"] == 12.5 and r["auto_approve"] is True
-    assert client.post("/nodes/node-missing/policy", params={"auto_approve": True}).status_code == 404
+    assert client.post("/nodes/node-missing/policy",
+                       json={"auto_approve": True}).status_code == 404
+    # The old query-param form no longer carries any authority.
+    assert client.post(f"/nodes/{node['node_id']}/policy",
+                       params={"auto_approve": True}).status_code == 422
 
 
 def test_proposals_fragment_renders_buttons(client):

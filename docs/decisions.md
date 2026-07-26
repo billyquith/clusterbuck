@@ -315,3 +315,31 @@ install and GC ship together, and reclaim is **never** auto-approved.
 **Considered:** filesystem scanning as primary (undocumented layouts, unservable blobs);
 requiring the operator to hand-list models forever (the hostility ADR 9 rejects); putting
 install decisions in the worker (duplicates catalog/ability state on every node).
+
+## 26. One operator shared secret, off by default
+**Decision:** the coordinator's HTTP surface is gated by a single **operator shared secret**
+(`CBK_API_KEY`), presented as `X-CBK-Api-Key`, `Authorization: Bearer`, or a `cbk_key`
+cookie. **Unset ⇒ auth is disabled**, logged as a warning at startup. Two paths are exempt
+because they carry their own credential and are how a node bootstraps: `POST /nodes/enroll`
+(one-time join token, burned on use) and `POST /nodes/{id}/heartbeat` (per-node key);
+`/healthz` and `/static/*` are exempt as a probe and vendored assets.
+**Why:** DESIGN.md's security section always called for "a shared key at minimum on the
+gateway/queue" and it was simply never built — an audit found a complete anonymous chain
+from `POST /nodes/tokens` through `auto_approve` to an approved multi-GB model pull on
+another owner's machine, and to `reclaim` deleting an owner's model files. clusterbuck is
+LAN-only single-operator infrastructure, so one secret is the proportionate control: there
+are no tenants to distinguish, and per-node keys already exist for the machine-side seam.
+Default-off keeps local dev and the e2e scripts working unchanged, which is why the missing
+key is *warned* rather than silently tolerated.
+**Consequences:** the worker loop needs no operator secret (its two endpoints are exempt),
+so only the admin CLI verbs (`submit`, `status`, `fleet`) present the key. A key in a URL
+can leak via logs and `Referer`, so `/?key=…` is a one-time browser affordance that
+exchanges it for an HttpOnly cookie, not the recommended path. This is authentication, not
+authorisation: any holder of the key is the operator. **Redis itself is a separate
+exposure** — it holds prompts and completions in plaintext and needs its own
+`requirepass`; the worker now carries a password through `redis://:secret@host`.
+**Considered:** per-client API keys (no tenants to separate, and it would invite treating
+metering as billing, which ADR 11 excludes); mTLS (correct for a hostile network, dead
+weight on a home LAN); binding to loopback only (breaks the whole point — other machines
+must reach the coordinator); leaving it open because the network is private (the destructive
+reclaim path and the cloud-key-burning sync plane make "private" too thin a guarantee).

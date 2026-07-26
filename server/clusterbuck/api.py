@@ -33,12 +33,14 @@ from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
 from .fleet import load_fleet
 from .routing import resolve_capability
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
+from .auth import install_auth
 from .models import (
     AttentionRequest,
     EnrollRequest,
     HeartbeatRequest,
     JobRecord,
     JobSubmit,
+    NodePolicy,
     ReservationSubmit,
     Urgency,
 )
@@ -75,6 +77,7 @@ def create_app(
     start_scheduler: bool = True,
     update_signing_key: str | None = None,
     update_release: str | None = None,
+    api_key: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -141,6 +144,8 @@ def create_app(
             await app.state.queue.aclose()
 
     app = FastAPI(title="clusterbuck server", version="0.0.1", lifespan=lifespan)
+    # Attach auth before the routes so it gates every one of them (DESIGN.md → Security).
+    install_auth(app, api_key if api_key is not None else settings.api_key)
     app.include_router(sync_routes)
     app.include_router(web_routes)
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
@@ -554,11 +559,14 @@ def create_app(
         return {"id": row["id"], "status": row["status"], "decided_at": row["decided_at"]}
 
     @app.post("/nodes/{node_id}/policy")
-    async def set_node_policy(
-        node_id: str, disk_quota_gb: float | None = None, auto_approve: bool | None = None,
-    ) -> dict:
+    async def set_node_policy(node_id: str, body: NodePolicy) -> dict:
         """The owner's contract for this node: storage quota and whether installs may be
-        applied without a human decision (opt-in, off by default)."""
+        applied without a human decision (opt-in, off by default).
+
+        Takes a JSON body deliberately: as bare scalars these bound as *query parameters*,
+        which made flipping the human-approval gate a one-line GET-shaped request.
+        """
+        disk_quota_gb, auto_approve = body.disk_quota_gb, body.auto_approve
         store = app.state.store
         node = store.get_node(node_id)
         if node is None:

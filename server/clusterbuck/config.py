@@ -33,6 +33,9 @@ class Settings:
     wol_port: int = int(os.environ.get("CBK_WOL_PORT", "9"))
     # Reservations: wake + pre-load this long before a window opens (ADR 17).
     warm_lead_s: int = int(os.environ.get("CBK_WARM_LEAD_S", "300"))
+    # Shared-secret for the coordinator API (DESIGN.md → Security). Unset ⇒ auth disabled
+    # (dev default, warned at startup).
+    api_key: str | None = os.environ.get("CBK_API_KEY") or None
     # Self-update (ADR 13). Both unset ⇒ /updates/manifest returns 404 (no update channel).
     # The signing key is operator-held and must live OUTSIDE the repo (it's RCE if leaked).
     update_signing_key: str | None = os.environ.get("CBK_UPDATE_SIGNING_KEY") or None

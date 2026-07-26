@@ -63,7 +63,7 @@ public sealed class SubmitCommand : AsyncCommand<SubmitCommand.Settings>
             ?? Environment.GetEnvironmentVariable("CBK_SERVER_URL")
             ?? "http://localhost:8000";
 
-        using var http = new HttpClient();
+        using var http = WorkerConfig.AdminHttp();
         using var content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
         using var resp = await http.PostAsync(baseUrl.TrimEnd('/') + "/jobs", content);
         var text = await resp.Content.ReadAsStringAsync();

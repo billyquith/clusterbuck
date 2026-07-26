@@ -1,0 +1,101 @@
+"""Shared-secret authentication for the coordinator's HTTP surface.
+
+DESIGN.md's security section calls for "a shared key at minimum on the gateway/queue".
+This is that key. It is deliberately simple — clusterbuck is LAN-only infrastructure, not a
+multi-tenant service, so there are no user accounts, just one operator secret.
+
+Configured via `CBK_API_KEY`. **Unset ⇒ auth is disabled** so local dev and the e2e scripts
+work out of the box; that state is logged as a warning at startup because an unauthenticated
+coordinator can be driven by any host that can reach it.
+
+Accepted, in order: `X-CBK-Api-Key` header, `Authorization: Bearer <key>`, or a `cbk_key`
+cookie (so the htmx dashboard works in a browser, which cannot set custom headers).
+
+Two paths are exempt because they carry their own credential and are how a node bootstraps:
+
+* `POST /nodes/enroll` — authenticated by a one-time join token, which is burned on use.
+* `POST /nodes/{id}/heartbeat` — authenticated by that node's `node_key`.
+
+`GET /healthz` is exempt so liveness probes work, and `/static/*` because it is vendored
+CSS/JS. Everything else — including the dashboard, job submission, and every
+model-management endpoint — requires the key.
+"""
+
+from __future__ import annotations
+
+import logging
+import secrets
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+_log = logging.getLogger("clusterbuck.auth")
+
+COOKIE_NAME = "cbk_key"
+HEADER_NAME = "x-cbk-api-key"
+
+
+def _is_exempt(path: str) -> bool:
+    if path in ("/healthz", "/nodes/enroll"):
+        return True
+    if path.startswith("/static/"):
+        return True
+    # A node's own heartbeat is authenticated by its node_key, not the shared secret.
+    if path.startswith("/nodes/") and path.endswith("/heartbeat"):
+        return True
+    return False
+
+
+def presented_key(request: Request) -> tuple[str | None, str]:
+    """Pull the candidate key. Returns (key, source) — source drives cookie-setting."""
+    header = request.headers.get(HEADER_NAME)
+    if header:
+        return header, "header"
+    authorization = request.headers.get("authorization")
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip(), "header"
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        return cookie, "cookie"
+    # Browser convenience only: visiting /?key=… once exchanges the key for a cookie, so the
+    # dashboard's htmx fragments authenticate thereafter. A key in a URL can leak via logs
+    # and Referer headers, so this is a LAN-admin affordance, not the recommended path.
+    return request.query_params.get("key"), "query"
+
+
+def key_matches(presented: str | None, configured: str) -> bool:
+    """Constant-time comparison — never leak the key through response timing."""
+    if not presented:
+        return False
+    return secrets.compare_digest(presented, configured)
+
+
+def install_auth(app, api_key: str | None) -> None:
+    """Attach the shared-secret gate. A falsy key leaves the surface open (dev mode)."""
+    if not api_key:
+        _log.warning(
+            "CBK_API_KEY is not set — the coordinator API is UNAUTHENTICATED. Any host that "
+            "can reach this port can submit jobs, mint join tokens, and approve model "
+            "installs/removals. Set CBK_API_KEY for anything beyond local development."
+        )
+        return
+
+    @app.middleware("http")
+    async def _auth(request: Request, call_next):
+        if _is_exempt(request.url.path):
+            return await call_next(request)
+        presented, source = presented_key(request)
+        if not key_matches(presented, api_key):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "missing or invalid API key (X-CBK-Api-Key)"},
+            )
+        response = await call_next(request)
+        if source == "query":
+            # Exchange the URL key for a cookie so the dashboard keeps working without it.
+            response.set_cookie(
+                COOKIE_NAME, presented or "", httponly=True, samesite="strict"
+            )
+        return response
+
+    _log.info("shared-secret auth enabled on the coordinator API")

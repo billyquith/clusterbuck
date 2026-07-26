@@ -21,7 +21,7 @@ public sealed class FleetCommand : AsyncCommand<FleetCommand.Settings>
             ?? Environment.GetEnvironmentVariable("CBK_SERVER_URL")
             ?? "http://localhost:8000";
 
-        using var http = new HttpClient();
+        using var http = WorkerConfig.AdminHttp();
         using var resp = await http.GetAsync($"{baseUrl.TrimEnd('/')}/fleet");
         var text = await resp.Content.ReadAsStringAsync();
         if (!resp.IsSuccessStatusCode)

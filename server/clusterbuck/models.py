@@ -115,6 +115,16 @@ class AttentionRequest(BaseModel):
     ttl_s: int = Field(default=600, ge=1)
 
 
+class NodePolicy(BaseModel):
+    """Owner's per-node contract (POST /nodes/{id}/policy). A body, not query params —
+    bare scalars bound as query parameters, which made the approval gate trivially flippable."""
+
+    model_config = {"extra": "forbid"}
+
+    disk_quota_gb: float | None = Field(default=None, ge=0)
+    auto_approve: bool | None = None
+
+
 class HwProbe(BaseModel):
     """Hardware probe (contract/enroll-request.schema.json → hw)."""
 

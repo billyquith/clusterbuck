@@ -125,7 +125,12 @@ docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine
 cd server
 uv venv && uv pip install -e ".[dev]"
 uv run pytest                 # contract conformance + submit/poll API + sync plane + fleet
-uv run cbk-server             # async job API + sync /v1/chat/completions + dashboard at /
+CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions + dashboard at /
+                              #   CBK_API_KEY is the operator shared secret. UNSET ⇒ the API
+                              #   is unauthenticated (dev default, warned at startup).
+                              #   Clients send X-CBK-Api-Key / Bearer; the dashboard takes
+                              #   /?key=… once and stores a cookie. Exempt: /healthz,
+                              #   /static/*, /nodes/enroll (join token), heartbeat (node key).
                               #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
                               #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY)
 

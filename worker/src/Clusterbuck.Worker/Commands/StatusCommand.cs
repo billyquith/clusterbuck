@@ -25,7 +25,7 @@ public sealed class StatusCommand : AsyncCommand<StatusCommand.Settings>
             ?? Environment.GetEnvironmentVariable("CBK_SERVER_URL")
             ?? "http://localhost:8000";
 
-        using var http = new HttpClient();
+        using var http = WorkerConfig.AdminHttp();
         using var resp = await http.GetAsync($"{baseUrl.TrimEnd('/')}/jobs/{settings.JobId}");
         var text = await resp.Content.ReadAsStringAsync();
         if (!resp.IsSuccessStatusCode)

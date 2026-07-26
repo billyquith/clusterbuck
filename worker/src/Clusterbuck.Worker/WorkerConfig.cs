@@ -21,6 +21,20 @@ public sealed record WorkerConfig
     /// node (a dedicated box wants it near zero, a laptop wants minutes).</summary>
     public double LadderHysteresisS { get; init; } = 120;
 
+    /// <summary>Operator shared secret for the coordinator API (CBK_API_KEY). Needed by the
+    /// admin CLI verbs; the worker loop itself does not use it, because enroll is
+    /// join-token authenticated and heartbeat is node-key authenticated.</summary>
+    public static string? ApiKey => Environment.GetEnvironmentVariable("CBK_API_KEY");
+
+    /// <summary>An HttpClient that presents the operator key when one is configured.</summary>
+    public static HttpClient AdminHttp()
+    {
+        var http = new HttpClient();
+        if (ApiKey is { Length: > 0 } key)
+            http.DefaultRequestHeaders.Add("X-CBK-Api-Key", key);
+        return http;
+    }
+
     public static WorkerConfig FromEnvironment()
     {
         string? Env(string k) => Environment.GetEnvironmentVariable(k);
@@ -58,6 +72,17 @@ public sealed record WorkerConfig
         var port = uri.Port > 0 ? uri.Port : 6379;
         var path = uri.AbsolutePath.Trim('/');
         var db = int.TryParse(path, out var n) ? n : 0;
-        return ($"{uri.Host}:{port}", db);
+        var config = $"{uri.Host}:{port}";
+        // Carry a password through (redis://:secret@host or redis://user:secret@host).
+        // Dropping it silently would make an authenticated broker look simply unreachable.
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+        {
+            var parts = uri.UserInfo.Split(':', 2);
+            var password = Uri.UnescapeDataString(parts.Length == 2 ? parts[1] : parts[0]);
+            if (password.Length > 0) config += $",password={password}";
+            if (parts.Length == 2 && parts[0].Length > 0)
+                config += $",user={Uri.UnescapeDataString(parts[0])}";
+        }
+        return (config, db);
     }
 }
