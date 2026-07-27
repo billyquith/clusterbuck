@@ -47,9 +47,32 @@ PIDS+=($!)
 wait_for "$URL/healthz" "server"
 
 TOKEN=$(curl -fsS -X POST "$URL/nodes/tokens" | jqpy '["join_token"]')
-dotnet "$WORKER_DLL" enroll --token "$TOKEN" --server "$URL" --state "$STATE" >/dev/null
-NODE=$(python3 -c "import json;print(json.load(open('$STATE'))['node_id'])")
-log "node $NODE enrolled"
+# Enroll with DECLARED hardware rather than `cbk enroll`'s real probe. The "fits" gate is a
+# function of the node's RAM and disk quota, so probing the host would make this test's
+# outcome depend on the machine running it: a 64 GB dev box yields several upgrade
+# proposals, a ~16 GB CI runner yields none and the script has nothing to approve. The
+# product is right either way — declining models that do not fit is correct — so the test
+# declares a large node to exercise the install path deterministically.
+ENROLLED=$(curl -fsS -X POST "$URL/nodes/enroll" -H 'content-type: application/json' -d "{
+  \"join_token\": \"$TOKEN\", \"hostname\": \"e2e-install\", \"os\": \"linux\",
+  \"arch\": \"x64\",
+  \"hw\": {\"ram_gb\": 128, \"accelerator\": \"cpu\", \"disk_free_gb\": 2000},
+  \"profile\": \"shared\"}")
+NODE=$(printf '%s' "$ENROLLED" | jqpy '["node_id"]')
+NODE_KEY=$(printf '%s' "$ENROLLED" | jqpy '["node_key"]')
+CAPS=$(printf '%s' "$ENROLLED" | python3 -c 'import sys,json;print(json.dumps(json.load(sys.stdin)["proposed"]["capabilities"]))')
+# Hand the worker that identity, since it did not enroll itself.
+python3 - "$STATE" "$NODE" "$NODE_KEY" "$URL" "$CAPS" <<'PY2'
+import json, sys
+path, node, key, url, caps = sys.argv[1:6]
+json.dump({"node_id": node, "node_key": key, "server": url,
+           "capabilities": json.loads(caps), "ladder": None, "mode": "active"},
+          open(path, "w"))
+PY2
+# Raise the disk quota too: the default shared-profile quota is smaller than the artifacts.
+curl -fsS -X POST "$URL/nodes/$NODE/policy" -H 'content-type: application/json' \
+  -d '{"disk_quota_gb": 500}' >/dev/null
+log "node $NODE enrolled (declared 128 GB / 500 GB quota, so the fits gate is deterministic)"
 
 # The owner is away, so installs are permitted (an active owner blocks them — asserted below).
 python3 - "$STATE" <<'PY'
