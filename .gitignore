@@ -59,3 +59,11 @@ Thumbs.db
 
 # Claude Code — keep shared CLAUDE.md + settings.json, ignore personal overrides
 .claude/settings.local.json
+
+# Local deployment config: real hostnames, IPs and secrets. This project forbids
+# committing machine names or home-network specifics (.claude/CLAUDE.md), so keep
+# filled-in env files and release manifests untracked. Only *.example is committed.
+deploy/local/
+*.env
+!*.env.example
+release.json

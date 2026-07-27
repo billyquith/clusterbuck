@@ -1,0 +1,49 @@
+# clusterbuck coordinator (cbk-server) — the always-on node.
+#
+# Deliberately generic: no hostnames, no IPs, no secrets. Real values belong in
+# /etc/clusterbuck/server.env, which is NOT in this repo (see deploy/README.md).
+#
+#   sudo install -m 0644 cbk-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cbk-server
+
+[Unit]
+Description=clusterbuck coordinator (job API, sync gateway, coordinator loop)
+Documentation=https://github.com/billyquith/clusterbuck
+# Redis is the broker and the result store; without it the API cannot serve.
+After=network-online.target redis-server.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=clusterbuck
+Group=clusterbuck
+WorkingDirectory=/opt/clusterbuck/server
+# Secrets and per-host settings live here, root-owned and 0600:
+#   CBK_API_KEY, CBK_REDIS_URL (with password), CBK_FLEET_PATH, CBK_DB_PATH,
+#   CBK_UPDATE_SIGNING_KEY, CBK_WORKER_CURRENT_VERSION, …
+EnvironmentFile=/etc/clusterbuck/server.env
+ExecStart=/opt/clusterbuck/server/.venv/bin/python -m clusterbuck
+Restart=on-failure
+RestartSec=5s
+# The coordinator holds the SQLite system of record; give it time to finish a write.
+TimeoutStopSec=30
+
+# --- hardening -------------------------------------------------------------------
+# It is an HTTP service that talks to Redis and model servers; it needs very little.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The only paths it must write: the SQLite DB and any runtime state.
+ReadWritePaths=/var/lib/clusterbuck
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Wake-on-LAN needs a UDP broadcast socket, so AF_INET stays permitted.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

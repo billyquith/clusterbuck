@@ -1,0 +1,51 @@
+# clusterbuck worker (cbk) — every node that contributes compute.
+#
+# Generic by design. Real values go in /etc/clusterbuck/worker.env (not in this repo).
+# A worker needs NO operator secret: it enrolls with a one-time join token and
+# authenticates afterwards with its own per-node key (ADR 26).
+#
+#   sudo install -m 0644 cbk-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cbk-worker
+
+[Unit]
+Description=clusterbuck worker (pulls jobs, runs them on the local model server)
+Documentation=https://github.com/billyquith/clusterbuck
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clusterbuck
+Group=clusterbuck
+# Self-update replaces this binary in place and re-execs, so the unit must point at a
+# stable path and systemd must tolerate the process handing over to its successor.
+WorkingDirectory=/opt/clusterbuck
+#   CBK_REDIS_URL (with password), CBK_MODEL_SERVER_URL, CBK_MODEL,
+#   CBK_UPDATE_PUBKEY (pinned key — without it self-update refuses), CBK_NODE_STATE, …
+EnvironmentFile=/etc/clusterbuck/worker.env
+ExecStart=/opt/clusterbuck/cbk work
+Restart=always
+RestartSec=5s
+# An in-flight inference can take a while; let it finish rather than killing mid-job.
+# (The coordinator's reaper would recover it, but a clean finish is cheaper.)
+TimeoutStopSec=120
+
+# --- footprint -------------------------------------------------------------------
+# The worker is a guest on someone's machine (ADR 10): keep it unobtrusive.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+# --- hardening -------------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# Self-update writes the new binary and cbk.prev alongside itself; node state persists.
+ReadWritePaths=/opt/clusterbuck /var/lib/clusterbuck
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
