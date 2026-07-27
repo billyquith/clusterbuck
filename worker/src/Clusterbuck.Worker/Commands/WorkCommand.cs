@@ -54,14 +54,16 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         var loop = new WorkLoop(db, model, cfg, s => AnsiConsole.MarkupLineInterpolated($"[grey]{s}[/]"));
 
         var inventory = new ModelInventory(hbHttp, cfg.ModelServerUrl, cfg.ModelManager);
-        // Model pulls can take minutes; give them their own generous client.
+        // Model pulls and binary downloads can take minutes; give them a generous client.
         using var mgrHttp = new HttpClient { Timeout = TimeSpan.FromHours(1) };
         var manager = new ModelManager(mgrHttp, inventory.NativeBase, cfg.ModelManager);
+        var applier = new UpdateApplier(mgrHttp, WorkerConfig.UpdatePublicKeyPem,
+                                        s2 => AnsiConsole.MarkupLineInterpolated($"[cyan]{s2}[/]"));
 
         Task? heartbeat = null;
         if (state is not null && ladder is not null)
             heartbeat = HeartbeatLoop(new RegistryClient(hbHttp, state.Server), loop, ladder,
-                                      inventory, manager, statePath, cfg, cts.Token);
+                                      inventory, manager, applier, statePath, cfg, cts.Token);
 
         try
         {
@@ -102,13 +104,35 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         }
     }
 
+    /// <summary>
+    /// Verify and apply an offered update. Stops claiming first: completing the swap while
+    /// holding a claimed job would strand it until the reaper reclaims it.
+    /// </summary>
+    private static async Task TryUpdateAsync(
+        UpdateApplier applier, System.Text.Json.JsonElement manifestJson, WorkLoop loop)
+    {
+        var manifest = System.Text.Json.JsonSerializer.Deserialize(
+            manifestJson.GetRawText(), CbkJsonContext.Default.UpdateManifest);
+        if (manifest is null) return;
+
+        var wasPaused = loop.Paused;
+        loop.Paused = true;                     // stop claiming before replacing ourselves
+        var result = await applier.ApplyAsync(manifest);
+        if (result.Outcome != UpdateApplier.Outcome.Applied)
+        {
+            AnsiConsole.MarkupLineInterpolated(
+                $"[yellow]update {result.Outcome}: {result.Detail}[/]");
+            loop.Paused = wasPaused;            // not updating after all — resume as before
+        }
+    }
+
     /// <summary>Periodic heartbeat: re-read the persisted mode, drive the ladder (which
     /// resubscribes capabilities and toggles pause), take a model inventory, and report to
     /// the coordinator.</summary>
     private static async Task HeartbeatLoop(
         RegistryClient registry, WorkLoop loop, PresenceLadder ladder,
-        ModelInventory inventory, ModelManager manager, string statePath, WorkerConfig cfg,
-        CancellationToken ct)
+        ModelInventory inventory, ModelManager manager, UpdateApplier applier,
+        string statePath, WorkerConfig cfg, CancellationToken ct)
     {
         ActionResult? pendingResult = null;
         var quarantined = false;   // reported on the next beat, then cleared
@@ -148,6 +172,11 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
                     quarantined = ApplyFitness(resp.Fitness, s2 =>
                         AnsiConsole.MarkupLineInterpolated($"[yellow]{s2}[/]"));
                     loop.Paused = quarantined || effective == "paused";
+
+                    // A signed update, if the coordinator offered one and this node opted in.
+                    // Applying re-execs the process, so nothing after this runs on success.
+                    if (resp.Update is { } manifestJson)
+                        await TryUpdateAsync(applier, manifestJson, loop);
 
                     // Execute an approved model-management action, if one was issued. The
                     // worker never decides this — it only carries out an approved proposal.

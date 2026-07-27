@@ -349,6 +349,28 @@ weight on a home LAN); binding to loopback only (breaks the whole point — othe
 must reach the coordinator); leaving it open because the network is private (the destructive
 reclaim path and the cloud-key-burning sync plane make "private" too thin a guarantee).
 
+## 13a. Self-update: what is built, and what is deliberately not (amends ADR 13)
+**Built and proven end-to-end** by `deploy/e2e/selfupdate.sh` against two REAL published
+single-file binaries: the coordinator signs a release manifest per platform and offers it on
+the heartbeat; the worker verifies the signature against a **pinned public key**, fetches,
+verifies the sha256 of what actually arrived, retains the outgoing binary as `cbk.prev`,
+swaps itself and re-execs. Order matters and is the security boundary — the signature covers
+the `url`, so it is checked **before** any fetch, which means a redirected download is refused
+without ever contacting the attacker's host.
+**Three refusals are proven, not assumed:** no pinned key ⇒ refuse outright (signed-or-nothing,
+there is no "trust once" path); a tampered digest ⇒ refuse with the binary untouched; a node
+that has not opted in ⇒ never even offered an update. `auto_update` is per-node and off by
+default, mirroring `auto_approve` for model installs, because an update channel is RCE by
+design.
+**Deliberately NOT built:** canary rings and automatic crash-loop rollback. `cbk.prev` makes
+rollback possible and `UpdateApplier.Rollback()` performs it, but *deciding* that a release is
+crash-looping requires observing several nodes over time, which cannot be honestly verified on
+one machine. Manual rollback is the honest half; the automatic half is unimplemented rather
+than faked.
+**Consequence to remember:** the worker pauses claiming before swapping itself, so an update
+never strands a claimed job — and if the swap fails midway the old binary is put back rather
+than leaving the node with none.
+
 ## 28. Ship the worker as self-contained single-file, not Native AOT (revises ADR 19)
 **Decision:** release `cbk` as a **self-contained single-file** binary per RID, built by a
 GitHub Actions matrix covering `win-x64`, `win-arm64`, `osx-arm64`, `osx-x64`, `linux-x64`

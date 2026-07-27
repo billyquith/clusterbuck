@@ -55,8 +55,10 @@ tests **fail** rather than skip when `CBK_TEST_REDIS_URL` is set.
 
 A single coordinator loop runs the escalation / reservation / attention / usage / eval /
 reaper / planner ticks. Deliberately deferred (needs real hardware, a judge model, real usage data,
-or multi-node — documented in code + ADRs): true Wake-on-LAN to real MACs, multi-node
-canary/rollback + binary self-replacement, OS presence detection, judge-based eval tiers
+or multi-node — documented in code + ADRs): true Wake-on-LAN to real MACs, canary rings +
+automatic crash-loop rollback (the binary swap and `cbk.prev` retention ARE built and proven;
+deciding a release is crash-looping needs multi-node observation), OS presence detection,
+judge-based eval tiers
 (2/3) + Bradley-Terry/Elo + anchor calibration, real multi-GB weight downloads (the pull
 path is built and stub-proven), and cost-quality-arbitrage planning. See *Build / test /
 run* below.
@@ -163,6 +165,9 @@ bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} rou
 bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not config
 bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval
 bash deploy/e2e/eval.sh           # M7: unmeasured model → eval jobs → scored → routable
+bash deploy/e2e/auth.sh           # shared secret closes the escalation chain (ADR 26)
+bash deploy/e2e/version.sh        # coordinator quarantines an unfit worker build (ADR 27)
+bash deploy/e2e/selfupdate.sh     # signed self-update applied by a REAL binary (~2 min)
 ```
 
 The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests

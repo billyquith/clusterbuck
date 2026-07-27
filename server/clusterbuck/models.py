@@ -123,6 +123,9 @@ class NodePolicy(BaseModel):
 
     disk_quota_gb: float | None = Field(default=None, ge=0)
     auto_approve: bool | None = None
+    # Opt-in: apply a signed worker update without asking. An update channel is RCE by
+    # design (ADR 13), so this is off by default and per-node, like auto_approve.
+    auto_update: bool | None = None
 
 
 class HwProbe(BaseModel):

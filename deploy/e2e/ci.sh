@@ -12,7 +12,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # reported before the slower fleet-management scripts run.
 SCRIPTS=(
   run queue-and-wait sync escalation reservation usage
-  enroll ability discovery install eval auth
+  enroll ability discovery install eval auth version
+  selfupdate      # slow (~2 min): publishes two real single-file binaries
 )
 
 failed=()

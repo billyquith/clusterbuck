@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     capabilities   TEXT,          -- json array
     disk_quota_gb  REAL,          -- owner's contract for model storage (profile-derived)
     auto_approve   INTEGER NOT NULL DEFAULT 0,  -- opt-in: install without asking a human
+    auto_update    INTEGER NOT NULL DEFAULT 0,  -- opt-in: apply a signed worker update
     mode           TEXT,
     installed      TEXT, loaded TEXT, queues TEXT,  -- json arrays
     jobs_done      INTEGER DEFAULT 0,
@@ -201,6 +202,7 @@ _MIGRATIONS = {
         "protocol_version": "ALTER TABLE nodes ADD COLUMN protocol_version INTEGER",
         "fitness": "ALTER TABLE nodes ADD COLUMN fitness TEXT",
         "fitness_reason": "ALTER TABLE nodes ADD COLUMN fitness_reason TEXT",
+        "auto_update": "ALTER TABLE nodes ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0",
     },
 }
 
@@ -533,7 +535,8 @@ class Store:
             ).fetchall()
 
     def set_node_flags(self, node_id: str, *, disk_quota_gb: float | None = None,
-                       auto_approve: bool | None = None) -> None:
+                       auto_approve: bool | None = None,
+                       auto_update: bool | None = None) -> None:
         with self._conn() as c:
             if disk_quota_gb is not None:
                 c.execute("UPDATE nodes SET disk_quota_gb = ? WHERE node_id = ?",
@@ -541,6 +544,9 @@ class Store:
             if auto_approve is not None:
                 c.execute("UPDATE nodes SET auto_approve = ? WHERE node_id = ?",
                           (1 if auto_approve else 0, node_id))
+            if auto_update is not None:
+                c.execute("UPDATE nodes SET auto_update = ? WHERE node_id = ?",
+                          (1 if auto_update else 0, node_id))
 
     def models_used_since(self, day: str) -> set[str]:
         """Models that served at least one job on/after `day` (for reclaim proposals)."""

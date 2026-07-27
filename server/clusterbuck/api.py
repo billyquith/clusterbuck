@@ -67,6 +67,55 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+# os+arch as reported by the hardware probe → .NET runtime identifier, so the coordinator
+# can offer the right artifact without the worker having to name its own RID.
+_RID = {
+    ("darwin", "arm64"): "osx-arm64", ("darwin", "x64"): "osx-x64",
+    ("linux", "arm64"): "linux-arm64", ("linux", "x64"): "linux-x64",
+    ("windows", "x64"): "win-x64", ("windows", "arm64"): "win-arm64",
+}
+
+
+def rid_for(os_name: str | None, arch: str | None) -> str | None:
+    if not os_name or not arch:
+        return None
+    a = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(arch.lower(), arch.lower())
+    return _RID.get((os_name.lower(), a))
+
+
+def _build_update_for(app, node) -> dict | None:
+    """A signed manifest for this node's platform, or None if no channel/artifact applies.
+
+    Signed per-request rather than served from a static file so the payload always matches
+    what this coordinator considers current; the worker verifies before touching a byte.
+    """
+    key_path, release_path = app.state.update_signing_key, app.state.update_release
+    if not key_path or not release_path:
+        return None
+    rid = rid_for(node["os"], node["arch"])
+    if rid is None:
+        _log.warning("no RID mapping for node %s (%s/%s) — cannot offer an update",
+                     node["node_id"], node["os"], node["arch"])
+        return None
+    try:
+        release = json.loads(Path(release_path).read_text())
+        art = release.get("artifacts", {}).get(rid)
+        if art is None:
+            return None
+        # Already on the release being offered ⇒ nothing to do.
+        if node["agent_version"] and node["agent_version"] == release["version"]:
+            return None
+        key = load_private_pem(Path(key_path).read_text())
+        return build_manifest(
+            key, version=release["version"], rid=rid, url=art["url"],
+            sha256=art["sha256"], channel=release.get("channel", "stable"),
+            protocol_version=release.get("protocol_version", 1),
+        )
+    except Exception:
+        _log.exception("could not build an update manifest for %s", node["node_id"])
+        return None
+
+
 def _now_iso_at(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -518,11 +567,20 @@ def create_app(
         # Hand out the next approved action, if one is permitted in this presence mode.
         action = next_action(store, store.get_node(node_id), mode=body.mode)
 
-        # Self-update manifest delivery (M4c apply path) is deferred; see ADR 13.
+        # Offer a signed update when this node opted in and is not already current. The
+        # worker verifies the signature against its pinned key before touching a byte;
+        # without auto_update the operator updates it by hand and this stays null (ADR 13).
+        update = None
+        if fitness.status in ("stale", "quarantine") and bool(node["auto_update"]):
+            update = _build_update_for(app, node)
+            if update is not None:
+                notes.append(
+                    f"update offered: {update['version']} for {update['rid']}")
+
         if fitness.status == "quarantine":
             action = None   # an unfit build installs nothing
 
-        return {"update": None, "action": action, "fitness": fitness.to_wire(),
+        return {"update": update, "action": action, "fitness": fitness.to_wire(),
                 "planner_notes": notes}
 
     @app.get("/updates/manifest")
@@ -601,11 +659,13 @@ def create_app(
         node = store.get_node(node_id)
         if node is None:
             raise HTTPException(status_code=404, detail="unknown node")
-        store.set_node_flags(node_id, disk_quota_gb=disk_quota_gb, auto_approve=auto_approve)
+        store.set_node_flags(node_id, disk_quota_gb=disk_quota_gb, auto_approve=auto_approve,
+                             auto_update=body.auto_update)
         node = store.get_node(node_id)
         return {"node_id": node_id,
                 "disk_quota_gb": quota_for(node["profile"], node["disk_quota_gb"]),
-                "auto_approve": bool(node["auto_approve"])}
+                "auto_approve": bool(node["auto_approve"]),
+                "auto_update": bool(node["auto_update"])}
 
     @app.get("/nodes")
     async def list_nodes() -> dict:

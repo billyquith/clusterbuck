@@ -36,6 +36,22 @@ public sealed record WorkerConfig
         ?? System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
         ?? "0.0.0";
 
+    /// <summary>
+    /// PEM of the update-signing public key this agent pins (CBK_UPDATE_PUBKEY = a file path,
+    /// or the PEM inline). UNSET ⇒ self-update is refused outright: an update channel is RCE
+    /// by design, so there is no unsigned path (ADR 13).
+    /// </summary>
+    public static string? UpdatePublicKeyPem
+    {
+        get
+        {
+            var v = Environment.GetEnvironmentVariable("CBK_UPDATE_PUBKEY");
+            if (string.IsNullOrWhiteSpace(v)) return null;
+            if (v.Contains("BEGIN PUBLIC KEY")) return v;          // inline PEM
+            return File.Exists(v) ? File.ReadAllText(v) : null;     // path
+        }
+    }
+
     /// <summary>Operator shared secret for the coordinator API (CBK_API_KEY). Needed by the
     /// admin CLI verbs; the worker loop itself does not use it, because enroll is
     /// join-token authenticated and heartbeat is node-key authenticated.</summary>
