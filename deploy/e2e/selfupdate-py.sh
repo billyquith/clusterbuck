@@ -42,11 +42,11 @@ n=next((n for n in json.load(sys.stdin)['nodes'] if n['node_id']=='$1'),{})
 print(n.get('$2') or '')"; }
 
 mkdir -p "$DIST" "$INSTALL"
-PYWORKER="$REPO/worker/python"
+PYWORKER="$REPO/worker"
 [[ -x "$PYWORKER/.venv/bin/python" ]] \
   || fail "python worker not installed — run: (cd $PYWORKER && uv venv && uv pip install -e '.[dev]')"
 # The zipapp deliberately does NOT vendor `cryptography` (it is the verifier, so it cannot be
-# delivered through the channel it secures — see worker/python/README.md). A node therefore
+# delivered through the channel it secures — see worker/README.md). A node therefore
 # needs it in the interpreter that runs the artifact; use one that has it, as a real node must.
 PY="$PYWORKER/.venv/bin/python"
 "$PY" -c "import cryptography" 2>/dev/null \

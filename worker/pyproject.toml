@@ -1,8 +1,5 @@
 [project]
 name = "cbk-worker"
-# Kept in lockstep with worker/dotnet's <Version>: the coordinator's version policy
-# (CBK_WORKER_CURRENT_VERSION) is a single value for the whole fleet, so if the two
-# implementations drifted apart one flavour would be permanently judged `stale` (ADR 29).
 version = "0.7.0"
 description = "clusterbuck worker agent — Python implementation"
 readme = "README.md"

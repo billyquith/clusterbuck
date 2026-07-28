@@ -3,8 +3,7 @@
 The schemas in `contract/` are the source of truth; these are this worker's view of them and
 the conformance suite asserts the two cannot drift (ADR 22).
 
-Nulls are omitted on the way out, matching the .NET worker's
-`JsonIgnoreCondition.WhenWritingNull`: a "done" result carries a real completion object and
+Nulls are omitted on the way out: a "done" result carries a real completion object and
 no stray nulls, and the shared schemas permit absent optionals.
 """
 

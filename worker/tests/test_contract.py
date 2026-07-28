@@ -1,14 +1,9 @@
-"""Cross-language contract conformance (ADR 22).
+"""Contract conformance (ADR 22).
 
 `contract/*.schema.json` is the source of truth. This suite asserts two directions:
 
   * every record this worker PRODUCES validates against the shared schema, and
   * every committed fixture PARSES into this worker's types without losing a field.
-
-The .NET worker runs the equivalent assertions against the same files, which is what stops
-the two implementations from drifting apart on the wire. A second worker is only evidence for
-the polyglot claim if it is held to the same contract — otherwise it is just a second thing
-to keep in sync by hand.
 """
 
 from __future__ import annotations
@@ -64,8 +59,8 @@ def test_done_result_conforms():
                usage={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4})
     wire = r.to_wire()
     _assert_valid("result", wire)
-    # Absent, not null: the .NET worker omits nulls too, and a "done" result carrying
-    # "error": null would be a lie the schema happens to permit.
+    # Absent, not null: a "done" result carrying "error": null would be a lie the schema
+    # happens to permit.
     assert "error" not in wire
 
 
@@ -94,8 +89,7 @@ def test_heartbeat_request_conforms_and_declares_this_flavour():
         agent_flavour=AGENT_FLAVOUR,
         action_result=ActionResult(proposal_id="prop_1", ok=True)).to_wire()
     _assert_valid("heartbeat-request", wire)
-    # The field that stops the coordinator handing us a .NET binary to install over
-    # ourselves. If this ever reports "dotnet", a Python worker self-destructs on update.
+    # The field that stops the coordinator handing us an incompatible binary.
     assert wire["agent_flavour"] == "python"
 
 

@@ -2,7 +2,7 @@
 
 Routes through a real LiteLLM Router to the zero-weight fake model server, proving the
 adopted sync gateway is wired correctly without reimplementing OpenAI routing (ADR 5).
-The C# worker is deliberately absent — the sync path bypasses it.
+The worker is deliberately absent — the sync path bypasses it.
 """
 
 from __future__ import annotations

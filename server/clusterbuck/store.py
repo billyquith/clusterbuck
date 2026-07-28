@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     tps            REAL,
     last_heartbeat TEXT,
     agent_version  TEXT,          -- the worker's build-stamped release version
-    agent_flavour  TEXT,          -- dotnet | python: which artifact it can execute
+    agent_flavour  TEXT,          -- python (or dotnet for legacy nodes): which artifact it can execute
     protocol_version INTEGER,     -- queue-contract version it speaks
     fitness        TEXT,          -- ok | stale | quarantine (coordinator's last verdict)
     fitness_reason TEXT,

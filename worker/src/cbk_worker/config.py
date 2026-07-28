@@ -1,9 +1,4 @@
-"""Worker configuration, from environment with LAN-dev defaults.
-
-Mirrors worker/dotnet's WorkerConfig exactly: same variable names, same defaults. The two
-implementations are interchangeable on a node, so a fleet's deployment config must not have
-to know which one it is talking to.
-"""
+"""Worker configuration, from environment with LAN-dev defaults."""
 
 from __future__ import annotations
 
@@ -71,7 +66,6 @@ class WorkerConfig:
             model_name=os.environ.get("CBK_MODEL") or "llama3.2:3b",
             capabilities=(tuple(c.strip() for c in caps.split(",") if c.strip())
                           if caps else ("8b-extract",)),
-            # Milliseconds on the wire (shared with the .NET worker), seconds internally.
             poll_s=_int_env("CBK_POLL_MS", 1000) / 1000.0,
             result_ttl_s=_int_env("CBK_RESULT_TTL_S", 86400),
             heartbeat_s=_int_env("CBK_HEARTBEAT_MS", 10000) / 1000.0,
@@ -93,12 +87,7 @@ class WorkerConfig:
 
 
 def normalise_redis_url(value: str) -> str:
-    """Accept a bare host:port as well as a redis:// URL.
-
-    The .NET worker takes host:port natively and the Python side takes URLs, but the same
-    CBK_REDIS_URL is set on a node regardless of which worker runs there — so both forms
-    have to work in both workers.
-    """
+    """Accept a bare host:port as well as a redis:// URL."""
     if "://" in value:
         return value
     return f"redis://{value}"

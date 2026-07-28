@@ -2,7 +2,7 @@
 # End-to-end proof of the SYNC plane (protocols.md §1a):
 #   client → /v1/chat/completions (LiteLLM Router) → model server → OpenAI reply.
 #
-# The C# worker is deliberately NOT started — the sync path bypasses it (it calls the
+# The worker is deliberately NOT started — the sync path bypasses it (it calls the
 # node's model_server directly). Also exercises `cbk fleet` against GET /fleet.
 #
 # Default model server is the fake stub. Set USE_OLLAMA=1 to drive real Ollama.

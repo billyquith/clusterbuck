@@ -14,13 +14,12 @@ seams (Redis queue contract + HTTP), never in shared code.
 | Component | Language | Why | Distribution |
 |---|---|---|---|
 | **`cbk-server`** — job API, sync front, escalation/reservation engines, coordinator (WoL, registry, planner), dashboard | **Python** | The ecosystem-heavy half (LiteLLM, eval/dataset tooling, provider libs) and it runs on **one box you control**, so Python's distribution weakness doesn't apply | one always-on node; admin-updated |
-| **`cbk`** — worker loop, hardware probe, self-updater, CLI | **Python** *(default)* and **C#/.NET** — two interchangeable implementations | Fans out to every heterogeneous node and self-updates, so it needs a lean, dependency-light artifact and **no** LLM libraries. The C# build was chosen for exactly that and then failed at it: six 72–81 MB binaries, no working AOT, and a macOS bundle that will not launch without Homebrew. The Python worker is **one** 2.8 MB `py3-none-any` artifact (ADR 29) | every node; self-update via signed manifest, artifact chosen by `agent_flavour` |
+| **`cbk`** — worker loop, hardware probe, self-updater, CLI | **Python** | Fans out to every heterogeneous node and self-updates, so it needs a lean, dependency-light artifact and **no** LLM libraries. Ships as one 2.8 MB `py3-none-any` zipapp (ADR 29) | every node; self-update via signed manifest |
 
 Rationale and the alternatives weighed (all-Python, all-C#, split) are in
-[decisions.md](decisions.md) ADR 7. The worker's language being **reversible** behind the
-protocol stopped being hypothetical: the C# distribution advantage did not hold up (no working
-AOT, and a macOS bundle that needs Homebrew — ADR 29), so a Python worker was added alongside
-it without touching the server. Both are now maintained; the Python one is the default.
+[decisions.md](decisions.md) ADR 7. The C# distribution advantage did not hold up (no working
+AOT, and a macOS bundle that needs Homebrew — ADR 29), so the worker is Python: one
+`py3-none-any` zipapp that runs everywhere without a build matrix.
 
 ### The shared contract
 
@@ -61,38 +60,6 @@ drift. Schema change → both sides update or their contract tests fail.
 | Tests | **pytest** + real Redis (`CBK_TEST_REDIS_URL` makes an unreachable broker a failure, not a skip) | plus its own contract conformance suite |
 | Lint | **ruff** | |
 
-## Worker stack — C#/.NET (the reference implementation)
-
-| Concern | Choice | Notes |
-|---|---|---|
-| Runtime | **.NET 10 (LTS)**, **self-contained** single-file per RID | ADR 28/29: Native AOT does not link, and the macOS build hard-links Homebrew brotli |
-| Redis | **StackExchange.Redis** | consumes the same Streams consumer-group contract |
-| HTTP out (local model server) | `HttpClient` + `System.Text.Json` (source-gen, AOT-friendly) | speaks the OpenAI wire protocol to Ollama/llama.cpp/etc. — **no vendor SDK** |
-| CLI | **Spectre.Console.Cli** | `cbk work / submit / status / fleet / enroll / pause / resume` (join tokens are minted by the server, `POST /nodes/tokens`) |
-| Hardware probe | small per-OS shims (`sysctl` / `/proc+/sys` / WMI); throughput bench = a timed call to the local model server | no heavyweight hardware-info dependency |
-| Update verify | **ECDSA P-256** (`System.Security.Cryptography`) | verifies the server's signed manifest against a pinned public key before applying |
-| mDNS | OS-native responder files in `deploy/`; browse via **Zeroconf** later | MVP uses a configured coordinator URL — the designed fallback |
-| Tests | **xUnit**, driving real subprocesses/HTTP where it matters | plus the shared contract test |
-
-### Worker footprint (the levers that make it lightweight)
-
-The worker shares nodes with their owners' real work, so a small, quiet resident
-footprint is a first-class requirement, not a nice-to-have. Concrete levers:
-
-- **Native AOT** — no JIT, no runtime: fast cold start and a low baseline heap.
-- **`InvariantGlobalization` + trimming** — drop ICU and unused IL; smaller binary,
-  fewer loaded resources.
-- **Workstation GC + memory-conserving settings** — the worker is I/O-bound, not
-  throughput-bound; a small heap beats server-GC's memory-for-speed trade.
-- **Minimal dependencies** — every package adds to the binary and must be AOT-verified;
-  keep it to StackExchange.Redis, source-gen `System.Text.Json`, Spectre.Console.
-- **Idle-cheap loop** — block on the Redis consumer read rather than poll; no busy-wait,
-  so an idle worker costs ~nothing.
-- **Stream large bodies** — don't buffer whole prompts/results in managed memory beyond
-  what the model-server call needs.
-
-Target: **tens of MB resident idle, not hundreds** — small enough to sit unnoticed on a
-shared laptop or a Pi.
 
 ## CI/CD
 
@@ -126,14 +93,10 @@ clusterbuck/
 │   ├── web/                      #   htmx templates + vendored static assets
 │   ├── tests/                    #   pytest + Testcontainers + contract conformance
 │   └── pyproject.toml            #   uv-managed
-├── worker/python/                # cbk — Python (the default; one py3-none-any zipapp)
+├── worker/                       # cbk — Python (one py3-none-any zipapp, ADR 29)
 │   ├── src/cbk_worker/           #   loop + probe + updater + inventory + CLI
 │   ├── tests/                    #   pytest + real Redis + contract conformance
 │   └── build.py                  #   → dist/cbk.pyz
-├── worker/dotnet/                # cbk — C#/.NET (reference implementation)
-│   ├── src/Clusterbuck.Worker/   #   worker loop + probe + updater + CLI
-│   ├── tests/                    #   xUnit + contract conformance
-│   └── Clusterbuck.Worker.slnx
 ├── deploy/                       # launchd/systemd units, Avahi/mDNS service files
 └── docs/                         # (this design set)
 ```

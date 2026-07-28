@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Build the shipped artifact: a single platform-independent zipapp, `dist/cbk.pyz`.
 
-One artifact for every OS and architecture. The .NET worker needs six per-platform builds at
-72–81 MB each and cannot use Native AOT on macOS at all (ADR 29); this is the same worker in
-one file that runs anywhere Python 3.11+ does.
+One artifact for every OS and architecture, anywhere Python 3.11+ runs (ADR 29).
 
 Vendors this package plus its pure-Python dependencies, so the signed artifact IS the code
 that runs — the update signature covers all of it. `cryptography` is deliberately excluded:

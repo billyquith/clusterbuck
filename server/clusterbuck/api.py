@@ -67,8 +67,8 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-# os+arch as reported by the hardware probe → .NET runtime identifier, so the coordinator
-# can offer the right artifact without the worker having to name its own RID.
+# os+arch → .NET runtime identifier. Kept for backward compat with any existing nodes
+# still reporting agent_flavour=dotnet; the Python worker uses py3-none-any instead.
 _RID = {
     ("darwin", "arm64"): "osx-arm64", ("darwin", "x64"): "osx-x64",
     ("linux", "arm64"): "linux-arm64", ("linux", "x64"): "linux-x64",
@@ -87,11 +87,10 @@ def rid_for(os_name: str | None, arch: str | None) -> str | None:
 PY_ARTIFACT = "py3-none-any"
 
 # agent_flavour → how to name the artifact this node can actually EXECUTE. Keyed by flavour
-# because os+arch alone is not enough: a Python and a .NET worker on the same darwin/arm64
-# box need entirely different downloads, and offering either one the other's artifact would
-# have it verify a valid signature and then install a foreign binary over its own entrypoint.
+# because os+arch alone is not enough to name an artifact unambiguously; selection FAILS
+# CLOSED — an unrecognised flavour gets no update, not a guess.
 _ARTIFACT_KEY = {
-    "dotnet": rid_for,
+    "dotnet": rid_for,             # backward compat — dotnet nodes still in the wild
     "python": lambda _os, _arch: PY_ARTIFACT,
 }
 
@@ -714,8 +713,8 @@ def create_app(
                 "last_heartbeat": n["last_heartbeat"],
                 # Version governance (ADR 27): what it runs and whether that is acceptable.
                 "agent_version": n["agent_version"],
-                # Which implementation — the fleet is deliberately polyglot (ADR 7), and this
-                # is what decides which release artifact the node can execute.
+                # Which runtime the node runs — decides which release artifact it can execute.
+                # Absent rows default to "dotnet" for backward compat with pre-M4 nodes.
                 "agent_flavour": n["agent_flavour"] or "dotnet",
                 "protocol_version": n["protocol_version"],
                 "fitness": n["fitness"] or "unknown",

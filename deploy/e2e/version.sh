@@ -40,8 +40,7 @@ wait_for "http://127.0.0.1:$MODEL_PORT/healthz" "model server"
 
 # The version the worker was actually built with — read it from the binary, don't assume.
 BUILT=$(cbk_worker --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-[[ -n "$BUILT" ]] || BUILT=$(grep -oE '<Version>[^<]+' \
-  "$REPO/worker/dotnet/src/Clusterbuck.Worker/Clusterbuck.Worker.csproj" | cut -d'>' -f2)
+[[ -n "$BUILT" ]] || fail "could not determine worker version — is the worker installed?"
 log "worker binary is version $BUILT"
 
 start_server(){   # $1 = extra env assignments

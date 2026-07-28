@@ -1,7 +1,7 @@
 """Signed worker self-update (protocols.md §7, ADR 13).
 
 An update channel is remote-code-execution by design, so the order of operations here is the
-security boundary and is deliberately strict — identical to the .NET worker's UpdateApplier:
+security boundary and is deliberately strict:
 
   1. **Refuse without a pinned public key.** No key ⇒ no self-update, ever. Signed or
      nothing; there is no "trust this once" path.
@@ -12,11 +12,8 @@ security boundary and is deliberately strict — identical to the .NET worker's 
   4. **Retain the previous artifact** as `<name>.prev`, so a bad release can be rolled back.
   5. **Swap, then re-exec.** The replaced process starts the new artifact and steps aside.
 
-Interop note (the trap that cost the .NET side a debugging session): Python `cryptography`
-emits and expects DER (SEC1/RFC 3279) ECDSA signatures. .NET's VerifyData defaults to
-IEEE-P1363 (raw r‖s) and returns false — not an error — on a DER blob. This side is the
-native DER end of that contract; the .NET worker passes
-DSASignatureFormat.Rfc3279DerSequence to meet it.
+Signature format: Python `cryptography` uses DER (SEC1/RFC 3279) ECDSA signatures; the
+signing server (`server/clusterbuck/signing.py`) produces the same format.
 
 Deliberately NOT implemented: canary rings and automatic crash-loop rollback. The retained
 previous artifact makes rollback *possible* (and `rollback()` performs it), but deciding a
@@ -110,9 +107,7 @@ def current_artifact() -> Path | None:
     """The file this agent runs from, or None when there is nothing meaningful to replace.
 
     Only a packaged artifact qualifies. Running from a source checkout or an editable venv
-    returns None — the same posture as the .NET worker refusing to self-update when it is
-    running under the `dotnet` host rather than as a published binary, because replacing a
-    developer's working tree from the network is never the intent.
+    returns None — replacing a developer's working tree from the network is never the intent.
     """
     override = os.environ.get("CBK_AGENT_PATH")
     if override:

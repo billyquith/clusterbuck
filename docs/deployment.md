@@ -1,7 +1,7 @@
 # Deployment & platforms
 
 How clusterbuck's two components are built and where they run, plus the node-role and
-wake configuration. clusterbuck is a **split build** — a Python server and a C#/.NET
+wake configuration. clusterbuck is a **split build** — a Python server and a Python
 worker (see [`../DESIGN.md`](../DESIGN.md) and [implementation.md](implementation.md)).
 
 ## Server build (Python) — one box
@@ -14,16 +14,11 @@ which is the recommended coordinator host (below).
 
 ## Worker build — every node
 
-The worker (`cbk`) ships in two interchangeable implementations (ADR 29). A node runs
-whichever suits it; the coordinator offers each the release artifact it can execute, keyed on
-the `agent_flavour` it reports.
-
-### Python worker (`worker/python`) — the default
-
-One **`py3-none-any` zipapp** for every OS and architecture: no build matrix, ~2.8 MB.
+The worker (`cbk`) ships as a single **`py3-none-any` zipapp**: one artifact for every OS and
+architecture, ~2.8 MB, no build matrix.
 
 ```bash
-cd worker/python && python build.py       # → dist/cbk.pyz
+cd worker && python build.py       # → dist/cbk.pyz
 scp dist/cbk.pyz node:/opt/cbk/ && ssh node 'python3 /opt/cbk/cbk.pyz work'
 ```
 
@@ -32,44 +27,6 @@ interpreter also needs `cryptography` (`pip install cryptography`); without it t
 normally and refuses updates rather than applying an unverified one. `cryptography` is
 deliberately not inside the zipapp — it is the update verifier, so it cannot be delivered
 through the channel it secures.
-
-### .NET worker (`worker/dotnet`) — the reference implementation
-
-Publishes as a **self-contained single-file binary per runtime identifier (RID)**. Kept for
-nodes with no Python, and as the reference the polyglot claim is measured against.
-
-| Target | RID |
-|---|---|
-| macOS (Apple Silicon) | `osx-arm64` |
-| macOS (Intel) | `osx-x64` |
-| Linux x86-64 | `linux-x64` |
-| Linux ARM64 (incl. Raspberry Pi 64-bit) | `linux-arm64` |
-| Linux ARM32 | `linux-arm` |
-| Windows x86-64 | `win-x64` |
-
-Publish modes, from most portable to most self-contained:
-
-- **Framework-dependent** — smallest artefact, but requires the .NET runtime installed
-  on the node.
-- **Self-contained** — bundles the runtime; no install needed. Good default for a
-  heterogeneous fleet.
-- **Single-file** — self-contained, collapsed to one executable. Easiest to distribute
-  (`scp` and run).
-- **Native AOT** — ahead-of-time compiled: fastest start, smallest memory. **Does not link**
-  for this worker — the macOS toolchain wants `-lssl -lcrypto -lbrotli*`, which Apple no longer
-  ships linkably (ADR 28/29). Aspiration, not shipping format.
-
-The .NET worker therefore ships **self-contained single-file**. One caveat, measured and
-load-bearing: the macOS binaries hard-link Homebrew's brotli (`otool -L` shows
-`/opt/homebrew/opt/brotli/...`), so they **will not launch on a Mac without Homebrew**. It is
-"self-contained" only for the .NET runtime, not for these system libraries — which is the
-concrete reason the Python worker is the default.
-
-**Cross-compilation caveat:** unlike Go's single-flag cross-compile, .NET **Native AOT
-generally publishes per target OS** (you build for each RID, ideally on a matching host
-or via a CI matrix). Plain self-contained single-file is more forgiving. In practice a
-GitHub Actions matrix (one job per RID) produces all worker binaries; fall back to
-self-contained if a specific target is awkward for AOT.
 
 ## Node roles
 
@@ -88,10 +45,9 @@ better "always-on brain" than a bigger machine, while the beefy machines that sl
 the actual inference. The coordinator is the **Python server** — Python 3.13, Redis, and
 LiteLLM all run on `linux-arm64`, so the whole always-on server fits on a 64-bit Pi.
 
-If a Pi is ever used as a (non-inference) **worker** instead, the .NET worker also runs
-on Pi: **64-bit (`linux-arm64`)** is first-class (Pi 3/4/5, Zero 2 W) incl. Native AOT;
-**32-bit (`linux-arm`)** works; **ARMv6** (Pi 1, first-gen Zero) is unsupported — .NET
-needs ARMv7+. (A Pi can't be a meaningful *inference* worker regardless — see below.)
+If a Pi is ever used as a (non-inference) **worker** instead, the Python zipapp runs
+on Pi: Python 3.11+ is available on **64-bit (`linux-arm64`)** (Pi 3/4/5, Zero 2 W)
+and all modern Pis. (A Pi can't be a meaningful *inference* worker regardless — see below.)
 
 **Caveat:** a Pi **cannot also be a meaningful inference worker** — too little RAM, no
 usable GPU, so an 8B won't run usefully. So the clean fork is:

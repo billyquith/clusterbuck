@@ -3,7 +3,7 @@
 clusterbuck adopts LiteLLM for route-now / health-check / load-balance / cloud-fallback
 and does NOT reimplement OpenAI routing (ADR 5). A capability alias (e.g. `8b-extract`)
 maps to a model-server deployment; LiteLLM calls that OpenAI-compatible endpoint DIRECTLY
-— the async C# worker is not in the sync path.
+— the async worker is not in the sync path.
 
 Cloud fallback is opt-in (CBK_CLOUD_FALLBACK_MODEL). Default off ⇒ the sync plane is
 local-only. Note the asymmetry with the async plane: the OpenAI request shape carries no

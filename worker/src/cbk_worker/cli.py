@@ -1,10 +1,4 @@
-"""Terminal output and argument parsing.
-
-The .NET worker hand-rolls both to stay Native-AOT-clean (worker/dotnet Cli.cs). This side
-has no such constraint, so argparse does the work — but the verb and flag surface is kept
-identical, because an operator should not have to know which implementation is installed on
-a node to drive it.
-"""
+"""Terminal output and argument parsing."""
 
 from __future__ import annotations
 
@@ -63,8 +57,7 @@ class Out:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    # --server is accepted BEFORE or AFTER the verb, because the .NET worker's hand-rolled
-    # parser scans the whole argv and operators (and the e2e scripts) write it either way.
+    # --server is accepted BEFORE or AFTER the verb (e2e scripts write it either way).
     # SUPPRESS is what makes that work: without it, a subparser that did not see --server
     # would reset the attribute to None and clobber a value given before the verb.
     common = argparse.ArgumentParser(add_help=False)

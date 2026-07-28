@@ -19,7 +19,6 @@ under *Not yet real* below.
 
 Needs Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker (for Redis), and an
 OpenAI-compatible model server (Ollama for real inference; a zero-weight stub ships for tests).
-The .NET 10 SDK is optional — only for the C# worker.
 
 ```bash
 docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine   # broker + result store
@@ -28,36 +27,18 @@ cd server && uv venv && uv pip install -e ".[dev]"
 uv run pytest                    # server suite (needs Redis)
 CBK_API_KEY=choose-a-secret uv run cbk-server    # job API + /v1/chat/completions + dashboard at /
 
-cd ../worker/python && uv venv && uv pip install -e ".[dev]"
+cd ../worker && uv venv && uv pip install -e ".[dev]"
 uv run pytest                    # worker suite
 uv run cbk work                  # start pulling jobs
 ```
 
 Then submit patient work to `POST /jobs` (`{task_class, min_ability}` or an explicit
 `capability`) and poll `GET /jobs/{id}`, or point any OpenAI SDK at `/v1/chat/completions`.
-`bash deploy/e2e/ci.sh` runs the end-to-end proofs — `CBK_WORKER=both` runs them against both
-worker implementations.
+`bash deploy/e2e/ci.sh` runs the end-to-end proofs.
 
-### Two workers
-
-The worker ships in two interchangeable implementations with the same verbs, the same `CBK_*`
-environment and the same contract. A node runs whichever suits it, and the coordinator offers
-each the release artifact it can actually execute.
-
-| | [`worker/python`](worker/python) | [`worker/dotnet`](worker/dotnet) |
-|---|---|---|
-| Artifact | **one** `cbk.pyz`, `py3-none-any` | **six**, one per platform |
-| Size | ~2.8 MB | 72–81 MB each |
-| Node needs | Python 3.11+ | nothing¹ |
-| Role | the default | reference implementation |
-
-¹ Except on macOS, where the "self-contained" binary hard-links Homebrew's brotli and will not
-launch without it — measured, see [ADR 29](docs/decisions.md). Native AOT does not link at all.
-That defect is why the Python worker exists.
-
-Both are held to the same JSON Schema in [`contract/`](contract) by their own conformance
-suites, and CI runs every end-to-end proof against both: anything that passes for one and fails
-for the other is a contract violation by definition.
+The worker ships as a single **`py3-none-any` zipapp** (`cbk.pyz`, ~2.8 MB, [`worker/`](worker))
+that runs on every OS and architecture. Nodes need Python 3.11+. The conformance suite in
+[`contract/`](contract) ensures the worker and server agree on the wire format.
 
 `CBK_API_KEY` is the operator shared secret — **unset means the API is unauthenticated**,
 which is fine on a trusted LAN and warned about at startup. Redis needs its own

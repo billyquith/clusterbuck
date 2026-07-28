@@ -3,7 +3,7 @@
 Small per-OS shims, no heavyweight hardware-info dependency. Everything is best-effort with
 safe fallbacks — a probe that cannot read a value degrades rather than failing enrollment.
 The optional throughput micro-benchmark (a timed call to the local model server) is left
-unset here, as in the .NET worker.
+unset.
 """
 
 from __future__ import annotations

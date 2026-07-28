@@ -1,8 +1,4 @@
-"""Argument parsing.
-
-The surface has to match the .NET worker's, because an operator (and the e2e harness) drives
-whichever implementation a node happens to have installed.
-"""
+"""Argument parsing."""
 
 from __future__ import annotations
 
@@ -21,7 +17,7 @@ def parser():
     ["--server", "http://a:1", "enroll", "--token", "T"],     # before the verb
 ])
 def test_server_is_accepted_on_either_side_of_the_verb(parser, argv):
-    """The .NET parser scans the whole argv, so both orders occur in the wild.
+    """--server must be accepted pre- or post-verb: the e2e scripts pass it post-verb.
 
     Regression: argparse originally accepted only the pre-verb form, and every e2e script
     passes it post-verb — `cbk enroll --token … --server …` died with "unrecognized

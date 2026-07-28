@@ -1,60 +1,27 @@
 #!/usr/bin/env bash
-# Selects which worker implementation the e2e proofs exercise.
-#
-#   CBK_WORKER=dotnet   (default)  worker/dotnet — the C# reference worker
-#   CBK_WORKER=python              worker/python — the platform-independent worker
-#
-# The point of running the SAME proofs against both is that it is the only thing which makes
-# a second implementation evidence for the polyglot claim (ADR 7/22) rather than a second
-# thing to keep in sync by hand. Anything that passes for one and fails for the other is a
-# contract violation somewhere, by definition.
-#
+# Worker dispatch helper for e2e scripts.
 # Sourced, not executed. Expects $REPO and a fail() from the calling script.
 
-CBK_WORKER="${CBK_WORKER:-dotnet}"
+_PY_VENV_CBK="$REPO/worker/.venv/bin/cbk"
+_PY_VENV_PYTHON="$REPO/worker/.venv/bin/python"
+_PY_PYZ="$REPO/worker/dist/cbk.pyz"
+WORKER_DESC="Python (worker)"
 
-_DOTNET_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
-_PY_VENV_CBK="$REPO/worker/python/.venv/bin/cbk"
-_PY_VENV_PYTHON="$REPO/worker/python/.venv/bin/python"
-_PY_PYZ="$REPO/worker/python/dist/cbk.pyz"
-
-case "$CBK_WORKER" in
-  dotnet) WORKER_DESC="C#/.NET (worker/dotnet)" ;;
-  python) WORKER_DESC="Python (worker/python)" ;;
-  *)      echo "CBK_WORKER must be 'dotnet' or 'python', got '$CBK_WORKER'" >&2; exit 2 ;;
-esac
-
-# Assert the selected worker is actually built/installed, with the command that fixes it.
 worker_assert_ready() {
-  case "$CBK_WORKER" in
-    dotnet)
-      [[ -f "$_DOTNET_DLL" ]] \
-        || fail "worker not built — run: dotnet build $REPO/worker/dotnet"
-      ;;
-    python)
-      # Prefer the venv entry point for speed; fall back to the shipped zipapp, which is
-      # also worth exercising because it is what a node actually installs.
-      if [[ ! -x "$_PY_VENV_CBK" && ! -f "$_PY_PYZ" ]]; then
-        fail "python worker not installed — run: (cd $REPO/worker/python && uv venv && uv pip install -e '.[dev]')"
-      fi
-      ;;
-  esac
+  if [[ ! -x "$_PY_VENV_CBK" && ! -f "$_PY_PYZ" ]]; then
+    fail "worker not installed — run: (cd $REPO/worker && uv venv && uv pip install -e '.[dev]')"
+  fi
 }
 
-# The argv for the selected worker, printed one arg per line so callers can build on it.
+# The argv for the worker, printed one arg per line so callers can build on it.
 _worker_argv() {
-  case "$CBK_WORKER" in
-    dotnet) printf '%s\n' dotnet "$_DOTNET_DLL" ;;
-    python)
-      # Prefer the venv entry point; it uses the venv interpreter, which has cryptography.
-      # Falling back to the zipapp, run it under that SAME interpreter rather than the
-      # shebang's `python3` — the system one may lack cryptography, which would silently
-      # turn self-update off and (before the distinct error) look like a signature failure.
-      if [[ -x "$_PY_VENV_CBK" ]]; then printf '%s\n' "$_PY_VENV_CBK"
-      elif [[ -x "$_PY_VENV_PYTHON" ]]; then printf '%s\n' "$_PY_VENV_PYTHON" "$_PY_PYZ"
-      else printf '%s\n' "$_PY_PYZ"; fi
-      ;;
-  esac
+  # Prefer the venv entry point; it uses the venv interpreter, which has cryptography.
+  # Falling back to the zipapp, run it under that SAME interpreter rather than the
+  # shebang's `python3` — the system one may lack cryptography, which would silently
+  # turn self-update off and (before the distinct error) look like a signature failure.
+  if [[ -x "$_PY_VENV_CBK" ]]; then printf '%s\n' "$_PY_VENV_CBK"
+  elif [[ -x "$_PY_VENV_PYTHON" ]]; then printf '%s\n' "$_PY_VENV_PYTHON" "$_PY_PYZ"
+  else printf '%s\n' "$_PY_PYZ"; fi
 }
 
 # Run a worker verb synchronously: `cbk_worker enroll --token …`

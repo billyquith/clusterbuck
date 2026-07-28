@@ -4,7 +4,7 @@
 # seed for a coordinator-held dynamic registry maintained by enrollment + heartbeats.
 #
 # Two access paths to each node hang off a capability:
-#   - `queue`        — the async plane: workers consume q:<...> (the C# worker, env-configured).
+#   - `queue`        — the async plane: workers consume q:<...> (env-configured).
 #   - `model_server` — the sync plane: LiteLLM calls this OpenAI-compatible endpoint directly
 #                      (the worker is NOT in the sync path).
 #

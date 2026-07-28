@@ -1,20 +1,10 @@
 name: Release worker builds
 
-# Builds both worker implementations (deployment.md → Worker build). Push a tag like `v0.7.0`
+# Builds the Python worker zipapp (deployment.md → Worker build). Push a tag like `v0.7.0`
 # to cut a release, or run it manually to get artifacts without publishing.
 #
 # **Python — one `py3-none-any` zipapp, ~2.8 MB, no matrix.** Nothing in it is
-# platform-specific, so there is nothing to build per platform. This is the default worker.
-#
-# **.NET — six self-contained single-file binaries, 72–81 MB each.** Not Native AOT: AOT does
-# not link on macOS (Apple no longer ships -lssl/-lbrotli linkably), and the self-contained
-# macOS build turns out to hard-link Homebrew's brotli, so it will not launch on a Mac without
-# Homebrew. Both measured — see ADR 29. Kept because it is the reference implementation and
-# because a node with no Python is a real case.
-#
-# One runner builds every RID: .NET cross-publishes self-contained binaries fine (verified
-# producing working PE32+, Mach-O and ELF aarch64 executables). Each artifact is then
-# smoke-tested on its own native OS, because "it linked" and "it runs" are different claims.
+# platform-specific, so there is nothing to build per platform.
 
 on:
   push:
@@ -25,69 +15,6 @@ permissions:
   contents: write        # needed only by the release job, to attach artifacts
 
 jobs:
-  build:
-    name: build ${{ matrix.rid }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { rid: win-x64,     ext: ".exe" }   # Windows 11 x64
-          - { rid: win-arm64,   ext: ".exe" }   # Windows on ARM
-          - { rid: osx-arm64,   ext: "" }       # macOS Apple Silicon
-          - { rid: osx-x64,     ext: "" }       # macOS Intel
-          - { rid: linux-x64,   ext: "" }
-          - { rid: linux-arm64, ext: "" }       # incl. Raspberry Pi 64-bit
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
-
-      - name: Publish
-        working-directory: worker/dotnet
-        run: |
-          dotnet publish src/Clusterbuck.Worker -c Release -r ${{ matrix.rid }} \
-            -p:PublishSingleFile=true -p:SelfContained=true -p:PublishAot=false \
-            -o "out/${{ matrix.rid }}" --nologo
-
-      - name: Record the digest the update channel pins
-        working-directory: worker/dotnet
-        run: |
-          BIN="out/${{ matrix.rid }}/cbk${{ matrix.ext }}"
-          test -f "$BIN" || { echo "::error::no binary produced for ${{ matrix.rid }}"; exit 1; }
-          sha256sum "$BIN" | tee "out/${{ matrix.rid }}/cbk.sha256"
-          ls -lh "$BIN"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cbk-${{ matrix.rid }}
-          path: worker/dotnet/out/${{ matrix.rid }}/
-          if-no-files-found: error
-
-  smoke:
-    name: smoke ${{ matrix.rid }} on ${{ matrix.runs-on }}
-    needs: build
-    runs-on: ${{ matrix.runs-on }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { rid: win-x64,   runs-on: windows-latest, bin: "cbk.exe" }
-          - { rid: osx-arm64, runs-on: macos-latest,   bin: "cbk" }
-          - { rid: linux-x64, runs-on: ubuntu-latest,  bin: "cbk" }
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: cbk-${{ matrix.rid }}
-      - name: It runs, and reports the version the coordinator will judge it by
-        shell: bash
-        run: |
-          chmod +x "${{ matrix.bin }}" || true
-          # `--help` exercises the reflection-based CLI binding, which is exactly what AOT
-          # would have broken — so this is the assertion that matters for this format.
-          ./"${{ matrix.bin }}" --help
-
   build-python:
     name: build py3-none-any
     runs-on: ubuntu-latest
@@ -95,10 +22,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Install
-        working-directory: worker/python
+        working-directory: worker
         run: uv venv && uv pip install -e ".[dev]"
       - name: Build the zipapp
-        working-directory: worker/python
+        working-directory: worker
         # ONE artifact for every OS and architecture — no matrix, because there is nothing
         # platform-specific in it (ADR 29). A tag stamps its own version so the artifact
         # reports what the coordinator's version policy expects.
@@ -109,57 +36,37 @@ jobs:
             *)      uv run python build.py ;;      # manual run: keep the source version
           esac
       - name: It must run under an interpreter that never installed it
-        working-directory: worker/python
+        working-directory: worker
         run: |
           python3 dist/cbk.pyz --version
           python3 dist/cbk.pyz --help > /dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: cbk-py3-none-any
-          path: worker/python/dist/
+          path: worker/dist/
 
   release:
     name: attach to the GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [smoke, build-python]
+    needs: [build-python]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with: { path: dist }
-      - name: Package one archive per platform
-        run: |
-          cd dist
-          # The Python worker ships as the bare .pyz: it is already one self-contained file,
-          # and wrapping 2.8 MB in an archive would only add a step before running it.
-          for d in cbk-*; do
-            [ "$d" = "cbk-py3-none-any" ] && continue
-            if [ -f "$d/cbk.exe" ]; then (cd "$d" && zip -q "../${d}.zip" cbk.exe cbk.sha256);
-            else tar -czf "${d}.tar.gz" -C "$d" cbk cbk.sha256; fi
-          done
-          ls -lh *.zip *.tar.gz cbk-py3-none-any/* 2>/dev/null || true
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.zip
-            dist/*.tar.gz
             dist/cbk-py3-none-any/cbk.pyz
             dist/cbk-py3-none-any/cbk.pyz.sha256
           body: |
-            Worker builds for `${{ github.ref_name }}`. Two interchangeable implementations —
-            a node runs whichever suits it, and the coordinator offers each the artifact it
-            can actually execute (`agent_flavour`, ADR 29).
+            Worker build for `${{ github.ref_name }}`.
 
             **`cbk.pyz` — Python, one file for every platform.** ~2.8 MB, `py3-none-any`.
             Needs Python 3.11+ on the node, plus `cryptography` in that interpreter if you
             want self-update (without it the worker runs normally and refuses updates).
-            Start here unless you have a reason not to.
-
-            **`cbk-<rid>.{tar.gz,zip}` — C#/.NET, six per-platform builds.** 72–81 MB each,
-            self-contained so no .NET runtime is needed. Note that the macOS builds link
-            against Homebrew's brotli and will not launch without it (ADR 29).
 
             Each artifact carries its own sha256. The signed release manifest that drives
             self-update is **not** generated here — it is signed per-request by your
             coordinator from its own key, so the payload always matches what that coordinator
-            considers current (ADR 13). Both apply paths are built and proven end-to-end
-            (`deploy/e2e/selfupdate.sh`, `selfupdate-py.sh`).
+            considers current (ADR 13). The apply path is built and proven end-to-end
+            (`deploy/e2e/selfupdate-py.sh`).

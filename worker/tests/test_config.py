@@ -1,9 +1,4 @@
-"""Configuration and the hardware probe.
-
-The env-variable names and defaults are shared with the .NET worker: a node's deployment
-config must not have to know which implementation is installed on it, so these assert the
-exact names rather than just "some config was read".
-"""
+"""Configuration and the hardware probe."""
 
 from __future__ import annotations
 
@@ -30,7 +25,7 @@ def _clean(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def test_defaults_match_the_dotnet_worker(monkeypatch):
+def test_worker_defaults(monkeypatch):
     _clean(monkeypatch)
     cfg = WorkerConfig.from_environment()
     assert cfg.redis_url == "redis://localhost:6379"
@@ -92,8 +87,7 @@ def test_cli_overrides_layer_on_top_of_the_environment(monkeypatch):
 
 
 def test_bare_host_port_is_accepted_as_well_as_a_url():
-    """The .NET worker takes host:port natively; the same CBK_REDIS_URL is set on a node
-    regardless of which worker runs there, so both forms have to work in both."""
+    """CBK_REDIS_URL may be set as a bare host:port or a redis:// URL."""
     assert normalise_redis_url("localhost:6379") == "redis://localhost:6379"
     assert normalise_redis_url("redis://h:6379/2") == "redis://h:6379/2"
 

@@ -37,22 +37,6 @@ jobs:
         run: uv run pytest -q
 
   worker:
-    name: worker (C#/.NET)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
-      - name: Build
-        working-directory: worker/dotnet
-        run: dotnet build -c Release --nologo
-      - name: Test
-        working-directory: worker/dotnet
-        # Some tests spawn the Python fake model server over real HTTP.
-        run: dotnet test -c Release --nologo -v q
-
-  worker-python:
     name: worker (Python) — Redis-backed
     runs-on: ubuntu-latest
     services:
@@ -68,21 +52,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Install
-        working-directory: worker/python
+        working-directory: worker
         run: uv venv && uv pip install -e ".[dev]"
       - name: Lint
-        working-directory: worker/python
+        working-directory: worker
         run: uv run ruff check src tests build.py
       - name: Test (full suite, including the Streams loop against real Redis)
-        working-directory: worker/python
+        working-directory: worker
         env:
           CBK_TEST_REDIS_URL: redis://localhost:6379/14
         run: uv run pytest -q
       - name: Build the shipped artifact
-        working-directory: worker/python
+        working-directory: worker
         run: uv run python build.py
       - name: The artifact must run on a machine that never installed it
-        working-directory: worker/python
+        working-directory: worker
         # A zipapp that imports fine in its own venv but not standalone is not shippable.
         # `python3` here is the system interpreter, not the project venv — deliberately.
         run: |
@@ -91,9 +75,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: cbk-pyz-ci
-          path: worker/python/dist/
+          path: worker/dist/
 
-  worker-python-crossplatform:
+  worker-crossplatform:
     # The artifact is py3-none-any, but the CODE has per-OS branches (probe.py's Windows
     # ctypes memory query, update.py's os.execv). This job runs the non-Redis suites on macOS
     # and Windows so those branches are at least imported and exercised — the Redis-backed
@@ -110,13 +94,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Install
-        working-directory: worker/python
+        working-directory: worker
         run: uv venv && uv pip install -e ".[dev]"
       - name: Test (Redis-backed loop tests skip; probe/update/verify/CLI run)
-        working-directory: worker/python
+        working-directory: worker
         run: uv run pytest -q
       - name: Build and run the artifact
-        working-directory: worker/python
+        working-directory: worker
         # `python cbk.pyz` rather than executing it directly: Windows has no shebang
         # execution, so this is the portable way to prove the zip imports and runs on this OS.
         run: |
@@ -136,9 +120,9 @@ jobs:
         run: python contract/validate.py
 
   e2e:
-    name: end-to-end (both workers)
+    name: end-to-end
     runs-on: ubuntu-latest
-    needs: [server, worker, worker-python]
+    needs: [server, worker]
     services:
       redis:
         image: redis:7-alpine
@@ -151,28 +135,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
       - name: Install server
         working-directory: server
         run: uv venv && uv pip install -e ".[dev]"
-      - name: Build the .NET worker
-        working-directory: worker/dotnet
-        run: dotnet build -c Debug --nologo
-      - name: Install the Python worker
-        working-directory: worker/python
+      - name: Install worker
+        working-directory: worker
         run: uv venv && uv pip install -e ".[dev]"
-      - name: Run the e2e suite against BOTH workers
-        # CBK_WORKER=both runs every shared proof twice, once per implementation, then each
-        # flavour's own self-update proof. Anything that passes for one and fails for the
-        # other is a contract violation by definition (ADR 7/22/29).
-        #
+      - name: Run the e2e suite
         # The scripts reach Redis via `docker exec cbk-redis` for flushes; on a GitHub
         # service container that is not available, so point them at redis-cli directly.
         env:
           CBK_REDIS_CLI: "redis-cli -h localhost -p 6379"
-          CBK_WORKER: both
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools
           bash deploy/e2e/ci.sh

@@ -25,14 +25,8 @@ EXAMPLES = CONTRACT / "examples"
 # --- verification -----------------------------------------------------------------------
 
 
-def test_committed_fixture_verifies_cross_language():
-    """The fixture the SERVER signed, verified here.
-
-    This is the cross-language half of the interop contract: `cryptography` emits DER
-    (SEC1/RFC 3279), .NET's VerifyData defaults to IEEE-P1363 and silently returns false on a
-    DER blob. The .NET worker asserts the same fixture with
-    DSASignatureFormat.Rfc3279DerSequence; this side is the native DER end.
-    """
+def test_committed_fixture_verifies():
+    """The fixture the SERVER signed, verified here (DER / SEC1 / RFC 3279 format)."""
     m = UpdateManifest.from_wire(
         json.loads((EXAMPLES / "update-manifest.valid.json").read_text()))
     pem = (EXAMPLES / "update-signing.pub.pem").read_text()

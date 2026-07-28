@@ -2,7 +2,7 @@
 
 Asserts the shared JSON Schema in contract/ accepts the valid fixtures and rejects the
 invalid ones, and that the server's Pydantic models round-trip into schema-valid wire
-shapes. The C# worker runs the mirror of this against the same files, so the two type
+shapes. The worker runs the mirror of this against the same files, so the two type
 definitions cannot drift.
 """
 
