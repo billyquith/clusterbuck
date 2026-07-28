@@ -55,6 +55,11 @@ public sealed record HeartbeatRequest
     [JsonPropertyName("stats")] public HeartbeatStats Stats { get; init; } = new();
     [JsonPropertyName("protocol_version")] public int? ProtocolVersion { get; init; }
     [JsonPropertyName("agent_version")] public string? AgentVersion { get; init; }
+    /// <summary>Which implementation this is, so the coordinator offers an artifact this
+    /// worker can actually execute — a .NET RID here, not the Python worker's single
+    /// platform-independent build. Getting this wrong means installing a foreign
+    /// executable over our own entrypoint, so it is stated rather than inferred.</summary>
+    [JsonPropertyName("agent_flavour")] public string? AgentFlavour { get; init; }
     [JsonPropertyName("action_result")] public ActionResult? ActionResult { get; init; }
 }
 

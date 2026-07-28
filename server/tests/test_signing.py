@@ -66,3 +66,90 @@ def test_update_endpoint_signs(tmp_path, redis_url):
 def test_update_endpoint_404_when_unconfigured(client):
     # The conftest client configures no signing key ⇒ no update channel.
     assert client.get("/updates/manifest", params={"rid": "osx-arm64"}).status_code == 404
+
+
+def test_artifact_key_is_chosen_by_flavour_not_just_platform():
+    """os+arch alone cannot name the artifact: two workers share a box, not a runtime."""
+    from clusterbuck.api import PY_ARTIFACT, artifact_key_for
+
+    # Same darwin/arm64 machine, two implementations, two different downloads.
+    assert artifact_key_for("dotnet", "darwin", "arm64") == "osx-arm64"
+    assert artifact_key_for("python", "darwin", "arm64") == PY_ARTIFACT
+    # One Python artifact covers every platform — that is what collapses the build matrix.
+    assert artifact_key_for("python", "windows", "x64") == PY_ARTIFACT
+    assert artifact_key_for("python", "linux", "arm64") == PY_ARTIFACT
+    # Absent flavour ⇒ dotnet, the only implementation that predates the field.
+    assert artifact_key_for(None, "linux", "x64") == "linux-x64"
+    # Fails closed: no artifact named for a flavour we do not know, so no update is offered.
+    assert artifact_key_for("rust", "linux", "x64") is None
+    assert artifact_key_for("pyhton", "darwin", "arm64") is None   # typo, not a coin flip
+
+
+def _flavour_heartbeat(tmp_path, redis_url, monkeypatch, flavour, artifacts):
+    """Enrol an auto-updating darwin/arm64 node, beat once, return the offered manifest.
+
+    Declares a current version so the node is judged `stale`: without a version policy it is
+    assessed `ok`, the coordinator never consults the release at all, and a flavour test
+    would pass whether or not the artifact selection is correct.
+    """
+    from dataclasses import replace
+
+    from clusterbuck import api as api_mod
+    monkeypatch.setattr(api_mod, "settings",
+                        replace(api_mod.settings, worker_current_version="2.0.0"))
+
+    priv = signing.generate_keypair()
+    keyp = tmp_path / "sign.key.pem"
+    keyp.write_text(signing.private_pem(priv))
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps({
+        "version": "2.0.0", "channel": "stable", "protocol_version": 1,
+        "artifacts": artifacts,
+    }))
+    app = create_app(redis_url=redis_url, db_path=str(tmp_path / f"{flavour}.db"),
+                     start_scheduler=False, update_signing_key=str(keyp),
+                     update_release=str(release))
+    with TestClient(app) as c:
+        token = c.post("/nodes/tokens").json()["join_token"]
+        enr = c.post("/nodes/enroll", json={
+            "join_token": token, "hostname": "node-x", "os": "darwin", "arch": "arm64",
+            "hw": {"ram_gb": 64, "accelerator": "metal", "disk_free_gb": 512},
+            "profile": "shared",
+        }).json()
+        # Opt in to self-update; without it the coordinator never offers one (ADR 13).
+        app.state.store.set_node_flags(enr["node_id"], auto_update=True)
+        hb = c.post(f"/nodes/{enr['node_id']}/heartbeat",
+                    json={"mode": "away", "agent_version": "0.1.0",
+                          "agent_flavour": flavour, "protocol_version": 1},
+                    headers={"x-cbk-node-key": enr["node_key"]})
+        assert hb.status_code == 200, hb.text
+        return hb.json()
+
+
+def test_python_worker_is_never_offered_the_dotnet_binary(tmp_path, redis_url, monkeypatch):
+    """The hazard this field exists to close.
+
+    A Python worker on darwin/arm64 used to be handed the osx-arm64 .NET single-file binary,
+    because the artifact was keyed off os+arch alone. It would verify a perfectly valid
+    signature, download ~73 MB, and install a managed executable over its own entrypoint.
+    A release with no Python artifact must offer that worker nothing at all.
+    """
+    sha = hashlib.sha256(b"dotnet-binary").hexdigest()
+    dotnet_only = {"osx-arm64": {"url": "https://x/cbk", "sha256": sha}}
+
+    body = _flavour_heartbeat(tmp_path, redis_url, monkeypatch, "python", dotnet_only)
+    assert body["update"] is None, "a Python worker was offered a .NET artifact"
+    assert body["fitness"]["status"] == "stale"   # still told to update, just not handed one
+
+    # The same release does offer it to the worker it was actually built for.
+    body = _flavour_heartbeat(tmp_path, redis_url, monkeypatch, "dotnet", dotnet_only)
+    assert body["update"] is not None and body["update"]["rid"] == "osx-arm64"
+
+
+def test_python_worker_gets_the_platform_independent_artifact(tmp_path, redis_url, monkeypatch):
+    sha = hashlib.sha256(b"cbk.pyz").hexdigest()
+    body = _flavour_heartbeat(tmp_path, redis_url, monkeypatch, "python", {
+        "py3-none-any": {"url": "https://x/cbk.pyz", "sha256": sha},
+    })
+    assert body["update"] is not None
+    assert body["update"]["rid"] == "py3-none-any" and body["update"]["sha256"] == sha

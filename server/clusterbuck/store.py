@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     tps            REAL,
     last_heartbeat TEXT,
     agent_version  TEXT,          -- the worker's build-stamped release version
+    agent_flavour  TEXT,          -- dotnet | python: which artifact it can execute
     protocol_version INTEGER,     -- queue-contract version it speaks
     fitness        TEXT,          -- ok | stale | quarantine (coordinator's last verdict)
     fitness_reason TEXT,
@@ -199,6 +200,7 @@ _MIGRATIONS = {
         "disk_quota_gb": "ALTER TABLE nodes ADD COLUMN disk_quota_gb REAL",
         "auto_approve": "ALTER TABLE nodes ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0",
         "agent_version": "ALTER TABLE nodes ADD COLUMN agent_version TEXT",
+        "agent_flavour": "ALTER TABLE nodes ADD COLUMN agent_flavour TEXT",
         "protocol_version": "ALTER TABLE nodes ADD COLUMN protocol_version INTEGER",
         "fitness": "ALTER TABLE nodes ADD COLUMN fitness TEXT",
         "fitness_reason": "ALTER TABLE nodes ADD COLUMN fitness_reason TEXT",
@@ -794,6 +796,7 @@ class Store:
     def record_heartbeat(self, *, node_id: str, mode: str, installed: str, loaded: str,
                          queues: str, jobs_done: int | None, tps: float | None,
                          last_heartbeat: str, agent_version: str | None = None,
+                         agent_flavour: str | None = None,
                          protocol_version: int | None = None,
                          fitness: str | None = None,
                          fitness_reason: str | None = None) -> bool:
@@ -801,11 +804,13 @@ class Store:
             cur = c.execute(
                 "UPDATE nodes SET mode = ?, installed = ?, loaded = ?, queues = ?, "
                 "agent_version = COALESCE(?, agent_version), "
+                "agent_flavour = COALESCE(?, agent_flavour), "
                 "protocol_version = COALESCE(?, protocol_version), "
                 "fitness = ?, fitness_reason = ?, "
                 "jobs_done = COALESCE(?, jobs_done), tps = COALESCE(?, tps), "
                 "last_heartbeat = ? WHERE node_id = ?",
-                (mode, installed, loaded, queues, agent_version, protocol_version,
-                 fitness, fitness_reason, jobs_done, tps, last_heartbeat, node_id),
+                (mode, installed, loaded, queues, agent_version, agent_flavour,
+                 protocol_version, fitness, fitness_reason, jobs_done, tps,
+                 last_heartbeat, node_id),
             )
             return cur.rowcount > 0

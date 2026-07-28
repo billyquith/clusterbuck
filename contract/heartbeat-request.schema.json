@@ -95,6 +95,10 @@
     "agent_version": {
       "type": "string",
       "description": "The worker's build-stamped release version (semver-ish, e.g. 0.7.0). The coordinator judges FITNESS from this, not just protocol compatibility: a version can speak the contract correctly and still carry bugs that produce wrong results."
+    },
+    "agent_flavour": {
+      "type": "string",
+      "description": "Which worker implementation this is, and therefore which release artifact it can actually EXECUTE: 'dotnet' selects a .NET runtime id (osx-arm64, linux-x64, …), 'python' selects the single platform-independent py3-none-any artifact. Deliberately an open string rather than an enum so a new worker language needs no contract change (the C# worker is a reference implementation, not a constraint — ADR 7). Absent ⇒ 'dotnet', the only implementation predating this field. The coordinator FAILS CLOSED: a flavour it has no artifact mapping for is offered no update at all, because handing a worker a binary it cannot run — or worse, one it would install over its own entrypoint — is far worse than leaving it on an old version."
     }
   }
 }

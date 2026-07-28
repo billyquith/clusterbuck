@@ -83,19 +83,50 @@ def rid_for(os_name: str | None, arch: str | None) -> str | None:
     return _RID.get((os_name.lower(), a))
 
 
-def _build_update_for(app, node) -> dict | None:
-    """A signed manifest for this node's platform, or None if no channel/artifact applies.
+# The Python worker is one artifact for every platform — no per-OS build, no matrix.
+PY_ARTIFACT = "py3-none-any"
+
+# agent_flavour → how to name the artifact this node can actually EXECUTE. Keyed by flavour
+# because os+arch alone is not enough: a Python and a .NET worker on the same darwin/arm64
+# box need entirely different downloads, and offering either one the other's artifact would
+# have it verify a valid signature and then install a foreign binary over its own entrypoint.
+_ARTIFACT_KEY = {
+    "dotnet": rid_for,
+    "python": lambda _os, _arch: PY_ARTIFACT,
+}
+
+
+def artifact_key_for(flavour: str | None, os_name: str | None,
+                     arch: str | None) -> str | None:
+    """Release-artifact key for a node, or None if we cannot name one safely.
+
+    FAILS CLOSED. An unrecognised flavour returns None and the node is offered no update at
+    all, because a worker left on an old version is a much smaller problem than a worker
+    that replaced itself with an executable for a different runtime.
+    """
+    resolve = _ARTIFACT_KEY.get((flavour or "dotnet").lower())
+    if resolve is None:
+        return None
+    return resolve(os_name, arch)
+
+
+def _build_update_for(app, node, flavour: str | None = None) -> dict | None:
+    """A signed manifest this node can actually run, or None if no channel/artifact applies.
 
     Signed per-request rather than served from a static file so the payload always matches
     what this coordinator considers current; the worker verifies before touching a byte.
+
+    `flavour` comes from the live heartbeat rather than the stored row so a worker that was
+    just re-installed in a different language is judged on what it is now, not what it was.
     """
     key_path, release_path = app.state.update_signing_key, app.state.update_release
     if not key_path or not release_path:
         return None
-    rid = rid_for(node["os"], node["arch"])
+    rid = artifact_key_for(flavour, node["os"], node["arch"])
     if rid is None:
-        _log.warning("no RID mapping for node %s (%s/%s) — cannot offer an update",
-                     node["node_id"], node["os"], node["arch"])
+        _log.warning("no artifact mapping for node %s (flavour=%s %s/%s) — cannot offer "
+                     "an update", node["node_id"], flavour or "dotnet",
+                     node["os"], node["arch"])
         return None
     try:
         release = json.loads(Path(release_path).read_text())
@@ -544,6 +575,7 @@ def create_app(
             jobs_done=body.stats.get("jobs_done"), tps=body.stats.get("tps"),
             last_heartbeat=now,
             agent_version=body.agent_version,
+            agent_flavour=body.agent_flavour,
             protocol_version=body.protocol_version,
             fitness=fitness.status, fitness_reason=fitness.reason,
         )
@@ -572,7 +604,7 @@ def create_app(
         # without auto_update the operator updates it by hand and this stays null (ADR 13).
         update = None
         if fitness.status in ("stale", "quarantine") and bool(node["auto_update"]):
-            update = _build_update_for(app, node)
+            update = _build_update_for(app, node, flavour=body.agent_flavour)
             if update is not None:
                 notes.append(
                     f"update offered: {update['version']} for {update['rid']}")
@@ -682,6 +714,9 @@ def create_app(
                 "last_heartbeat": n["last_heartbeat"],
                 # Version governance (ADR 27): what it runs and whether that is acceptable.
                 "agent_version": n["agent_version"],
+                # Which implementation — the fleet is deliberately polyglot (ADR 7), and this
+                # is what decides which release artifact the node can execute.
+                "agent_flavour": n["agent_flavour"] or "dotnet",
                 "protocol_version": n["protocol_version"],
                 "fitness": n["fitness"] or "unknown",
                 "fitness_reason": n["fitness_reason"],

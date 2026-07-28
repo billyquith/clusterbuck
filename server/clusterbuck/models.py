@@ -177,6 +177,10 @@ class HeartbeatRequest(BaseModel):
     # not just protocol compatibility (ADR 27) — optional so a worker predating the field
     # still heartbeats rather than 422-ing, and is assessed as unverifiable instead.
     agent_version: str | None = None
+    # Which worker implementation this is, and so which release artifact it can EXECUTE
+    # ('dotnet' → a .NET RID, 'python' → the one py3-none-any artifact). Absent ⇒ dotnet.
+    # An unrecognised value is offered no update rather than the wrong one (fails closed).
+    agent_flavour: str | None = None
     queues: list[str] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
     protocol_version: int | None = None

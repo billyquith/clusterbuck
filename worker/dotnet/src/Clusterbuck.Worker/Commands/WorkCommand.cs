@@ -147,6 +147,7 @@ public static class WorkCommand
                             Queues = caps.Select(c => WorkLoop.StreamKey(c)).ToList(),
                             ProtocolVersion = UpdateVerifier.ProtocolVersion,
                             AgentVersion = WorkerConfig.AgentVersion,
+                            AgentFlavour = WorkerConfig.AgentFlavour,
                             ActionResult = pendingResult,
                         }, ct);
                     pendingResult = null;   // reported; don't repeat it

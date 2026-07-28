@@ -37,6 +37,15 @@ public sealed record WorkerConfig
         ?? "0.0.0";
 
     /// <summary>
+    /// Which worker implementation this is (contract: heartbeat-request → agent_flavour).
+    /// The coordinator uses it to pick a release artifact this process can actually execute:
+    /// a .NET runtime id for us, not the Python worker's single py3-none-any build. Constant,
+    /// not configurable — a .NET build claiming to be anything else would install a foreign
+    /// executable over its own entrypoint.
+    /// </summary>
+    public const string AgentFlavour = "dotnet";
+
+    /// <summary>
     /// PEM of the update-signing public key this agent pins (CBK_UPDATE_PUBKEY = a file path,
     /// or the PEM inline). UNSET ⇒ self-update is refused outright: an update channel is RCE
     /// by design, so there is no unsigned path (ADR 13).
