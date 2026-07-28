@@ -1,67 +1,32 @@
-using System.ComponentModel;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
-using Spectre.Console;
-using Spectre.Console.Cli;
 
 namespace Clusterbuck.Worker.Commands;
 
-/// <summary>`cbk submit` — a thin client over the server's POST /jobs (protocols.md §1b).</summary>
-public sealed class SubmitCommand : AsyncCommand<SubmitCommand.Settings>
+/// <summary>`cbk submit` — a thin client over POST /jobs (protocols.md §1b).</summary>
+public static class SubmitCommand
 {
-    public sealed class Settings : CommandSettings
+    public static async Task<int> RunAsync(CliArgs cli)
     {
-        [CommandOption("--server <URL>")]
-        [Description("Server base URL (default CBK_SERVER_URL or http://localhost:8000).")]
-        public string? Server { get; init; }
-
-        [CommandOption("-p|--prompt <TEXT>")]
-        [Description("Prompt text.")]
-        public string? Prompt { get; init; }
-
-        [CommandOption("--capability <TIER>")]
-        [Description("Explicit capability tier (advanced addressing).")]
-        public string? Capability { get; init; }
-
-        [CommandOption("--task-class <NAME>")]
-        [Description("Task class (need-shaped addressing; pair with --min-ability).")]
-        public string? TaskClass { get; init; }
-
-        [CommandOption("--min-ability <N>")]
-        [Description("Minimum ability 1-10 (need-shaped addressing).")]
-        public int? MinAbility { get; init; }
-
-        [CommandOption("--urgency <CLASS>")]
-        [Description("urgent | necessary | waitable (default waitable).")]
-        public string Urgency { get; init; } = "waitable";
-
-        [CommandOption("--privacy <CLASS>")]
-        [Description("local_only | cloud_ok (default local_only).")]
-        public string Privacy { get; init; } = "local_only";
-    }
-
-    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
-    {
-        if (string.IsNullOrWhiteSpace(settings.Prompt))
+        var prompt = cli.Opt("--prompt");
+        if (string.IsNullOrWhiteSpace(prompt))
         {
-            AnsiConsole.MarkupLine("[red]--prompt is required[/]");
+            Out.Error("--prompt is required");
             return 1;
         }
 
         var body = new JsonObject
         {
-            ["messages"] = new JsonArray(new JsonObject { ["role"] = "user", ["content"] = settings.Prompt }),
-            ["urgency"] = settings.Urgency,
-            ["privacy"] = settings.Privacy,
+            ["messages"] = new JsonArray(
+                (JsonNode)new JsonObject { ["role"] = "user", ["content"] = prompt }),
+            ["urgency"] = cli.Opt("--urgency") ?? "waitable",
+            ["privacy"] = cli.Opt("--privacy") ?? "local_only",
         };
-        if (settings.Capability is { Length: > 0 }) body["capability"] = settings.Capability;
-        if (settings.TaskClass is { Length: > 0 }) body["task_class"] = settings.TaskClass;
-        if (settings.MinAbility is int a) body["min_ability"] = a;
+        if (cli.Opt("--capability") is { Length: > 0 } cap) body["capability"] = cap;
+        if (cli.Opt("--task-class") is { Length: > 0 } tc) body["task_class"] = tc;
+        if (cli.OptInt("--min-ability") is int ma) body["min_ability"] = ma;
 
-        var baseUrl = settings.Server
-            ?? Environment.GetEnvironmentVariable("CBK_SERVER_URL")
-            ?? "http://localhost:8000";
+        var baseUrl = cli.OptOrEnv("--server", "CBK_SERVER_URL", "http://localhost:8000");
 
         using var http = WorkerConfig.AdminHttp();
         using var content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
@@ -69,12 +34,13 @@ public sealed class SubmitCommand : AsyncCommand<SubmitCommand.Settings>
         var text = await resp.Content.ReadAsStringAsync();
         if (!resp.IsSuccessStatusCode)
         {
-            AnsiConsole.MarkupLineInterpolated($"[red]{(int)resp.StatusCode}[/] {text}");
+            // A 422 here is often the router refusing to under-serve min_ability (ADR 16).
+            Out.Error($"{(int)resp.StatusCode} {text}");
             return 1;
         }
 
         var node = JsonNode.Parse(text)!;
-        AnsiConsole.MarkupLineInterpolated($"[green]queued[/] id=[bold]{node["id"]}[/] result_key={node["result_key"]}");
+        Out.Good($"queued id={node["id"]} result_key={node["result_key"]}");
         return 0;
     }
 }

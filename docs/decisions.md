@@ -396,9 +396,26 @@ producing genuine `PE32+ (x86-64)`, `PE32+ (Aarch64)`, `Mach-O x86_64`, `ELF x86
 self-contained cross-publishes cleanly, one CI runner builds every platform — but each
 artifact is still smoke-tested on its native OS, since "it linked" and "it runs" are
 different claims.
-**To get AOT later:** replace Spectre.Console.Cli with a small hand-rolled parser (the CLI
-surface is seven verbs, so this is modest), then resolve the macOS OpenSSL link. Until both
-are done, `IsAotCompatible=true` in the csproj is an analyzer setting, not a shipping claim.
+**Update — the Spectre half is done, the link half is not.** Spectre.Console.Cli has been
+replaced by a hand-rolled dispatcher (`Cli.cs`, ~130 lines for seven verbs). That removed
+**every** IL2104/IL3053/IL3000 trim and AOT warning, and AOT now compiles all the way to the
+native link. Measured side benefits on the shipping self-contained build: 74 MB → 73 MB, and
+resident **67 MB → 59 MB** (-12%), with one fewer dependency and no reflection in the CLI path.
+
+The remaining blocker is **environmental and worse than it first looked**. The macOS AOT link
+line requests `-lssl -lcrypto -lbrotlienc -lbrotlidec -lbrotlicommon -licucore`, several of
+which Apple does not ship. Pointing the linker at Homebrew's OpenSSL (`LinkerArg` with
+`-L$(brew --prefix openssl@3)/lib`) resolves `ssl`/`crypto` and then fails on `brotlienc` — a
+cascade. Chasing it was abandoned deliberately, for a reason beyond tedium: **linking against
+Homebrew dylibs would make the binary depend on Homebrew at runtime**, which destroys the
+self-containment that is the entire point. Static-linking those `.a` files might work but is
+fragile and unproven.
+
+So `IsAotCompatible=true` remains an analyzer setting, not a shipping claim — but the *code*
+is now AOT-clean, and the obstacle is purely the macOS native link. **Untested and the obvious
+next probe: `linux-x64` AOT**, where these libraries are normally present via distro packages.
+CI could answer that on ubuntu-latest without touching a developer machine. If Linux AOT works,
+the honest shape may be AOT on Linux and self-contained on macOS.
 **Considered:** framework-dependent (smallest artifact, but requires a .NET runtime on every
 node — exactly what ADR 19 rejected); fixing AOT first (blocks all releases on a CLI rewrite);
 per-OS native runners for every RID (unnecessary once cross-publish was shown to work, and

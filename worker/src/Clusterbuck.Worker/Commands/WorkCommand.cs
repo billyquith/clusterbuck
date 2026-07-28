@@ -1,31 +1,17 @@
-using System.ComponentModel;
-using Spectre.Console;
-using Spectre.Console.Cli;
 using StackExchange.Redis;
 
 namespace Clusterbuck.Worker.Commands;
 
 /// <summary>`cbk work` — the resident worker loop.</summary>
-public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
+public static class WorkCommand
 {
-    public sealed class Settings : CommandSettings
-    {
-        [CommandOption("-c|--capabilities <LIST>")]
-        [Description("Comma-separated capability tiers to serve (overrides CBK_CAPABILITIES).")]
-        public string? Capabilities { get; init; }
-
-        [CommandOption("--model <NAME>")]
-        [Description("Model name to pass to the local model server (overrides CBK_MODEL).")]
-        public string? Model { get; init; }
-    }
-
-    public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
+    public static async Task<int> RunAsync(CliArgs cli)
     {
         var cfg = WorkerConfig.FromEnvironment();
-        if (settings.Capabilities is { Length: > 0 })
-            cfg = cfg with { Capabilities = settings.Capabilities.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) };
-        if (settings.Model is { Length: > 0 })
-            cfg = cfg with { ModelName = settings.Model };
+        if (cli.Opt("--capabilities") is { Length: > 0 } caps0)
+            cfg = cfg with { Capabilities = caps0.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) };
+        if (cli.Opt("--model") is { Length: > 0 } model0)
+            cfg = cfg with { ModelName = model0 };
 
         // Enrolled mode (M4b): if node identity exists, take the id + ladder from it and
         // heartbeat. Otherwise the worker stays purely env-configured (M0-M3 behaviour).
@@ -51,14 +37,14 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         using var hbHttp = new HttpClient();
         var model = new ModelClient(http, cfg);
-        var loop = new WorkLoop(db, model, cfg, s => AnsiConsole.MarkupLineInterpolated($"[grey]{s}[/]"));
+        var loop = new WorkLoop(db, model, cfg, s => Out.Dim(s));
 
         var inventory = new ModelInventory(hbHttp, cfg.ModelServerUrl, cfg.ModelManager);
         // Model pulls and binary downloads can take minutes; give them a generous client.
         using var mgrHttp = new HttpClient { Timeout = TimeSpan.FromHours(1) };
         var manager = new ModelManager(mgrHttp, inventory.NativeBase, cfg.ModelManager);
         var applier = new UpdateApplier(mgrHttp, WorkerConfig.UpdatePublicKeyPem,
-                                        s2 => AnsiConsole.MarkupLineInterpolated($"[cyan]{s2}[/]"));
+                                        s2 => Out.Info(s2));
 
         Task? heartbeat = null;
         if (state is not null && ladder is not null)
@@ -120,8 +106,7 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
         var result = await applier.ApplyAsync(manifest);
         if (result.Outcome != UpdateApplier.Outcome.Applied)
         {
-            AnsiConsole.MarkupLineInterpolated(
-                $"[yellow]update {result.Outcome}: {result.Detail}[/]");
+            Out.Warn($"update {result.Outcome}: {result.Detail}");
             loop.Paused = wasPaused;            // not updating after all — resume as before
         }
     }
@@ -170,7 +155,7 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
                     // quarantined worker stops claiming: a version with known-bad behaviour
                     // producing plausible-looking wrong results is worse than an idle node.
                     quarantined = ApplyFitness(resp.Fitness, s2 =>
-                        AnsiConsole.MarkupLineInterpolated($"[yellow]{s2}[/]"));
+                        Out.Warn(s2));
                     loop.Paused = quarantined || effective == "paused";
 
                     // A signed update, if the coordinator offered one and this node opted in.
@@ -197,8 +182,7 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
     private static async Task<ActionResult> ExecuteActionAsync(
         ModelManager manager, ModelAction action, CancellationToken ct)
     {
-        AnsiConsole.MarkupLineInterpolated(
-            $"[grey]model {action.Kind}: {action.Artifact} (proposal {action.ProposalId})[/]");
+        Out.Dim($"model {action.Kind}: {action.Artifact} (proposal {action.ProposalId})");
         var (ok, error) = action.Kind switch
         {
             "install" => await manager.InstallAsync(action.RegistryRef ?? action.Artifact, ct),
@@ -206,9 +190,9 @@ public sealed class WorkCommand : AsyncCommand<WorkCommand.Settings>
             _ => (false, $"unknown action kind '{action.Kind}'"),
         };
         if (ok)
-            AnsiConsole.MarkupLineInterpolated($"[green]model {action.Kind} ok:[/] {action.Artifact}");
+            Out.Good($"model {action.Kind} ok: {action.Artifact}");
         else
-            AnsiConsole.MarkupLineInterpolated($"[red]model {action.Kind} failed:[/] {error}");
+            Out.Error($"model {action.Kind} failed: {error}");
         return new ActionResult { ProposalId = action.ProposalId, Ok = ok, Error = error };
     }
 }

@@ -67,3 +67,6 @@ deploy/local/
 *.env
 !*.env.example
 release.json
+
+# Host-specific coordinator install scaffolding (real hostnames). Local only.
+cbk-install/
