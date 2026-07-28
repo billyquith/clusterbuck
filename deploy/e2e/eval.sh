@@ -11,6 +11,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=worker.sh
+source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8088}"
 MODEL_PORT="${CBK_MODEL_PORT:-11446}"
 URL="http://127.0.0.1:$PORT"
@@ -18,7 +20,6 @@ ARTIFACT="newcomer:7b"
 CAP="8b-extract"
 WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 PIDS=()
 log(){ printf '\033[36m[eval]\033[0m %s\n' "$*"; }
 fail(){ printf '\033[31m[eval] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -54,7 +55,7 @@ wait_for "$URL/healthz" "server"
 
 TOKEN=$(curl -fsS -X POST "$URL/nodes/tokens" | jqpy '["join_token"]')
 CBK_MODEL_SERVER_URL="http://127.0.0.1:$MODEL_PORT/v1" \
-  dotnet "$WORKER_DLL" enroll --token "$TOKEN" --server "$URL" --state "$STATE" >/dev/null
+  cbk_worker enroll --token "$TOKEN" --server "$URL" --state "$STATE" >/dev/null
 NODE=$(python3 -c "import json;print(json.load(open('$STATE'))['node_id'])")
 log "node $NODE enrolled"
 
@@ -62,7 +63,7 @@ log "node $NODE enrolled"
 CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
   CBK_MODEL_SERVER_URL="http://127.0.0.1:$MODEL_PORT/v1" CBK_MODEL="$ARTIFACT" \
   CBK_HEARTBEAT_MS=500 CBK_POLL_MS=250 \
-  dotnet "$WORKER_DLL" work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)
+  cbk_worker_bg work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)
 
 # 1. Discovery: the artifact reaches the registry with nobody having configured it.
 for _ in $(seq 1 60); do

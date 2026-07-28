@@ -5,11 +5,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=worker.sh
+source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8084}"
 URL="http://127.0.0.1:$PORT"
 WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 PIDS=()
 log(){ printf '\033[36m[enroll]\033[0m %s\n' "$*"; }
 fail(){ printf '\033[31m[enroll] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -33,7 +34,7 @@ wait_for "$URL/healthz" "server"
 TOKEN=$(curl -fsS -X POST "$URL/nodes/tokens" | jqpy '["join_token"]')
 log "minted join token"
 
-dotnet "$WORKER_DLL" enroll --token "$TOKEN" --server "$URL" --state "$STATE" \
+cbk_worker enroll --token "$TOKEN" --server "$URL" --state "$STATE" \
   | sed 's/^/  /'
 [[ -f "$STATE" ]] || fail "enroll did not write node state"
 NODE_ID=$(python3 -c "import json;print(json.load(open('$STATE'))['node_id'])")
@@ -43,13 +44,13 @@ COUNT=$(curl -fsS "$URL/nodes" | jqpy '["nodes"].__len__()')
 log "node $NODE_ID is in the registry"
 
 # A reused token must be rejected.
-dotnet "$WORKER_DLL" enroll --token "$TOKEN" --server "$URL" --state "$WORKDIR/n2.json" >/dev/null 2>&1 \
+cbk_worker enroll --token "$TOKEN" --server "$URL" --state "$WORKDIR/n2.json" >/dev/null 2>&1 \
   && fail "reused join token was accepted" || log "reused token rejected ✓"
 
 # Start the worker (enrolled mode) and wait for a heartbeat to land.
 CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
   CBK_MODEL_SERVER_URL="http://127.0.0.1:11441/v1" CBK_MODEL="fake" CBK_HEARTBEAT_MS=1000 \
-  dotnet "$WORKER_DLL" work >/dev/null 2>&1 & PIDS+=($!)
+  cbk_worker_bg work >/dev/null 2>&1 & PIDS+=($!)
 
 for _ in $(seq 1 40); do
   MODE=$(curl -fsS "$URL/nodes" | python3 -c "import sys,json;print(next((n['mode'] for n in json.load(sys.stdin)['nodes'] if n['node_id']=='$NODE_ID'),''))")
@@ -61,7 +62,7 @@ done
 log "worker heartbeating: mode=active, last_heartbeat set ✓"
 
 # Owner eviction: pause flips the mode; the next heartbeat reports it.
-dotnet "$WORKER_DLL" pause --state "$STATE" >/dev/null
+cbk_worker pause --state "$STATE" >/dev/null
 for _ in $(seq 1 40); do
   MODE=$(curl -fsS "$URL/nodes" | python3 -c "import sys,json;print(next((n['mode'] for n in json.load(sys.stdin)['nodes'] if n['node_id']=='$NODE_ID'),''))")
   [[ "$MODE" == "paused" ]] && break; sleep 0.25

@@ -70,3 +70,7 @@ release.json
 
 # Host-specific coordinator install scaffolding (real hostnames). Local only.
 cbk-install/
+
+# Python worker build output (the zipapp is a release artifact, built by CI)
+worker/python/build/
+worker/python/dist/

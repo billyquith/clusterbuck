@@ -9,6 +9,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=worker.sh
+source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8079}"
 URL="http://127.0.0.1:$PORT"
 WORKDIR="$(mktemp -d)"
@@ -50,8 +52,7 @@ wait_for "$URL/healthz" "server"
 log "server up on $URL (sync plane from fleet.yaml)"
 
 # --- cbk fleet --------------------------------------------------------------
-WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
-[[ -f "$WORKER_DLL" ]] && dotnet "$WORKER_DLL" fleet --server "$URL" || true
+cbk_worker fleet --server "$URL" 2>/dev/null || true
 
 # --- OpenAI-compatible chat completion --------------------------------------
 RESP=$(curl -fsS -X POST "$URL/v1/chat/completions" -H 'content-type: application/json' -d '{

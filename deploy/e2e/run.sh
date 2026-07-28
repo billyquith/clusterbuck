@@ -11,6 +11,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=worker.sh
+source "$REPO/deploy/e2e/worker.sh"
 REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}"
 SERVER_PORT="${CBK_PORT:-8077}"
 SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
@@ -64,11 +66,9 @@ wait_for "$SERVER_URL/healthz" "server"
 log "server up on $SERVER_URL"
 
 # --- worker -----------------------------------------------------------------
-WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
-[[ -f "$WORKER_DLL" ]] || fail "worker not built — run: dotnet build $REPO/worker/dotnet"
 CBK_REDIS_URL="$REDIS_URL" CBK_MODEL_SERVER_URL="$MODEL_URL" CBK_MODEL="$MODEL_NAME" \
   CBK_CAPABILITIES="$CAP" CBK_WORKER_ID="node-e2e" \
-  dotnet "$WORKER_DLL" work &
+  cbk_worker_bg work &
 PIDS+=($!)
 sleep 1
 log "worker up (serving $CAP → $MODEL_NAME)"

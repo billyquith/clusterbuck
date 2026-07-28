@@ -1,0 +1,53 @@
+[project]
+name = "cbk-worker"
+# Kept in lockstep with worker/dotnet's <Version>: the coordinator's version policy
+# (CBK_WORKER_CURRENT_VERSION) is a single value for the whole fleet, so if the two
+# implementations drifted apart one flavour would be permanently judged `stale` (ADR 29).
+version = "0.7.0"
+description = "clusterbuck worker agent — Python implementation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Nick Trout" }]
+
+# Deliberately tiny, and deliberately all pure-Python so the whole worker can ship as one
+# platform-independent zipapp (see README → Packaging). `cryptography` is the one exception
+# and is NOT vendored: it is needed only to verify a self-update signature, and a key-holding
+# verifier has to pre-exist the update channel by construction. Absent ⇒ self-update refuses,
+# which is the same fail-closed posture as a missing pinned public key (ADR 13).
+dependencies = [
+    "redis>=5.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Required for `cbk work` to accept a signed self-update. Everything else works without it.
+update = ["cryptography>=42"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "jsonschema>=4.20",
+    "cryptography>=42",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+cbk = "cbk_worker.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cbk_worker"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 96
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]

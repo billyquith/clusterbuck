@@ -1,0 +1,204 @@
+"""Signed self-update (ADR 13): signature interop, and the applier's order of operations.
+
+The order is the security boundary, so each step is asserted independently rather than only
+through a happy path.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+
+from cbk_worker import update as upd
+from cbk_worker.config import AGENT_VERSION, PROTOCOL_VERSION
+from cbk_worker.models import UpdateManifest
+
+CONTRACT = Path(__file__).resolve().parents[3] / "contract"
+EXAMPLES = CONTRACT / "examples"
+
+
+# --- verification -----------------------------------------------------------------------
+
+
+def test_committed_fixture_verifies_cross_language():
+    """The fixture the SERVER signed, verified here.
+
+    This is the cross-language half of the interop contract: `cryptography` emits DER
+    (SEC1/RFC 3279), .NET's VerifyData defaults to IEEE-P1363 and silently returns false on a
+    DER blob. The .NET worker asserts the same fixture with
+    DSASignatureFormat.Rfc3279DerSequence; this side is the native DER end.
+    """
+    m = UpdateManifest.from_wire(
+        json.loads((EXAMPLES / "update-manifest.valid.json").read_text()))
+    pem = (EXAMPLES / "update-signing.pub.pem").read_text()
+    assert upd.verify(m, pem)
+
+
+def test_signing_payload_covers_url_and_protocol_version():
+    """Signing only version/rid/sha256/channel would let an attacker redirect the fetch host
+    or stall the whole fleet with an inflated protocol_version."""
+    m = UpdateManifest(version="1.0.0", rid="linux-x64", url="https://x/cbk.pyz",
+                       sha256="a" * 64, channel="stable", protocol_version=1)
+    payload = upd.signing_payload(m).decode()
+    assert payload.split("\n") == ["1.0.0", "linux-x64", "a" * 64, "stable",
+                                   "https://x/cbk.pyz", "1"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("version", "9.9.9"),
+    ("rid", "win-x64"),
+    ("sha256", "b" * 64),
+    ("channel", "canary"),
+    ("url", "https://evil.invalid/cbk.pyz"),
+    ("protocol_version", 99),
+])
+def test_tampering_with_any_signed_field_fails_verification(field, value):
+    from dataclasses import replace
+
+    m = UpdateManifest.from_wire(
+        json.loads((EXAMPLES / "update-manifest.valid.json").read_text()))
+    pem = (EXAMPLES / "update-signing.pub.pem").read_text()
+    assert upd.verify(m, pem)                             # baseline
+    assert not upd.verify(replace(m, **{field: value}), pem)
+
+
+def test_malformed_signature_is_rejected_not_raised():
+    m = UpdateManifest(version="1.0.0", rid="x", url="u", sha256="a" * 64,
+                       channel="stable", signature="not base64 !!", protocol_version=1)
+    assert upd.verify(m, (EXAMPLES / "update-signing.pub.pem").read_text()) is False
+
+
+def test_skew_gate():
+    assert not upd.should_pause_for_skew(UpdateManifest(protocol_version=PROTOCOL_VERSION))
+    assert upd.should_pause_for_skew(UpdateManifest(protocol_version=PROTOCOL_VERSION + 1))
+    assert not upd.should_pause_for_skew(UpdateManifest(protocol_version=None))
+
+
+# --- applying ---------------------------------------------------------------------------
+
+
+def _signed(tmp_path, body: bytes, version="9.9.9", url="https://x/cbk.pyz"):
+    """A manifest genuinely signed by a throwaway key, plus that key's public PEM."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    m = UpdateManifest(version=version, rid="py3-none-any", url=url,
+                       sha256=hashlib.sha256(body).hexdigest(), channel="stable",
+                       protocol_version=1)
+    sig = key.sign(upd.signing_payload(m), ec.ECDSA(hashes.SHA256()))
+    from dataclasses import replace
+    m = replace(m, signature=base64.b64encode(sig).decode())
+    pem = key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    return m, pem
+
+
+def _artifact(tmp_path, name="cbk.pyz", content=b"OLD"):
+    p = tmp_path / name
+    p.write_bytes(content)
+    return p
+
+
+async def test_refuses_without_a_pinned_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
+    m, _ = _signed(tmp_path, b"NEW")
+    async with httpx.AsyncClient() as c:
+        result = await upd.UpdateApplier(c, None, log=lambda _: None).apply(m)
+    assert result.outcome is upd.Outcome.REFUSED
+    assert "signed-or-nothing" in result.detail
+
+
+async def test_skips_when_not_running_from_a_packaged_artifact(tmp_path, monkeypatch):
+    monkeypatch.delenv("CBK_AGENT_PATH", raising=False)
+    m, pem = _signed(tmp_path, b"NEW")
+    async with httpx.AsyncClient() as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+    # Running from the test venv, not a .pyz: replacing a developer's tree is never intended.
+    assert result.outcome is upd.Outcome.SKIPPED
+    assert "nothing to replace" in result.detail
+
+
+async def test_skips_when_already_on_that_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
+    m, pem = _signed(tmp_path, b"NEW", version=AGENT_VERSION)
+    async with httpx.AsyncClient() as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+    assert result.outcome is upd.Outcome.SKIPPED and AGENT_VERSION in result.detail
+
+
+async def test_bad_signature_is_refused_before_any_fetch(tmp_path, monkeypatch):
+    """The signature covers the url, so an invalid one must be rejected with NO network
+    call — otherwise a tampered manifest still reaches an attacker-chosen host."""
+    monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
+    m, pem = _signed(tmp_path, b"NEW", url="https://legit/cbk.pyz")
+    from dataclasses import replace
+    tampered = replace(m, url="https://evil.invalid/cbk.pyz")
+
+    fetched: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetched.append(str(request.url))
+        return httpx.Response(200, content=b"NEW")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(tampered)
+    assert result.outcome is upd.Outcome.REFUSED and "signature invalid" in result.detail
+    assert fetched == [], f"fetched despite an invalid signature: {fetched}"
+
+
+async def test_digest_mismatch_is_refused_and_leaves_the_old_artifact(tmp_path, monkeypatch):
+    target = _artifact(tmp_path, content=b"OLD")
+    monkeypatch.setenv("CBK_AGENT_PATH", str(target))
+    m, pem = _signed(tmp_path, b"NEW")          # manifest promises sha256 of b"NEW"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"TAMPERED-IN-FLIGHT")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+    assert result.outcome is upd.Outcome.REFUSED and "digest mismatch" in result.detail
+    assert target.read_bytes() == b"OLD", "a bad download replaced the running artifact"
+    assert not (tmp_path / "cbk.pyz.new").exists(), "staged file left behind"
+
+
+async def test_successful_update_swaps_and_retains_the_previous(tmp_path, monkeypatch):
+    target = _artifact(tmp_path, content=b"OLD")
+    monkeypatch.setenv("CBK_AGENT_PATH", str(target))
+    m, pem = _signed(tmp_path, b"NEW")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"NEW")
+
+    execs: list[list[str]] = []
+    monkeypatch.setattr(upd.os, "execv", lambda exe, argv: execs.append(argv))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+
+    assert result.outcome is upd.Outcome.APPLIED, result.detail
+    assert target.read_bytes() == b"NEW"
+    # The outgoing binary is retained, which is what makes rollback possible at all.
+    assert (tmp_path / "cbk.prev.pyz").read_bytes() == b"OLD"
+    assert execs, "did not re-exec into the new artifact"
+
+
+async def test_rollback_restores_the_retained_artifact(tmp_path, monkeypatch):
+    target = _artifact(tmp_path, content=b"BAD-RELEASE")
+    (tmp_path / "cbk.prev.pyz").write_bytes(b"KNOWN-GOOD")
+    monkeypatch.setenv("CBK_AGENT_PATH", str(target))
+
+    assert upd.rollback(log=lambda _: None) is True
+    assert target.read_bytes() == b"KNOWN-GOOD"
+    assert (tmp_path / "cbk.pyz.bad").read_bytes() == b"BAD-RELEASE"
+
+
+async def test_rollback_is_a_no_op_without_a_retained_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
+    assert upd.rollback(log=lambda _: None) is False

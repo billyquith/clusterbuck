@@ -12,11 +12,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=worker.sh
+source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8087}"
 URL="http://127.0.0.1:$PORT"
 WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 PIDS=()
 log(){ printf '\033[36m[install]\033[0m %s\n' "$*"; }
 fail(){ printf '\033[31m[install] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -85,7 +86,7 @@ PY
 # spending two minutes waiting out a timer.
 CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
   CBK_MODEL_SERVER_URL="$MODEL_URL" CBK_HEARTBEAT_MS=1000 CBK_LADDER_HYSTERESIS_S=1 \
-  dotnet "$WORKER_DLL" work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)
+  cbk_worker_bg work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)
 
 installed_of(){ curl -fsS "$URL/nodes" | python3 -c "
 import sys,json
