@@ -12,7 +12,7 @@ PORT="${CBK_PORT:-8086}"
 URL="http://127.0.0.1:$PORT"
 WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-WORKER_DLL="$REPO/worker/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
+WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 PIDS=()
 log(){ printf '\033[36m[discovery]\033[0m %s\n' "$*"; }
 fail(){ printf '\033[31m[discovery] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }

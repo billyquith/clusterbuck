@@ -50,7 +50,7 @@ wait_for "$URL/healthz" "server"
 log "server up on $URL (sync plane from fleet.yaml)"
 
 # --- cbk fleet --------------------------------------------------------------
-WORKER_DLL="$REPO/worker/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
+WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 [[ -f "$WORKER_DLL" ]] && dotnet "$WORKER_DLL" fleet --server "$URL" || true
 
 # --- OpenAI-compatible chat completion --------------------------------------

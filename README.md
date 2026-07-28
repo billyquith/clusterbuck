@@ -27,7 +27,7 @@ cd server && uv venv && uv pip install -e ".[dev]"
 uv run pytest                    # server suite (needs Redis)
 CBK_API_KEY=choose-a-secret uv run cbk-server    # job API + /v1/chat/completions + dashboard at /
 
-cd ../worker && dotnet build && dotnet test      # worker suite (no infra needed)
+cd ../worker/dotnet && dotnet build && dotnet test      # worker suite (no infra needed)
 dotnet run --project src/Clusterbuck.Worker -- work
 ```
 

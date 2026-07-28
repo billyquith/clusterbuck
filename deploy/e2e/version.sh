@@ -20,7 +20,7 @@ URL="http://127.0.0.1:$PORT"
 CAP="8b-extract"
 WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-WORKER_DLL="$REPO/worker/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
+WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 PIDS=()
 log(){ printf '\033[36m[version]\033[0m %s\n' "$*"; }
 fail(){ printf '\033[31m[version] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -40,7 +40,7 @@ wait_for "http://127.0.0.1:$MODEL_PORT/healthz" "model server"
 # The version the worker was actually built with — read it from the binary, don't assume.
 BUILT=$(dotnet "$WORKER_DLL" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
 [[ -n "$BUILT" ]] || BUILT=$(grep -oE '<Version>[^<]+' \
-  "$REPO/worker/src/Clusterbuck.Worker/Clusterbuck.Worker.csproj" | cut -d'>' -f2)
+  "$REPO/worker/dotnet/src/Clusterbuck.Worker/Clusterbuck.Worker.csproj" | cut -d'>' -f2)
 log "worker binary is version $BUILT"
 
 start_server(){   # $1 = extra env assignments

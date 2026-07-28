@@ -147,7 +147,7 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
                               #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY)
 
 # --- worker (C#/.NET) ---
-cd worker
+cd worker/dotnet
 dotnet build                  # JIT for dev; AOT publish is a later packaging step (ADR 19)
 dotnet test                   # contract conformance + serialization round-trip (no infra)
 dotnet run --project src/Clusterbuck.Worker -- work    # start the worker loop

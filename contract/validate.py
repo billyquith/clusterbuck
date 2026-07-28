@@ -5,7 +5,7 @@ Runs with only `jsonschema` installed, so CI can gate the contract without build
 component. This checks the schemas are internally well-formed and that the shared fixtures
 agree with them; the *cross-language* agreement (that each side's own types round-trip
 through these schemas) is asserted by the conformance tests in server/tests and
-worker/tests, which is where drift between the two implementations would surface.
+worker/dotnet/tests, which is where drift between the two implementations would surface.
 """
 
 from __future__ import annotations

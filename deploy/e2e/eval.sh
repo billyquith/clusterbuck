@@ -18,7 +18,7 @@ ARTIFACT="newcomer:7b"
 CAP="8b-extract"
 WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-WORKER_DLL="$REPO/worker/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
+WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 PIDS=()
 log(){ printf '\033[36m[eval]\033[0m %s\n' "$*"; }
 fail(){ printf '\033[31m[eval] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }

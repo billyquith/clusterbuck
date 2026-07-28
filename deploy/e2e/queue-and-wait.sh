@@ -37,7 +37,7 @@ log "parked as: $ST  ✓ (waited in queue, not lost)"
 log "NOW starting the worker…"
 CBK_REDIS_URL="redis://localhost:6379/0" CBK_MODEL_SERVER_URL="http://127.0.0.1:11436/v1" \
   CBK_MODEL="fake" CBK_CAPABILITIES="8b-extract" CBK_WORKER_ID="node-late" \
-  dotnet "$REPO/worker/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll" work & PIDS+=($!)
+  dotnet "$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll" work & PIDS+=($!)
 
 for _ in $(seq 1 100); do
   ST=$(curl -fsS "$URL/jobs/$JOB" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')

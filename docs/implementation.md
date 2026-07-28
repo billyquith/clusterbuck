@@ -111,7 +111,7 @@ clusterbuck/
 │   ├── web/                      #   htmx templates + vendored static assets
 │   ├── tests/                    #   pytest + Testcontainers + contract conformance
 │   └── pyproject.toml            #   uv-managed
-├── worker/                       # cbk — C#/.NET AOT
+├── worker/dotnet/                # cbk — C#/.NET (reference worker)
 │   ├── src/Clusterbuck.Worker/   #   worker loop + probe + updater + CLI
 │   ├── tests/                    #   xUnit + Testcontainers + contract conformance
 │   └── Clusterbuck.Worker.sln

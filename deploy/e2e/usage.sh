@@ -31,7 +31,7 @@ wait_for "$URL/healthz" "server"
 
 CBK_REDIS_URL="redis://localhost:6379/0" CBK_MODEL_SERVER_URL="http://127.0.0.1:11439/v1" \
   CBK_MODEL="fake" CBK_CAPABILITIES="$CAP" CBK_WORKER_ID="node-usage" \
-  dotnet "$REPO/worker/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll" work & PIDS+=($!)
+  dotnet "$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll" work & PIDS+=($!)
 sleep 1
 log "server + worker up"
 

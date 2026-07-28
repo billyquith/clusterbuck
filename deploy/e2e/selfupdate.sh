@@ -52,7 +52,7 @@ log "generated an ephemeral update-signing keypair"
 
 # --- publish two real single-file binaries -------------------------------------------------
 publish(){   # $1 = version, $2 = output dir
-  ( cd "$REPO/worker" && dotnet publish src/Clusterbuck.Worker -c Release -r "$RID" \
+  ( cd "$REPO/worker/dotnet" && dotnet publish src/Clusterbuck.Worker -c Release -r "$RID" \
       -p:PublishSingleFile=true -p:SelfContained=true -p:PublishAot=false \
       -p:Version="$1" -o "$2" --nologo >/dev/null 2>&1 )
   [[ -f "$2/cbk" ]] || fail "publish of $1 produced no binary"

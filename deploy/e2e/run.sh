@@ -64,8 +64,8 @@ wait_for "$SERVER_URL/healthz" "server"
 log "server up on $SERVER_URL"
 
 # --- worker -----------------------------------------------------------------
-WORKER_DLL="$REPO/worker/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
-[[ -f "$WORKER_DLL" ]] || fail "worker not built — run: dotnet build $REPO/worker"
+WORKER_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
+[[ -f "$WORKER_DLL" ]] || fail "worker not built — run: dotnet build $REPO/worker/dotnet"
 CBK_REDIS_URL="$REDIS_URL" CBK_MODEL_SERVER_URL="$MODEL_URL" CBK_MODEL="$MODEL_NAME" \
   CBK_CAPABILITIES="$CAP" CBK_WORKER_ID="node-e2e" \
   dotnet "$WORKER_DLL" work &
