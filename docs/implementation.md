@@ -14,12 +14,13 @@ seams (Redis queue contract + HTTP), never in shared code.
 | Component | Language | Why | Distribution |
 |---|---|---|---|
 | **`cbk-server`** — job API, sync front, escalation/reservation engines, coordinator (WoL, registry, planner), dashboard | **Python** | The ecosystem-heavy half (LiteLLM, eval/dataset tooling, provider libs) and it runs on **one box you control**, so Python's distribution weakness doesn't apply | one always-on node; admin-updated |
-| **`cbk`** — worker loop, hardware probe, self-updater, CLI | **C#/.NET (Native AOT)** | Fans out to every heterogeneous node and self-updates; needs a lean, dependency-light, instant-start single binary — Python's distribution weakness bites hardest exactly here, and the worker needs **no** LLM libraries anyway | every node; single-file self-update via signed manifest |
+| **`cbk`** — worker loop, hardware probe, self-updater, CLI | **Python** *(default)* and **C#/.NET** — two interchangeable implementations | Fans out to every heterogeneous node and self-updates, so it needs a lean, dependency-light artifact and **no** LLM libraries. The C# build was chosen for exactly that and then failed at it: six 72–81 MB binaries, no working AOT, and a macOS bundle that will not launch without Homebrew. The Python worker is **one** 2.8 MB `py3-none-any` artifact (ADR 29) | every node; self-update via signed manifest, artifact chosen by `agent_flavour` |
 
 Rationale and the alternatives weighed (all-Python, all-C#, split) are in
-[decisions.md](decisions.md) ADR 7. The worker's language is **reversible** behind the
-protocol — if the C# distribution advantage ever stops being worth the second toolchain,
-the worker could be rewritten in Python without touching the server.
+[decisions.md](decisions.md) ADR 7. The worker's language being **reversible** behind the
+protocol stopped being hypothetical: the C# distribution advantage did not hold up (no working
+AOT, and a macOS bundle that needs Homebrew — ADR 29), so a Python worker was added alongside
+it without touching the server. Both are now maintained; the Python one is the default.
 
 ### The shared contract
 
@@ -46,11 +47,25 @@ drift. Schema change → both sides update or their contract tests fail.
 | Packaging / deploy | **uv** for env + lockfile; launchd/systemd unit | one box, so a venv + service is fine — no bundling needed |
 | Tests | **pytest** + a real Redis (CI service container; `CBK_TEST_REDIS_URL` makes an unreachable broker a failure rather than a skip) + FastAPI `TestClient` | plus the cross-language contract test |
 
-## Worker stack (C#/.NET)
+## Worker stack — Python (the default)
 
 | Concern | Choice | Notes |
 |---|---|---|
-| Runtime | **.NET 10 (LTS)**, Native AOT single-file per RID | lean, instant-start, no runtime install on the node |
+| Runtime | **Python 3.11+**, shipped as one `py3-none-any` **zipapp** | ~2.8 MB, every OS and arch, no build matrix (ADR 29) |
+| Redis | **redis-py** (`redis.asyncio`) | same Streams consumer-group contract |
+| Concurrency | one asyncio loop, two tasks (pull loop + heartbeat) | the heartbeat mutates the loop's paused flag and capability set; one event loop means no lock discipline to get wrong |
+| HTTP out | **httpx** (`AsyncClient`) | OpenAI wire protocol — **no vendor SDK** |
+| CLI | **argparse** | same seven verbs and flags as the C# worker |
+| Hardware probe | `sysctl` / `/proc/meminfo` / `GlobalMemoryStatusEx` via `ctypes` | stdlib only, best-effort with safe fallbacks |
+| Update verify | **ECDSA P-256** via `cryptography` (DER) | deliberately *not* vendored: it is the verifier, so it cannot arrive through the channel it secures. Absent ⇒ self-update refuses, inference unaffected |
+| Tests | **pytest** + real Redis (`CBK_TEST_REDIS_URL` makes an unreachable broker a failure, not a skip) | plus its own contract conformance suite |
+| Lint | **ruff** | |
+
+## Worker stack — C#/.NET (the reference implementation)
+
+| Concern | Choice | Notes |
+|---|---|---|
+| Runtime | **.NET 10 (LTS)**, **self-contained** single-file per RID | ADR 28/29: Native AOT does not link, and the macOS build hard-links Homebrew brotli |
 | Redis | **StackExchange.Redis** | consumes the same Streams consumer-group contract |
 | HTTP out (local model server) | `HttpClient` + `System.Text.Json` (source-gen, AOT-friendly) | speaks the OpenAI wire protocol to Ollama/llama.cpp/etc. — **no vendor SDK** |
 | CLI | **Spectre.Console.Cli** | `cbk work / submit / status / fleet / enroll / pause / resume` (join tokens are minted by the server, `POST /nodes/tokens`) |
@@ -111,10 +126,14 @@ clusterbuck/
 │   ├── web/                      #   htmx templates + vendored static assets
 │   ├── tests/                    #   pytest + Testcontainers + contract conformance
 │   └── pyproject.toml            #   uv-managed
-├── worker/dotnet/                # cbk — C#/.NET (reference worker)
+├── worker/python/                # cbk — Python (the default; one py3-none-any zipapp)
+│   ├── src/cbk_worker/           #   loop + probe + updater + inventory + CLI
+│   ├── tests/                    #   pytest + real Redis + contract conformance
+│   └── build.py                  #   → dist/cbk.pyz
+├── worker/dotnet/                # cbk — C#/.NET (reference implementation)
 │   ├── src/Clusterbuck.Worker/   #   worker loop + probe + updater + CLI
-│   ├── tests/                    #   xUnit + Testcontainers + contract conformance
-│   └── Clusterbuck.Worker.sln
+│   ├── tests/                    #   xUnit + contract conformance
+│   └── Clusterbuck.Worker.slnx
 ├── deploy/                       # launchd/systemd units, Avahi/mDNS service files
 └── docs/                         # (this design set)
 ```

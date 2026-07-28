@@ -372,6 +372,12 @@ never strands a claimed job — and if the swap fails midway the old binary is p
 than leaving the node with none.
 
 ## 28. Ship the worker as self-contained single-file, not Native AOT (revises ADR 19)
+> **Superseded in part by ADR 29.** This ADR's central justification — that self-contained
+> "still needs no .NET runtime on the node, which is the property that actually matters" — was
+> later measured and found **false on macOS**: the binary hard-links Homebrew's brotli and
+> `dyld` refuses to launch it without it. The .NET worker is still built and shipped, but it is
+> no longer the default, and its macOS builds carry a documented Homebrew dependency.
+
 **Decision:** release `cbk` as a **self-contained single-file** binary per RID, built by a
 GitHub Actions matrix covering `win-x64`, `win-arm64`, `osx-arm64`, `osx-x64`, `linux-x64`
 and `linux-arm64`. Native AOT stays the aspiration, not the shipping format.
@@ -455,3 +461,73 @@ minimum-version floor alone (cannot express non-monotonic bugs); refusing enroll
 workers (too late — the fleet's problem is *running* workers that drifted); hard-failing
 heartbeats from unfit workers (loses the telemetry that shows you the drift, and gives the
 worker no instruction).
+
+## 29. A second worker: one `py3-none-any` artifact, because the .NET bundle was not portable
+**Decision:** add **`worker/python`** as a peer implementation alongside `worker/dotnet`
+(renamed from `worker/`), shipped as a single **`py3-none-any` zipapp** (`cbk.pyz`, ~2.8 MB).
+Nodes declare `agent_flavour` on each heartbeat, and the coordinator selects the release
+artifact from that — `dotnet` → a .NET RID, `python` → the one platform-independent build.
+Both implementations are held to the same `contract/` schemas by their own conformance suites,
+and `deploy/e2e/ci.sh` with `CBK_WORKER=both` runs **every** end-to-end proof against both.
+
+**Why.** ADR 28 accepted self-contained single-file on the grounds that it "still needs no
+.NET runtime on the node, which is the property that actually matters". That claim turned out
+to be false on macOS. `otool -L` on the published binary shows hard load commands against
+`/opt/homebrew/opt/brotli/lib/libbrotli{dec,enc}.1.dylib`, because Apple does not ship brotli
+and .NET linked whatever was on the build machine. Repointing those paths on a copy and
+running it gives `dyld: Library not loaded` — the process does not start. So the 73 MB
+"self-contained" artifact silently required Homebrew on every target Mac, and CI could not have
+caught it because GitHub's macOS runners have Homebrew too. Native AOT remains dead for the
+same underlying reason (`-lssl -lcrypto -lbrotli*` are not linkably present); removing
+Spectre.Console.Cli made the code AOT-clean and changed nothing about the link.
+
+The Python worker sidesteps the whole category: there is no native link step, so there is
+nothing to be accidentally non-portable about. **One artifact replaces six**, at 2.8 MB instead
+of 72–81 MB — a 26× reduction that also makes self-update a small download rather than a 73 MB
+one on every node.
+
+**`agent_flavour` is a safety mechanism, not bookkeeping.** Before it, `_build_update_for`
+keyed the artifact off `os`+`arch` alone, so a Python worker on darwin/arm64 would have been
+offered the `osx-arm64` .NET binary — and would have verified a genuinely valid signature,
+downloaded 73 MB, and installed a managed executable over its own entrypoint. os+arch cannot
+name an artifact because two workers can share a machine without sharing a runtime. Selection
+**fails closed**: an unrecognised flavour (a new language, or a typo) resolves to no artifact
+key and that node is offered no update at all, because a worker left on an old version is a far
+smaller problem than one that replaced itself with an executable for a different runtime.
+
+**Consequences.**
+- Nodes need Python 3.11+. That is the honest trade for dropping 73 MB and five artifacts: a
+  runtime the machine almost certainly already has, versus a bundled one that was not as
+  self-contained as advertised.
+- **`cryptography` is deliberately not vendored** into the zipapp. It is the update *verifier*,
+  so it cannot be delivered through the channel it secures; and it is the only dependency with
+  compiled wheels, which would make the artifact platform-specific and defeat the point.
+  Absent, self-update refuses and inference is unaffected. The worker reports that case
+  distinctly from a bad signature — conflating them sent an operator hunting for a key problem
+  when the fix was one `pip install`.
+- **The two flavours must be released in lockstep.** `CBK_WORKER_CURRENT_VERSION` is a single
+  value for the whole fleet, so if the versions diverged one flavour would be permanently
+  judged `stale`. A per-flavour version policy is the upgrade path if they ever need to diverge;
+  not built, because nothing needs it yet.
+- The .NET worker stays. It is the reference implementation, it is what ADR 7's polyglot claim
+  is measured against, and a node with no Python is a real case. Its macOS Homebrew dependency
+  is now documented rather than discovered.
+
+**This is what makes ADR 7 true rather than aspirational.** "The C# worker is a *reference*
+implementation, not a constraint" was untestable with one implementation. Two independent
+workers passing the same 13 e2e proofs and the same JSON Schema conformance suite is evidence;
+it also means anything that passes for one and fails for the other is, by definition, a
+contract violation somewhere — which is how the `--server` placement bug and a
+stdout-buffering bug were both found.
+
+**Considered:** rewriting in Go (one static binary, ~10 MB, genuinely no runtime — the best
+technical answer on artifact properties alone, but a third language for a project whose stated
+value is that every seam is a documented protocol, and it would not have been *tested* against
+the contract any sooner); a pure-Python ECDSA implementation so `cryptography` could be
+vendored (trades an audited implementation for packaging convenience on precisely the RCE
+boundary — rejected); shipping the Python worker as a wheel installed into a venv per release
+(more moving parts than a file swap, and `pip` would fetch unsigned dependencies at update
+time, so the signature would no longer cover everything that runs); replacing the .NET worker
+outright (loses the polyglot evidence and the no-Python case); linking Homebrew's dylibs
+explicitly to unblock AOT (makes the binary require Homebrew at runtime — the exact defect,
+formalised).

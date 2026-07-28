@@ -99,35 +99,46 @@ Treat any leak of the above as a bug.
 
 ## Stack (as built)
 
-Detail in [docs/implementation.md](../docs/implementation.md). In brief — **two
-components, two languages**, meeting only at documented seams (Redis queue contract +
+Detail in [docs/implementation.md](../docs/implementation.md). In brief — **a coordinator and
+two interchangeable workers**, meeting only at documented seams (Redis queue contract +
 HTTP), never in shared code:
 
 - **`cbk-server` — Python** (one always-on box; ecosystem-heavy): FastAPI, **LiteLLM**
   (native fit now the server is Python), redis-py (Redis **Streams + consumer groups**),
   SQLite as durable system of record, a plain asyncio coordinator loop (no APScheduler), uv.
   Serves the htmx dashboard.
-- **`cbk` — C#/.NET Native AOT** (fans out to every node; single-file self-update):
-  worker loop + hardware probe + updater + Spectre.Console CLI; StackExchange.Redis;
-  `HttpClient` to the local model server (**no vendor SDK**).
-- **Shared contract:** JSON Schema in `contract/` (source of truth) + a conformance test
-  on each side so the two type definitions can't drift.
+- **`cbk` — the worker, in two implementations.** Same verbs, same `CBK_*` environment, same
+  contract; a node runs whichever suits it and the coordinator offers each the release
+  artifact it can actually execute (`agent_flavour`, ADR 29):
+  - **`worker/python`** *(default)* — one `py3-none-any` zipapp, ~2.8 MB, every platform.
+    `redis` + `httpx` only; `cryptography` needed just to verify a self-update.
+  - **`worker/dotnet`** — C#/.NET, the reference implementation. Self-contained single-file
+    per RID, 72–81 MB × 6. Native AOT does **not** link, and the macOS builds hard-link
+    Homebrew's brotli, so they will not launch without it (both measured, ADR 29).
+- **Shared contract:** JSON Schema in `contract/` (source of truth) + a conformance test in
+  **each** of the three components, so no type definition can drift from the wire.
 
-See [docs/decisions.md](../docs/decisions.md) ADR 7 (split rationale) and ADR 22 (contract).
+See [docs/decisions.md](../docs/decisions.md) ADR 7 (split rationale), ADR 22 (contract) and
+ADR 29 (two workers, one artifact).
 - **Broker + result store:** Redis (language-agnostic queue contract).
 - **Sync gateway:** LiteLLM (adopted, off the shelf) — do not reimplement OpenAI routing.
 - **Model servers:** Ollama / llama.cpp / vLLM / LM Studio — off the shelf, called over
   the OpenAI HTTP API. Never bind to a vendor SDK; the worker speaks the wire protocol.
 
-Every seam is a **documented protocol** (see protocols.md) so the system stays polyglot:
-the C# worker is a *reference* implementation, not a constraint.
+Every seam is a **documented protocol** (see protocols.md) so the system stays polyglot: the
+C# worker is a *reference* implementation, not a constraint. That is now demonstrated rather
+than asserted — two independent workers pass the same contract conformance suites and the same
+13 end-to-end proofs (`CBK_WORKER=both`). **Anything that passes for one worker and fails for
+the other is a contract violation somewhere, by definition** — that is what the pairing is
+for, so keep both green rather than fixing one and moving on.
 
 ## Build / test / run
 
-Two components, built independently; they meet only at `contract/` + Redis + HTTP.
+Three components, built independently; they meet only at `contract/` + Redis + HTTP.
 
-**Prereqs:** .NET 10 SDK, Python 3.12+, `uv`, Docker (for Redis), and a model server
-(Ollama for dev; a zero-weight stub for tests — `server/tools/fake_model_server.py`).
+**Prereqs:** Python 3.12+, `uv`, Docker (for Redis), and a model server (Ollama for dev; a
+zero-weight stub for tests — `server/tools/fake_model_server.py`). The **.NET 10 SDK** is
+needed only to work on `worker/dotnet`.
 
 ```bash
 # Redis (broker + result store) — one container for dev
@@ -146,14 +157,29 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
                               #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
                               #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY)
 
-# --- worker (C#/.NET) ---
+# --- worker: Python (the default; one artifact for every platform, ADR 29) ---
+cd worker/python
+uv venv && uv pip install -e ".[dev]"
+uv run pytest                 # contract conformance + loop/update/ladder/probe (82 tests)
+uv run ruff check src tests build.py
+uv run cbk work               # start the worker loop
+uv run python build.py        # → dist/cbk.pyz (~2.8 MB, py3-none-any) — the shipped artifact
+
+# --- worker: C#/.NET (the reference implementation) ---
 cd worker/dotnet
-dotnet build                  # JIT for dev; AOT publish is a later packaging step (ADR 19)
+dotnet build                  # JIT for dev; self-contained single-file to ship (ADR 28/29)
 dotnet test                   # contract conformance + serialization round-trip (no infra)
 dotnet run --project src/Clusterbuck.Worker -- work    # start the worker loop
-# CLI: `cbk work | submit --prompt … | status <id> | fleet | enroll --token … | pause | resume`
+
+# Both expose the same CLI:
+#   cbk work | submit --prompt … | status <id> | fleet | enroll --token … | pause | resume
 
 # --- end-to-end (proves the loop on one node; USE_OLLAMA=1 for real inference) ---
+# CBK_WORKER=dotnet (default) | python | both  selects the implementation under test.
+# `both` is what CI runs: the same proof passing for one worker and failing for the other is
+# a contract violation by definition.
+bash deploy/e2e/ci.sh             # the whole suite, in order
+CBK_WORKER=both bash deploy/e2e/ci.sh   # …against both workers
 bash deploy/e2e/run.sh            # M0 async: submit → queue → worker → result → poll
 bash deploy/e2e/queue-and-wait.sh # async: job parks as queued, drains when a worker joins
 bash deploy/e2e/sync.sh           # M1 sync: /v1/chat/completions via LiteLLM
@@ -167,12 +193,15 @@ bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discov
 bash deploy/e2e/eval.sh           # M7: unmeasured model → eval jobs → scored → routable
 bash deploy/e2e/auth.sh           # shared secret closes the escalation chain (ADR 26)
 bash deploy/e2e/version.sh        # coordinator quarantines an unfit worker build (ADR 27)
-bash deploy/e2e/selfupdate.sh     # signed self-update applied by a REAL binary (~2 min)
+# per-flavour, because the artifact and swap mechanism genuinely differ:
+bash deploy/e2e/selfupdate.sh     # signed self-update, REAL .NET single-file binary (~2 min)
+bash deploy/e2e/selfupdate-py.sh  # signed self-update, REAL zipapp (fast)
 ```
 
-The **contract** (`contract/*.schema.json`) is the source of truth; both sides' tests
-assert conformance so the two type definitions can't drift (ADR 22). CI should gate every
-PR on the contract + both conformance suites (see [docs/implementation.md](../docs/implementation.md) → CI/CD).
+The **contract** (`contract/*.schema.json`) is the source of truth; all three components'
+tests assert conformance so no type definition can drift from the wire (ADR 22). CI gates
+every PR on the contract, all three unit suites, and the e2e suite **against both workers**
+(see [docs/implementation.md](../docs/implementation.md) → CI/CD).
 
 ## Conventions
 

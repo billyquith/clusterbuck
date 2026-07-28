@@ -12,10 +12,31 @@ runs on a single always-on node, so it ships as an ordinary **uv-locked Python s
 runs on everything the coordinator might be, including **`linux-arm64` (Raspberry Pi)**,
 which is the recommended coordinator host (below).
 
-## Worker build (.NET) — every node
+## Worker build — every node
 
-The worker (`cbk`) fans out across the fleet, so it publishes as a lean **Native AOT
-single-file binary per runtime identifier (RID)**:
+The worker (`cbk`) ships in two interchangeable implementations (ADR 29). A node runs
+whichever suits it; the coordinator offers each the release artifact it can execute, keyed on
+the `agent_flavour` it reports.
+
+### Python worker (`worker/python`) — the default
+
+One **`py3-none-any` zipapp** for every OS and architecture: no build matrix, ~2.8 MB.
+
+```bash
+cd worker/python && python build.py       # → dist/cbk.pyz
+scp dist/cbk.pyz node:/opt/cbk/ && ssh node 'python3 /opt/cbk/cbk.pyz work'
+```
+
+Needs **Python 3.11+** on the node (almost always already present). For self-update, that
+interpreter also needs `cryptography` (`pip install cryptography`); without it the worker runs
+normally and refuses updates rather than applying an unverified one. `cryptography` is
+deliberately not inside the zipapp — it is the update verifier, so it cannot be delivered
+through the channel it secures.
+
+### .NET worker (`worker/dotnet`) — the reference implementation
+
+Publishes as a **self-contained single-file binary per runtime identifier (RID)**. Kept for
+nodes with no Python, and as the reference the polyglot claim is measured against.
 
 | Target | RID |
 |---|---|
@@ -34,9 +55,15 @@ Publish modes, from most portable to most self-contained:
   heterogeneous fleet.
 - **Single-file** — self-contained, collapsed to one executable. Easiest to distribute
   (`scp` and run).
-- **Native AOT** — ahead-of-time compiled to a native binary: fastest start, smallest
-  memory, no JIT. The worker's default — lean and instant-start on any node; some
-  reflection-heavy libraries are AOT-unfriendly, so verify per dependency.
+- **Native AOT** — ahead-of-time compiled: fastest start, smallest memory. **Does not link**
+  for this worker — the macOS toolchain wants `-lssl -lcrypto -lbrotli*`, which Apple no longer
+  ships linkably (ADR 28/29). Aspiration, not shipping format.
+
+The .NET worker therefore ships **self-contained single-file**. One caveat, measured and
+load-bearing: the macOS binaries hard-link Homebrew's brotli (`otool -L` shows
+`/opt/homebrew/opt/brotli/...`), so they **will not launch on a Mac without Homebrew**. It is
+"self-contained" only for the .NET runtime, not for these system libraries — which is the
+concrete reason the Python worker is the default.
 
 **Cross-compilation caveat:** unlike Go's single-flag cross-compile, .NET **Native AOT
 generally publishes per target OS** (you build for each RID, ideally on a matching host

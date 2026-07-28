@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import compileall
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,11 @@ HERE = Path(__file__).resolve().parent
 # Vendored into the artifact. All pure-Python: a compiled wheel would pin the artifact to one
 # platform and there would be nothing left to distinguish it from the .NET build's six.
 VENDORED = ["redis", "httpx"]
+
+# The version in src/, read rather than duplicated so a stamp can be detected as a change.
+DEFAULT_VERSION = re.search(
+    r'AGENT_VERSION = "([^"]+)"',
+    (HERE / "src" / "cbk_worker" / "config.py").read_text()).group(1)
 
 ENTRY = '''\
 """zipapp entry point. Keeps `python cbk.pyz <verb>` identical to `cbk <verb>`."""
@@ -63,7 +69,23 @@ def _install(staging: Path, packages: list[str]) -> None:
     raise SystemExit("could not vendor dependencies:\n  " + "\n  ".join(errors))
 
 
-def build(out_dir: Path) -> Path:
+def _stamp_version(staged_pkg: Path, version: str) -> None:
+    """Rewrite the build-stamped AGENT_VERSION in the staged copy only.
+
+    The coordinator judges fitness from what a worker reports (ADR 27), so the artifact has to
+    carry its own version — and a release build must be able to stamp one without a dirty
+    working tree. Only the staged copy is touched; src/ is never modified.
+    """
+    cfg = staged_pkg / "config.py"
+    text = cfg.read_text()
+    needle = f'AGENT_VERSION = "{DEFAULT_VERSION}"'
+    if needle not in text:
+        raise SystemExit(f"could not find {needle!r} in {cfg} — build.py needs updating")
+    cfg.write_text(text.replace(needle, f'AGENT_VERSION = "{version}"'))
+
+
+def build(out_dir: Path, version: str | None = None,
+          name: str = "cbk.pyz") -> Path:
     staging = HERE / "build" / "pyz"
     if staging.exists():
         shutil.rmtree(staging)
@@ -75,6 +97,9 @@ def build(out_dir: Path) -> Path:
     print("adding cbk_worker …")
     shutil.copytree(HERE / "src" / "cbk_worker", staging / "cbk_worker")
     (staging / "__main__.py").write_text(ENTRY)
+    if version and version != DEFAULT_VERSION:
+        _stamp_version(staging / "cbk_worker", version)
+        print(f"stamped version {version}")
 
     # Strip what only matters at install time. dist-info metadata is not read at runtime by
     # anything we ship, and the caches are rebuilt per interpreter anyway.
@@ -88,13 +113,13 @@ def build(out_dir: Path) -> Path:
     compileall.compile_dir(str(staging), quiet=2, force=True)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    target = out_dir / "cbk.pyz"
+    target = out_dir / name
     zipapp.create_archive(staging, target=target,
                           interpreter="/usr/bin/env python3", compressed=True)
     target.chmod(0o755)
 
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    (out_dir / "cbk.pyz.sha256").write_text(f"{digest}  cbk.pyz\n")
+    (out_dir / f"{name}.sha256").write_text(f"{digest}  {name}\n")
     size_mb = target.stat().st_size / 1_048_576
     print(f"\n{target}  {size_mb:.1f} MB  (py3-none-any)")
     print(f"sha256  {digest}")
@@ -104,8 +129,11 @@ def build(out_dir: Path) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default=str(HERE / "dist"), help="output directory")
+    ap.add_argument("--version", default=None,
+                    help=f"stamp this version into the artifact (default {DEFAULT_VERSION})")
+    ap.add_argument("--name", default="cbk.pyz", help="artifact filename")
     args = ap.parse_args()
-    build(Path(args.out))
+    build(Path(args.out), version=args.version, name=args.name)
     return 0
 
 

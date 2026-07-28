@@ -54,11 +54,28 @@ def signing_payload(m: UpdateManifest) -> bytes:
     ]).encode()
 
 
+def verifier_available() -> bool:
+    """Whether this interpreter can verify a signature at all.
+
+    Reported separately from a verification *failure* because the two need opposite responses:
+    a bad signature means someone tampered with a manifest, while a missing verifier means
+    `pip install cryptography`. Collapsing them into "signature invalid" sends an operator
+    hunting for a key problem that does not exist — which is exactly what happened the first
+    time the zipapp ran under a system interpreter without it.
+    """
+    try:
+        import cryptography  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def verify(m: UpdateManifest, public_key_pem: str) -> bool:
     """True only if `m` carries a valid signature from the pinned key.
 
     A missing `cryptography` returns False rather than raising: no verifier means no
     verification means no update, which is the same fail-closed answer as a bad signature.
+    Callers wanting to tell the two apart ask verifier_available() first.
     """
     import base64
 
@@ -147,6 +164,14 @@ class UpdateApplier:
 
         if m.version == AGENT_VERSION:
             return UpdateResult(Outcome.SKIPPED, f"already on {m.version}")
+
+        # Still a refusal — never a bypass — but say which problem it is.
+        if not verifier_available():
+            return UpdateResult(
+                Outcome.REFUSED,
+                f"cannot verify an update signature: the `cryptography` package is not "
+                f"available to {sys.executable}. Self-update stays refused until it is "
+                f"(pip install cryptography). Inference is unaffected.")
 
         # (2) Signature first: it covers the url, so this rejects a redirected download
         # before any request is made to an attacker-chosen host.

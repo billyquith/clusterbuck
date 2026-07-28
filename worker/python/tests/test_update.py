@@ -133,6 +133,39 @@ async def test_skips_when_already_on_that_version(tmp_path, monkeypatch):
     assert result.outcome is upd.Outcome.SKIPPED and AGENT_VERSION in result.detail
 
 
+async def test_a_missing_verifier_is_reported_as_such_not_as_a_bad_signature(
+        tmp_path, monkeypatch):
+    """Both refuse, but they need opposite responses from an operator.
+
+    Regression: the zipapp does not vendor `cryptography`, so under a system interpreter
+    without it every update was reported "signature invalid for 0.9.9 — refusing". That reads
+    as tampering and sends you looking for a key problem, when the fix is one pip install.
+    """
+    monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
+    m, pem = _signed(tmp_path, b"NEW")
+    monkeypatch.setattr(upd, "verifier_available", lambda: False)
+
+    fetched: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetched.append(str(request.url))
+        return httpx.Response(200, content=b"NEW")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+
+    assert result.outcome is upd.Outcome.REFUSED       # still fails closed
+    assert "cryptography" in result.detail and "pip install" in result.detail
+    assert "signature invalid" not in result.detail
+    assert fetched == [], "downloaded despite being unable to verify"
+
+
+def test_verifier_is_available_in_the_dev_environment():
+    """Guards the test above from becoming vacuous: if `cryptography` were missing here, the
+    real verification tests would all be exercising the no-verifier path instead."""
+    assert upd.verifier_available() is True
+
+
 async def test_bad_signature_is_refused_before_any_fetch(tmp_path, monkeypatch):
     """The signature covers the url, so an invalid one must be rejected with NO network
     call — otherwise a tampered manifest still reaches an attacker-chosen host."""

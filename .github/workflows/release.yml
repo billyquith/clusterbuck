@@ -1,21 +1,20 @@
-name: Release worker binaries
+name: Release worker builds
 
-# Builds the `cbk` worker for every platform the fleet might run on (deployment.md → Worker
-# build). Push a tag like `v0.7.0` to cut a release, or run it manually to get artifacts
-# without publishing.
+# Builds both worker implementations (deployment.md → Worker build). Push a tag like `v0.7.0`
+# to cut a release, or run it manually to get artifacts without publishing.
 #
-# Publish format is **self-contained single-file**, not Native AOT. That is deliberate and
-# measured, not a shortcut — see ADR 27. Native AOT currently fails for two independent
-# reasons (macOS link wants -lssl which Apple no longer ships linkably, and
-# Spectre.Console.Cli emits IL2104/IL3053 trim/AOT warnings because its command binding is
-# reflection-based). Self-contained still needs no .NET runtime on the node, which is the
-# property that actually matters for a heterogeneous fleet; it just costs ~72-79 MB per
-# artifact instead of AOT's ~15-25 MB.
+# **Python — one `py3-none-any` zipapp, ~2.8 MB, no matrix.** Nothing in it is
+# platform-specific, so there is nothing to build per platform. This is the default worker.
+#
+# **.NET — six self-contained single-file binaries, 72–81 MB each.** Not Native AOT: AOT does
+# not link on macOS (Apple no longer ships -lssl/-lbrotli linkably), and the self-contained
+# macOS build turns out to hard-link Homebrew's brotli, so it will not launch on a Mac without
+# Homebrew. Both measured — see ADR 29. Kept because it is the reference implementation and
+# because a node with no Python is a real case.
 #
 # One runner builds every RID: .NET cross-publishes self-contained binaries fine (verified
-# locally from macOS producing working PE32+, Mach-O and ELF aarch64 executables). Each
-# artifact is then smoke-tested on its own native OS, because "it linked" and "it runs" are
-# different claims.
+# producing working PE32+, Mach-O and ELF aarch64 executables). Each artifact is then
+# smoke-tested on its own native OS, because "it linked" and "it runs" are different claims.
 
 on:
   push:
@@ -89,10 +88,40 @@ jobs:
           # would have broken — so this is the assertion that matters for this format.
           ./"${{ matrix.bin }}" --help
 
+  build-python:
+    name: build py3-none-any
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        working-directory: worker/python
+        run: uv venv && uv pip install -e ".[dev]"
+      - name: Build the zipapp
+        working-directory: worker/python
+        # ONE artifact for every OS and architecture — no matrix, because there is nothing
+        # platform-specific in it (ADR 29). A tag stamps its own version so the artifact
+        # reports what the coordinator's version policy expects.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in
+            [0-9]*) uv run python build.py --version "$VERSION" ;;
+            *)      uv run python build.py ;;      # manual run: keep the source version
+          esac
+      - name: It must run under an interpreter that never installed it
+        working-directory: worker/python
+        run: |
+          python3 dist/cbk.pyz --version
+          python3 dist/cbk.pyz --help > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cbk-py3-none-any
+          path: worker/python/dist/
+
   release:
     name: attach to the GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: smoke
+    needs: [smoke, build-python]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -100,22 +129,37 @@ jobs:
       - name: Package one archive per platform
         run: |
           cd dist
+          # The Python worker ships as the bare .pyz: it is already one self-contained file,
+          # and wrapping 2.8 MB in an archive would only add a step before running it.
           for d in cbk-*; do
-            rid="${d#cbk-}"
+            [ "$d" = "cbk-py3-none-any" ] && continue
             if [ -f "$d/cbk.exe" ]; then (cd "$d" && zip -q "../${d}.zip" cbk.exe cbk.sha256);
             else tar -czf "${d}.tar.gz" -C "$d" cbk cbk.sha256; fi
           done
-          ls -lh *.zip *.tar.gz 2>/dev/null || true
+          ls -lh *.zip *.tar.gz cbk-py3-none-any/* 2>/dev/null || true
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.zip
             dist/*.tar.gz
+            dist/cbk-py3-none-any/cbk.pyz
+            dist/cbk-py3-none-any/cbk.pyz.sha256
           body: |
-            Worker binaries for `${{ github.ref_name }}`. Self-contained — no .NET runtime
-            needed on the node. Each archive carries a `cbk.sha256` digest.
+            Worker builds for `${{ github.ref_name }}`. Two interchangeable implementations —
+            a node runs whichever suits it, and the coordinator offers each the artifact it
+            can actually execute (`agent_flavour`, ADR 29).
 
-            The signed release manifest that drives worker self-update is **not** generated
-            here: the apply path (download, binary replacement, canary, rollback) is not
-            implemented, so publishing a manifest would advertise an update channel that
-            nothing consumes. Signature *verification* is built and tested (ADR 13).
+            **`cbk.pyz` — Python, one file for every platform.** ~2.8 MB, `py3-none-any`.
+            Needs Python 3.11+ on the node, plus `cryptography` in that interpreter if you
+            want self-update (without it the worker runs normally and refuses updates).
+            Start here unless you have a reason not to.
+
+            **`cbk-<rid>.{tar.gz,zip}` — C#/.NET, six per-platform builds.** 72–81 MB each,
+            self-contained so no .NET runtime is needed. Note that the macOS builds link
+            against Homebrew's brotli and will not launch without it (ADR 29).
+
+            Each artifact carries its own sha256. The signed release manifest that drives
+            self-update is **not** generated here — it is signed per-request by your
+            coordinator from its own key, so the payload always matches what that coordinator
+            considers current (ADR 13). Both apply paths are built and proven end-to-end
+            (`deploy/e2e/selfupdate.sh`, `selfupdate-py.sh`).
