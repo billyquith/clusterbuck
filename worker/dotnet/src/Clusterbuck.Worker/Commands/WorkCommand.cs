@@ -15,7 +15,9 @@ public static class WorkCommand
 
         // Enrolled mode (M4b): if node identity exists, take the id + ladder from it and
         // heartbeat. Otherwise the worker stays purely env-configured (M0-M3 behaviour).
-        var statePath = NodeStateStore.DefaultPath;
+        // --state matches `enroll`/`pause`/`resume` and the Python worker; falls back to
+        // CBK_NODE_STATE then the default, so unset behaviour is unchanged.
+        var statePath = cli.Opt("--state") ?? NodeStateStore.DefaultPath;
         var state = NodeStateStore.Load(statePath);
         PresenceLadder? ladder = null;
         if (state is not null)

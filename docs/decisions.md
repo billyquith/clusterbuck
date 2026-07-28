@@ -512,6 +512,14 @@ smaller problem than one that replaced itself with an executable for a different
 - The .NET worker stays. It is the reference implementation, it is what ADR 7's polyglot claim
   is measured against, and a node with no Python is a real case. Its macOS Homebrew dependency
   is now documented rather than discovered.
+- **Cross-platform coverage is honest, not total.** CI runs the Python unit suites on Linux,
+  macOS and Windows (so `probe.py`'s per-OS memory query and the CLI/verify paths are exercised
+  on each), and the full Redis-backed loop suite on Linux. But the self-update **re-exec** is
+  proven only on POSIX: the end-to-end `selfupdate-py.sh` runs on Linux/macOS, and the unit
+  test monkeypatches `os.execv`. On Windows `execv` does not replace the process image the way
+  it does on POSIX, so the swap-then-re-exec step is **unverified on Windows** — a known gap,
+  not a claim. A node is expected to be Linux or macOS; Windows workers run and self-update is
+  simply not yet proven there.
 
 **This is what makes ADR 7 true rather than aspirational.** "The C# worker is a *reference*
 implementation, not a constraint" was untestable with one implementation. Two independent

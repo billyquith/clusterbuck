@@ -15,6 +15,7 @@ CBK_WORKER="${CBK_WORKER:-dotnet}"
 
 _DOTNET_DLL="$REPO/worker/dotnet/src/Clusterbuck.Worker/bin/Debug/net10.0/cbk.dll"
 _PY_VENV_CBK="$REPO/worker/python/.venv/bin/cbk"
+_PY_VENV_PYTHON="$REPO/worker/python/.venv/bin/python"
 _PY_PYZ="$REPO/worker/python/dist/cbk.pyz"
 
 case "$CBK_WORKER" in
@@ -45,7 +46,12 @@ _worker_argv() {
   case "$CBK_WORKER" in
     dotnet) printf '%s\n' dotnet "$_DOTNET_DLL" ;;
     python)
+      # Prefer the venv entry point; it uses the venv interpreter, which has cryptography.
+      # Falling back to the zipapp, run it under that SAME interpreter rather than the
+      # shebang's `python3` — the system one may lack cryptography, which would silently
+      # turn self-update off and (before the distinct error) look like a signature failure.
       if [[ -x "$_PY_VENV_CBK" ]]; then printf '%s\n' "$_PY_VENV_CBK"
+      elif [[ -x "$_PY_VENV_PYTHON" ]]; then printf '%s\n' "$_PY_VENV_PYTHON" "$_PY_PYZ"
       else printf '%s\n' "$_PY_PYZ"; fi
       ;;
   esac

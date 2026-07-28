@@ -4,6 +4,12 @@
 # A worker needs NO operator secret: it enrolls with a one-time join token and
 # authenticates afterwards with its own per-node key (ADR 26).
 #
+# Works for EITHER worker implementation (ADR 29), because ExecStart names one path:
+#   * Python (default): install the zipapp AS /opt/clusterbuck/cbk (it carries a
+#     `#!/usr/bin/env python3` shebang and is +x, so it runs directly). The node needs
+#     Python 3.11+, plus `cryptography` in that interpreter if you want self-update.
+#   * .NET: install the self-contained binary as /opt/clusterbuck/cbk.
+#
 #   sudo install -m 0644 cbk-worker.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now cbk-worker
 
@@ -41,7 +47,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-# Self-update writes the new binary and cbk.prev alongside itself; node state persists.
+# Self-update writes the new artifact and cbk.prev alongside itself; node state persists.
+# (Python zipapp: cbk.prev too, since the installed file is named `cbk` with no suffix.)
 ReadWritePaths=/opt/clusterbuck /var/lib/clusterbuck
 ProtectKernelTunables=true
 ProtectKernelModules=true

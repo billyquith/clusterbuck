@@ -53,7 +53,7 @@ jobs:
         run: dotnet test -c Release --nologo -v q
 
   worker-python:
-    name: worker (Python)
+    name: worker (Python) — Redis-backed
     runs-on: ubuntu-latest
     services:
       redis:
@@ -73,7 +73,7 @@ jobs:
       - name: Lint
         working-directory: worker/python
         run: uv run ruff check src tests build.py
-      - name: Test
+      - name: Test (full suite, including the Streams loop against real Redis)
         working-directory: worker/python
         env:
           CBK_TEST_REDIS_URL: redis://localhost:6379/14
@@ -92,6 +92,36 @@ jobs:
         with:
           name: cbk-pyz-ci
           path: worker/python/dist/
+
+  worker-python-crossplatform:
+    # The artifact is py3-none-any, but the CODE has per-OS branches (probe.py's Windows
+    # ctypes memory query, update.py's os.execv). This job runs the non-Redis suites on macOS
+    # and Windows so those branches are at least imported and exercised — the Redis-backed
+    # loop tests skip here (CBK_TEST_REDIS_URL unset), which is why they live in the job above
+    # too. Caveat: test_update monkeypatches os.execv, so Windows's non-POSIX exec semantics
+    # remain unproven — documented in ADR 29, not claimed here.
+    name: worker (Python) — ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install
+        working-directory: worker/python
+        run: uv venv && uv pip install -e ".[dev]"
+      - name: Test (Redis-backed loop tests skip; probe/update/verify/CLI run)
+        working-directory: worker/python
+        run: uv run pytest -q
+      - name: Build and run the artifact
+        working-directory: worker/python
+        # `python cbk.pyz` rather than executing it directly: Windows has no shebang
+        # execution, so this is the portable way to prove the zip imports and runs on this OS.
+        run: |
+          uv run python build.py
+          uv run python dist/cbk.pyz --version
 
   contract:
     name: contract schemas
