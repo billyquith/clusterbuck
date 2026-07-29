@@ -14,7 +14,7 @@ nod to *"pass the buck"* — the broker hands each job to whichever worker is up
 built and proven end-to-end (fake stub + Ollama), server + worker, across the
 cross-language contract. Milestones:
 
-- **M0 — async core loop:** submit → Redis Streams queue → C# worker → model server →
+- **M0 — async core loop:** submit → Redis Streams queue → Python worker → model server →
   result → poll.
 - **M1 — sync plane:** LiteLLM serving OpenAI-compatible `/v1/chat/completions` +
   `fleet.yaml` registry + `cbk fleet`.
@@ -183,8 +183,8 @@ every PR on the contract, both unit suites, and the full e2e suite
 
 - Design phase: keep DESIGN.md as the concise overview; put depth in `docs/`. Update
   `docs/decisions.md` when a choice with alternatives is made, so the *why* is preserved.
-- When code is added, document build/test/run commands here (e.g. `dotnet build`,
-  `dotnet test`, publish per RID) and prefer a CI matrix for per-OS artefacts.
+- When code is added, document build/test/run commands here and prefer a CI matrix for
+  per-OS artefacts.
 - Match existing doc voice; small, focused changes.
 
 ## Repo / git

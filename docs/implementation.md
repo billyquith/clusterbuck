@@ -54,7 +54,7 @@ drift. Schema change → both sides update or their contract tests fail.
 | Redis | **redis-py** (`redis.asyncio`) | same Streams consumer-group contract |
 | Concurrency | one asyncio loop, two tasks (pull loop + heartbeat) | the heartbeat mutates the loop's paused flag and capability set; one event loop means no lock discipline to get wrong |
 | HTTP out | **httpx** (`AsyncClient`) | OpenAI wire protocol — **no vendor SDK** |
-| CLI | **argparse** | same seven verbs and flags as the C# worker |
+| CLI | **argparse** | `work / submit / status / fleet / enroll / pause / resume` |
 | Hardware probe | `sysctl` / `/proc/meminfo` / `GlobalMemoryStatusEx` via `ctypes` | stdlib only, best-effort with safe fallbacks |
 | Update verify | **ECDSA P-256** via `cryptography` (DER) | deliberately *not* vendored: it is the verifier, so it cannot arrive through the channel it secures. Absent ⇒ self-update refuses, inference unaffected |
 | Tests | **pytest** + real Redis (`CBK_TEST_REDIS_URL` makes an unreachable broker a failure, not a skip) | plus its own contract conformance suite |
@@ -103,9 +103,9 @@ clusterbuck/
 
 ## Build order (follows the design's phasing)
 
-- **M0 — the loop.** Contract schema → Redis Streams queue → C# worker pulls → calls
-  Ollama → result written → Python submit/poll API. Proves the async plane end to end,
-  and the cross-language contract, on one node.
+- **M0 — the loop.** Contract schema → Redis Streams queue → Python worker pulls → calls
+  Ollama → result written → server submit/poll API. Proves the async plane end to end,
+  on one node.
 - **M1 — usable.** LiteLLM for the sync plane; `fleet.yaml` seed; `cbk` CLI.
 - **M2 — availability.** Urgency + escalation engine; Wake-on-LAN; basic reservations.
 - **M3 — visibility.** Dashboard; SQLite usage metering; avoided-cloud-spend headline;
