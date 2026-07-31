@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .background import coordinator_loop
@@ -229,6 +229,10 @@ def create_app(
     app.include_router(sync_routes)
     app.include_router(web_routes)
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        return RedirectResponse("/static/favicon.ico", status_code=301)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
