@@ -1,0 +1,234 @@
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    clusterbuck coordinator installer — Windows
+
+.DESCRIPTION
+    Installs the always-on coordinator (job API, queue broker, fleet manager) as a
+    Windows Scheduled Task. Redis is run as a Docker container via Docker Desktop.
+
+    Idempotent: safe to re-run; updates an existing installation in place.
+
+.PARAMETER Repo
+    Git repository URL. Default: https://github.com/billyquith/clusterbuck
+
+.PARAMETER Branch
+    Branch or tag to install. Default: main
+
+.PARAMETER Port
+    Coordinator API port. Default: 8000
+
+.PARAMETER DeployDir
+    Installation root directory. Default: C:\clusterbuck
+
+.PARAMETER WorkerVersion
+    CBK_WORKER_CURRENT_VERSION written to server config. Default: 0.7.0
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File install.ps1
+    powershell -ExecutionPolicy Bypass -File install.ps1 -Port 9000 -Branch v1.2.3
+#>
+param(
+    [string]$Repo          = 'https://github.com/billyquith/clusterbuck',
+    [string]$Branch        = 'main',
+    [string]$Port          = '8000',
+    [string]$DeployDir     = 'C:\clusterbuck',
+    [string]$WorkerVersion = '0.7.0'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Write-Step  { Write-Host "[cbk] $args" -ForegroundColor Cyan }
+function Write-Ok    { Write-Host "[cbk] OK  $args" -ForegroundColor Green }
+function Write-Fail  { Write-Host "[cbk] ERROR: $args" -ForegroundColor Red; exit 1 }
+function Write-Warn  { Write-Host "[cbk] WARN: $args" -ForegroundColor Yellow }
+
+# ── prerequisite checks ───────────────────────────────────────────────────────
+Write-Step 'Checking prerequisites'
+
+$py = Get-Command python -ErrorAction SilentlyContinue
+if (-not $py) { Write-Fail 'Python not found. Install Python 3.12+ from https://python.org and ensure it is on PATH.' }
+$pyVer = & python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+if ([version]$pyVer -lt [version]'3.12') { Write-Fail "Python 3.12+ required (found $pyVer)" }
+Write-Ok "Python $pyVer"
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Fail 'git not found. Install Git for Windows from https://git-scm.com/'
+}
+
+# Docker Desktop provides the 'docker' CLI; required for Redis
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Fail 'Docker CLI not found. Install Docker Desktop from https://www.docker.com/products/docker-desktop/'
+}
+try { & docker info 2>$null | Out-Null } catch {
+    Write-Fail 'Docker daemon is not running. Start Docker Desktop and try again.'
+}
+Write-Ok 'Docker available'
+
+# ── directories ───────────────────────────────────────────────────────────────
+Write-Step 'Creating directories'
+$EtcDir = "$env:ProgramData\clusterbuck"
+$VarDir = "$env:ProgramData\clusterbuck\data"
+$LogDir = "$env:ProgramData\clusterbuck\logs"
+
+foreach ($d in $DeployDir, $EtcDir, $VarDir, $LogDir) {
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+}
+Write-Ok "Directories ready under $DeployDir and $EtcDir"
+
+# ── secrets (minted once, never overwritten) ──────────────────────────────────
+Write-Step 'Secrets'
+$SecretsFile = "$EtcDir\secrets.env"
+if (-not (Test-Path $SecretsFile)) {
+    $redisPw = -join ((48..57 + 97..102) * 10 | Get-Random -Count 48 | ForEach-Object { [char]$_ })
+    $apiKey  = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+    @"
+REDIS_PW=$redisPw
+API_KEY=$apiKey
+"@ | Set-Content -Path $SecretsFile -Encoding UTF8
+    # Restrict to Administrators only
+    $acl = Get-Acl $SecretsFile
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        'Administrators', 'FullControl', 'Allow'))
+    Set-Acl $SecretsFile $acl
+    Write-Ok "Secrets minted -> $SecretsFile  (keep this file safe)"
+} else {
+    Write-Ok "Reusing existing secrets from $SecretsFile"
+}
+$secrets = Get-Content $SecretsFile | ConvertFrom-StringData
+$redisPw = $secrets['REDIS_PW']
+$apiKey  = $secrets['API_KEY']
+
+# ── Redis (Docker container) ──────────────────────────────────────────────────
+Write-Step 'Redis'
+$containerName = 'cbk-redis'
+$existing = & docker ps -a --filter "name=^$containerName$" --format '{{.Status}}' 2>$null
+if ($existing -match '^Up') {
+    Write-Ok 'Redis container already running'
+} elseif ($existing) {
+    & docker start $containerName | Out-Null
+    Write-Ok 'Redis container started'
+} else {
+    & docker run -d --name $containerName --restart always -p 127.0.0.1:6379:6379 `
+        redis:7-alpine redis-server --requirepass $redisPw | Out-Null
+    Write-Ok 'Redis container created and started'
+}
+
+# ── repo ──────────────────────────────────────────────────────────────────────
+Write-Step "Repo ($Branch)"
+if (Test-Path "$DeployDir\.git") {
+    Push-Location $DeployDir
+    & git remote set-url origin $Repo
+    & git fetch --depth 1 origin $Branch 2>&1 | Out-Null
+    & git checkout -f -B $Branch FETCH_HEAD 2>&1 | Out-Null
+    Pop-Location
+    Write-Ok "Repo updated"
+} else {
+    & git clone --depth 1 --branch $Branch $Repo $DeployDir 2>&1 | Out-Null
+    Write-Ok "Repo cloned -> $DeployDir"
+}
+
+# ── server Python venv ────────────────────────────────────────────────────────
+Write-Step 'Server venv'
+$VenvDir = "$DeployDir\server\.venv"
+$uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+if (-not $uvCmd) {
+    Write-Warn 'uv not found — installing via pip'
+    & python -m pip install --quiet uv
+}
+& uv venv $VenvDir --python python 2>&1 | Out-Null
+& uv pip install --quiet -e "$DeployDir\server" --python "$VenvDir\Scripts\python.exe"
+Write-Ok 'Server venv ready'
+
+# ── config ────────────────────────────────────────────────────────────────────
+Write-Step 'Config'
+$ServerEnv = "$EtcDir\server.env"
+$FleetYaml = "$EtcDir\fleet.yaml"
+$DbPath    = "$VarDir\cbk.db"
+
+if (-not (Test-Path $ServerEnv)) {
+    @"
+CBK_API_KEY=$apiKey
+CBK_REDIS_URL=redis://:$redisPw@127.0.0.1:6379/0
+CBK_DB_PATH=$DbPath
+CBK_FLEET_PATH=$FleetYaml
+CBK_HOST=0.0.0.0
+CBK_PORT=$Port
+CBK_WORKER_CURRENT_VERSION=$WorkerVersion
+"@ | Set-Content -Path $ServerEnv -Encoding UTF8
+    # Restrict to Administrators
+    $acl = Get-Acl $ServerEnv
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        'Administrators', 'FullControl', 'Allow'))
+    Set-Acl $ServerEnv $acl
+    Write-Ok "server.env written"
+} else {
+    Write-Ok 'server.env already exists (not overwritten)'
+}
+
+if (-not (Test-Path $FleetYaml)) {
+    "nodes: []`ncapabilities: {}" | Set-Content $FleetYaml -Encoding UTF8
+    Write-Ok 'fleet.yaml written'
+}
+
+# ── Scheduled Task ────────────────────────────────────────────────────────────
+Write-Step 'Scheduled Task'
+$taskName = 'cbk-coordinator'
+$python   = "$VenvDir\Scripts\python.exe"
+$wrapper  = "$DeployDir\run-coordinator.cmd"
+
+# Build env-var block from server.env for the cmd wrapper
+$envBlock = (Get-Content $ServerEnv | Where-Object { $_ -match '^\w' } |
+    ForEach-Object { "set $_" }) -join "`r`n"
+
+@"
+@echo off
+$envBlock
+"$python" -m clusterbuck >> "$LogDir\coordinator.log" 2>&1
+"@ | Set-Content $wrapper -Encoding ASCII
+
+$action   = New-ScheduledTaskAction -Execute 'cmd.exe' `
+                -Argument "/c `"$wrapper`"" -WorkingDirectory "$DeployDir\server"
+$trigger  = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 `
+                -RestartCount 2147483647 `
+                -RestartInterval (New-TimeSpan -Minutes 1) `
+                -StartWhenAvailable
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName $taskName `
+    -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+
+Start-ScheduledTask -TaskName $taskName
+Start-Sleep -Seconds 3
+
+$state = (Get-ScheduledTask -TaskName $taskName).State
+Write-Ok "Task '$taskName' state: $state"
+
+# ── verify ────────────────────────────────────────────────────────────────────
+Start-Sleep -Seconds 2
+try {
+    $resp = Invoke-RestMethod "http://127.0.0.1:$Port/healthz" -TimeoutSec 5
+    if ($resp.status -eq 'ok') { Write-Ok "API healthy -> http://127.0.0.1:$Port/" }
+} catch {
+    Write-Warn "API not responding yet — check $LogDir\coordinator.log"
+}
+
+# ── summary ───────────────────────────────────────────────────────────────────
+Write-Host ''
+Write-Host '━━━ clusterbuck coordinator installed ━━━' -ForegroundColor Green
+Write-Host "  API:      http://localhost:$Port/"
+Write-Host "  Secrets:  $SecretsFile  (keep safe)"
+Write-Host "  Config:   $ServerEnv"
+Write-Host "  Logs:     $LogDir\coordinator.log"
+Write-Host ''
+Write-Host '  Next steps:'
+Write-Host '    1. Run install\worker\install.ps1 on each worker machine'
+Write-Host '    2. Mint a join token:'
+Write-Host "       Invoke-RestMethod http://localhost:$Port/nodes/tokens -Method Post \\"
+Write-Host "         -Headers @{'X-CBK-Api-Key'='<api-key from server.env>'}"
+Write-Host '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' -ForegroundColor Green
