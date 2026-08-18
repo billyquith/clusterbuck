@@ -16,7 +16,7 @@
     Branch or tag to install. Default: main
 
 .PARAMETER Port
-    Coordinator API port. Default: 8000
+    Coordinator API port. Default: 8018
 
 .PARAMETER DeployDir
     Installation root directory. Default: C:\clusterbuck
@@ -31,7 +31,7 @@
 param(
     [string]$Repo          = 'https://github.com/billyquith/clusterbuck',
     [string]$Branch        = 'main',
-    [string]$Port          = '8000',
+    [string]$Port          = '8018',
     [string]$DeployDir     = 'C:\clusterbuck',
     [string]$WorkerVersion = '0.7.0'
 )

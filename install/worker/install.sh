@@ -10,7 +10,7 @@
 # Usage:  sudo bash install.sh --coordinator URL --redis-url URL --model NAME [OPTIONS]
 #
 # Required:
-#   --coordinator URL   Coordinator server URL  (e.g. http://coordinator.local:8000)
+#   --coordinator URL   Coordinator server URL  (e.g. http://coordinator.local:8018)
 #   --redis-url URL     Redis URL with password (e.g. redis://:pass@coordinator.local:6379/0)
 #   --model NAME        Model this node advertises (e.g. qwen2.5:7b)
 #
@@ -61,7 +61,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$COORDINATOR_URL" ]] || die "--coordinator is required  (e.g. http://coordinator.local:8000)"
+[[ -n "$COORDINATOR_URL" ]] || die "--coordinator is required  (e.g. http://coordinator.local:8018)"
 [[ -n "$REDIS_URL"       ]] || die "--redis-url is required    (e.g. redis://:pass@coordinator.local:6379/0)"
 [[ -n "$MODEL_NAME"      ]] || die "--model is required        (e.g. qwen2.5:7b)"
 

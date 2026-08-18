@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/billyquith/clusterbuck/main/install
 #   scp dist/cbk.pyz worker-host:/tmp/
 
 sudo bash install/worker/install.sh \
-  --coordinator http://COORDINATOR_HOST:8000 \
+  --coordinator http://COORDINATOR_HOST:8018 \
   --redis-url   'redis://:REDIS_PW@COORDINATOR_HOST:6379/0' \
   --model       qwen2.5:7b \
   --artifact    /tmp/cbk.pyz \
@@ -217,7 +217,7 @@ CBK_REDIS_URL=redis://:${REDIS_PW}@127.0.0.1:6379/0
 CBK_DB_PATH=/var/lib/clusterbuck/cbk.db
 CBK_FLEET_PATH=/etc/clusterbuck/fleet.yaml
 CBK_HOST=0.0.0.0
-CBK_PORT=8000
+CBK_PORT=8018
 CBK_WORKER_CURRENT_VERSION=0.7.0
 HOME=/var/lib/clusterbuck
 XDG_CACHE_HOME=/var/lib/clusterbuck/cache
@@ -254,7 +254,7 @@ Verify:
 
 ```bash
 systemctl is-active cbk-server           # should print "active"
-curl http://127.0.0.1:8000/healthz       # should return {"status":"ok"}
+curl http://127.0.0.1:8018/healthz       # should return {"status":"ok"}
 journalctl -u cbk-server -n 20 --no-pager
 ```
 
@@ -342,7 +342,7 @@ On the **coordinator**, generate a `worker.env` with the real Redis password:
 source /root/.cbk-secrets
 cat > /tmp/worker.env <<EOF
 CBK_REDIS_URL=redis://:${REDIS_PW}@COORDINATOR_HOST:6379/0
-CBK_SERVER_URL=http://COORDINATOR_HOST:8000
+CBK_SERVER_URL=http://COORDINATOR_HOST:8018
 CBK_MODEL_SERVER_URL=http://127.0.0.1:11434/v1
 CBK_MODEL=qwen2.5:7b
 CBK_MODEL_MANAGER=ollama
@@ -386,14 +386,14 @@ worker exchanges it for a persistent node key it uses for all future heartbeats.
 
 ```bash
 APIKEY=$(sudo grep -Po '(?<=CBK_API_KEY=)\S+' /etc/clusterbuck/server.env)
-curl -fsS -X POST http://127.0.0.1:8000/nodes/tokens \
+curl -fsS -X POST http://127.0.0.1:8018/nodes/tokens \
   -H "X-CBK-Api-Key: $APIKEY" | python3 -c "import sys,json; print(json.load(sys.stdin)['join_token'])"
 ```
 
 **On the worker node** — enroll using that token:
 
 ```bash
-export CBK_SERVER_URL=http://COORDINATOR_HOST:8000
+export CBK_SERVER_URL=http://COORDINATOR_HOST:8018
 /opt/clusterbuck/cbk enroll --token JOIN_TOKEN_HERE
 ```
 
@@ -410,7 +410,7 @@ Verify on the coordinator:
 
 ```bash
 APIKEY=$(sudo grep -Po '(?<=CBK_API_KEY=)\S+' /etc/clusterbuck/server.env)
-curl -fsS http://127.0.0.1:8000/nodes -H "X-CBK-Api-Key: $APIKEY" \
+curl -fsS http://127.0.0.1:8018/nodes -H "X-CBK-Api-Key: $APIKEY" \
   | python3 -m json.tool | grep -E '"hostname|fitness|agent_version|mode"'
 ```
 
@@ -423,14 +423,14 @@ The node should appear with `"fitness": "ok"` within a few seconds of the first 
 ### Health check
 
 ```bash
-curl http://COORDINATOR_HOST:8000/healthz   # {"status":"ok"}
+curl http://COORDINATOR_HOST:8018/healthz   # {"status":"ok"}
 ```
 
 ### Submit a test job
 
 ```bash
 APIKEY=your-api-key
-curl -X POST http://COORDINATOR_HOST:8000/jobs \
+curl -X POST http://COORDINATOR_HOST:8018/jobs \
   -H "X-CBK-Api-Key: $APIKEY" \
   -H "Content-Type: application/json" \
   -d '{"capability":"8b-extract","messages":[{"role":"user","content":"say hello"}],"urgency":"waitable"}'
@@ -440,10 +440,10 @@ curl -X POST http://COORDINATOR_HOST:8000/jobs \
 Poll for the result:
 
 ```bash
-curl http://COORDINATOR_HOST:8000/jobs/JOB_ID -H "X-CBK-Api-Key: $APIKEY"
+curl http://COORDINATOR_HOST:8018/jobs/JOB_ID -H "X-CBK-Api-Key: $APIKEY"
 ```
 
-The dashboard at `http://COORDINATOR_HOST:8000/` shows live queue depth, fleet state, and
+The dashboard at `http://COORDINATOR_HOST:8018/` shows live queue depth, fleet state, and
 usage metrics.
 
 ---

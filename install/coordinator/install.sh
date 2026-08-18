@@ -13,7 +13,7 @@
 # Options:
 #   --repo URL       Git repository to clone  (default: https://github.com/billyquith/clusterbuck)
 #   --branch BRANCH  Branch or tag to install (default: main)
-#   --port PORT      Coordinator API port     (default: 8000)
+#   --port PORT      Coordinator API port     (default: 8018)
 #   --lan-redis      Bind Redis on all interfaces so remote workers can reach it
 #   --worker-version VER  CBK_WORKER_CURRENT_VERSION to write to server.env (default: 0.7.0)
 
@@ -22,7 +22,7 @@ set -euo pipefail
 # ── defaults ──────────────────────────────────────────────────────────────────
 REPO_URL="https://github.com/billyquith/clusterbuck"
 BRANCH="main"
-PORT="8000"
+PORT="8018"
 LAN_REDIS=0
 WORKER_VERSION="0.7.0"
 DEPLOY_DIR="/opt/clusterbuck"

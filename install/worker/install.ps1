@@ -11,7 +11,7 @@
     Re-running without -Token skips enrollment (node keeps its existing identity).
 
 .PARAMETER CoordinatorUrl
-    Coordinator server URL. Required.  e.g. http://coordinator.local:8000
+    Coordinator server URL. Required.  e.g. http://coordinator.local:8018
 
 .PARAMETER RedisUrl
     Redis URL including password. Required.  e.g. redis://:pass@coordinator.local:6379/0
@@ -24,7 +24,7 @@
 
 .PARAMETER Token
     One-time join token for enrolling this node. Obtain from the coordinator with:
-      Invoke-RestMethod http://coordinator:8000/nodes/tokens -Method Post -Headers @{...}
+      Invoke-RestMethod http://coordinator:8018/nodes/tokens -Method Post -Headers @{...}
 
 .PARAMETER ModelManager
     Model manager adapter: auto | ollama | none.  Default: auto
@@ -37,7 +37,7 @@
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1 `
-        -CoordinatorUrl http://coordinator.local:8000 `
+        -CoordinatorUrl http://coordinator.local:8018 `
         -RedisUrl 'redis://:secret@coordinator.local:6379/0' `
         -Model qwen2.5:7b `
         -Artifact C:\Downloads\cbk.pyz `
