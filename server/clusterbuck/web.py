@@ -1,7 +1,9 @@
 """The web dashboard (ADR 21): server-rendered, htmx over the existing data, vendored
-assets (no CDN, LAN-only). The full page loads once; each panel refreshes itself with
-`hx-get` on a short interval. Panels read app.state directly (same data the JSON APIs
-serve) rather than self-calling over HTTP.
+assets (no CDN, LAN-only). Two pages — `/` (live usage: headline, queues, reservations)
+and `/models` (model configuration: proposals, ability, fleet capabilities, enrolled
+nodes) — each loads once and its panels self-refresh with `hx-get` on a short interval.
+Panels read app.state directly (same data the JSON APIs serve) rather than self-calling
+over HTTP.
 """
 
 from __future__ import annotations
@@ -25,6 +27,11 @@ web_routes = APIRouter()
 @web_routes.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "dashboard.html")
+
+
+@web_routes.get("/models", response_class=HTMLResponse)
+async def models_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "models.html")
 
 
 @web_routes.get("/ui/headline", response_class=HTMLResponse)

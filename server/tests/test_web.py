@@ -10,6 +10,13 @@ def test_dashboard_page(client):
     assert "/static/htmx.min.js" in r.text  # vendored, not a CDN URL
 
 
+def test_models_page(client):
+    r = client.get("/models")
+    assert r.status_code == 200
+    assert "clusterbuck" in r.text
+    assert "/static/htmx.min.js" in r.text
+
+
 def test_vendored_htmx_served(client):
     r = client.get("/static/htmx.min.js")
     assert r.status_code == 200
