@@ -1,9 +1,9 @@
 <h2>Fleet</h2>
 {% if caps %}
 <table>
-  <tr><th>capability</th><th>queue</th><th>model</th></tr>
+  <tr><th>capability</th><th>model</th><th>nodes</th><th>queue</th></tr>
   {% for c in caps %}
-  <tr><td>{{ c.name }}</td><td>{{ c.queue }}</td><td>{{ c.model }}</td></tr>
+  <tr><td>{{ c.name }}</td><td>{{ c.model }}</td><td>{{ c.nodes }}</td><td>{{ c.queue }}</td></tr>
   {% endfor %}
 </table>
 {% if nodes %}

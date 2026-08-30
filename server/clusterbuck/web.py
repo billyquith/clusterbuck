@@ -55,7 +55,9 @@ async def ui_queues(request: Request) -> HTMLResponse:
 async def ui_fleet(request: Request) -> HTMLResponse:
     fleet = request.app.state.fleet
     caps = (
-        [{"name": n, "queue": s.queue, "model": s.model} for n, s in fleet.capabilities.items()]
+        [{"name": n, "queue": s.queue, "model": s.model,
+          "nodes": ", ".join(nd.id for nd in fleet.nodes_for(n)) or "—"}
+         for n, s in fleet.capabilities.items()]
         if fleet else []
     )
     nodes = (
@@ -137,5 +139,12 @@ async def ui_nodes(request: Request) -> HTMLResponse:
             "version": n["agent_version"] or "unknown",
             "fitness": n["fitness"] or "unknown",
             "fitness_reason": n["fitness_reason"],
+            # Hardware probe (ADR 10 self-enrollment): what the node reported about itself.
+            "os_arch": f"{n['os']}/{n['arch']}" if n["os"] else "—",
+            "ram_gb": n["ram_gb"],
+            "accelerator": n["accelerator"],
+            "vram_gb": n["vram_gb"],
+            "disk_free_gb": n["disk_free_gb"],
+            "profile": n["profile"],
         })
     return templates.TemplateResponse(request, "partials/nodes.html", {"nodes": nodes})
