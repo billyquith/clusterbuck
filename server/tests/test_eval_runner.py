@@ -105,7 +105,7 @@ async def test_dispatched_jobs_pin_the_artifact_and_stay_polite(store, queue):
     # Jobs are attributed to the harness client, and carry their task class.
     rows = store.pending_eval_runs()
     assert {r["task_class"] for r in rows} == {"extract", "summarize"}
-    assert all(store.get(r["job_id"])["client_key"] == EVAL_CLIENT_KEY for r in rows)
+    assert all(store.get(r["job_id"]).client_key == EVAL_CLIENT_KEY for r in rows)
 
 
 # --- collect + scoring ---

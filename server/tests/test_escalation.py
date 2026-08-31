@@ -47,8 +47,8 @@ async def test_promotes_due_waitable_and_wakes(store, queue):
 
     assert promoted == ["job_a"]
     row = store.get("job_a")
-    assert row["urgency"] == "necessary"
-    assert row["escalated"] == 1
+    assert row.urgency == "necessary"
+    assert row.escalated == 1
     assert sent == [MAC]  # promotion granted wake rights
 
 
@@ -63,7 +63,7 @@ async def test_skips_already_served(store, queue):
     await queue.client.set("res_b", json.dumps({"job_id": "job_b", "status": "done"}))
 
     assert await escalation_scan(store, queue, _wake(queue, sent)) == []
-    assert store.get("job_b")["urgency"] == "waitable"
+    assert store.get("job_b").urgency == "waitable"
     assert sent == []
 
 

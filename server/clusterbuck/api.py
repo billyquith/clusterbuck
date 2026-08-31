@@ -319,8 +319,8 @@ def create_app(
         if body.state == "idle":
             # End the lease early: demote this client's unstarted attention-promotions.
             for job in store.attention_promoted_jobs(body.client_key):
-                if await app.state.queue.read_result(job["result_key"]) is None:
-                    store.demote_job(job["id"])
+                if await app.state.queue.read_result(job.result_key) is None:
+                    store.demote_job(job.id)
             store.delete_attention_lease(body.client_key)
             return {"promoted": 0, "prewarm": [], "lease_expires": None}
 
@@ -332,7 +332,7 @@ def create_app(
 
         # Promotion grants wake rights; pre-warm the artifacts the backlog needs.
         fleet = app.state.fleet
-        caps = {r["capability"] for r in affected}
+        caps = {r.capability for r in affected}
         prewarm = []
         for cap in caps:
             await app.state.wake.maybe_wake(cap, reason=f"attention:{body.client_key}")
@@ -428,30 +428,30 @@ def create_app(
         if row is None:
             raise HTTPException(status_code=404, detail="unknown job id")
 
-        result = await app.state.queue.read_result(row["result_key"])
+        result = await app.state.queue.read_result(row.result_key)
         if result is None:
             # No terminal result yet — report the queue-state we last recorded.
             return {
                 "id": job_id,
-                "status": row["status"],
-                "urgency": row["urgency"],  # reflects escalation (waitable → necessary)
+                "status": row.status,
+                "urgency": row.urgency,  # reflects escalation (waitable → necessary)
                 "result": None,
                 "error": None,
-                "attempts": row["attempts"],
+                "attempts": row.attempts,
                 "worker": None,
             }
 
         status = result.get("status", "done")
-        if status in _TERMINAL and row["status"] != status:
+        if status in _TERMINAL and row.status != status:
             app.state.store.set_status(job_id, status)
 
         return {
             "id": job_id,
             "status": status,
-            "urgency": row["urgency"],
+            "urgency": row.urgency,
             "result": result.get("completion"),
             "error": result.get("error"),
-            "attempts": row["attempts"],
+            "attempts": row.attempts,
             "worker": result.get("worker"),
         }
 

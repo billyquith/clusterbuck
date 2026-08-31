@@ -1,9 +1,12 @@
-"""The Alembic baseline (migrations/versions/0001_baseline.py) must describe exactly the
-schema `Store.__init__` actually builds (`_SCHEMA` + `_MIGRATIONS` + the `jobs` SQLModel
-table) — see that migration's own docstring for why this isn't optional. This is not a
-one-time hand check: it runs every test invocation, so any future edit to `_SCHEMA`,
-`_MIGRATIONS`, or an ORM table that isn't mirrored in a new migration fails loudly here
-instead of silently drifting until someone points Alembic at a real database.
+"""Store._ensure_schema has two paths onto the same baseline (see its docstring): a
+fresh database goes straight through `alembic upgrade head`, while a database that
+already has tables but no `alembic_version` (a pre-Alembic deployment) gets brought up
+to date the old way and then *stamped* — never has the baseline's DDL run against it.
+
+This file checks both paths land on the same schema, and does so every test run rather
+than by one-time hand inspection: any future edit to `_SCHEMA`, `_MIGRATIONS`, or an ORM
+table that isn't mirrored in migrations/versions/0001_baseline.py fails loudly here
+instead of surfacing only when someone points Alembic at a real database.
 
 Comparison is by SQLite type *affinity* (TEXT/INTEGER/REAL/NUMERIC), not exact declared
 type strings — `sa.REAL` vs a hand-written `REAL` column may render identically, but
@@ -16,13 +19,13 @@ reason — cosmetic differences in how a literal default is quoted aren't schema
 from __future__ import annotations
 
 import sqlite3
-import subprocess
-import sys
-from pathlib import Path
 
-from clusterbuck.store import Store
+from sqlmodel import SQLModel
 
-SERVER_DIR = Path(__file__).resolve().parents[1]
+from clusterbuck import migrate
+from clusterbuck.db import make_engine
+from clusterbuck.orm.job import Job
+from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
 
 
 def _affinity(decl_type: str) -> str:
@@ -37,7 +40,7 @@ def _affinity(decl_type: str) -> str:
     return "NUMERIC"
 
 
-def _schema_signature(db_path: Path) -> dict[str, set[tuple]]:
+def _schema_signature(db_path) -> dict[str, set[tuple]]:
     """{table: {(column, affinity, notnull, has_default, pk) ...}}"""
     conn = sqlite3.connect(str(db_path))
     try:
@@ -60,30 +63,67 @@ def _schema_signature(db_path: Path) -> dict[str, set[tuple]]:
         conn.close()
 
 
-def test_alembic_baseline_matches_store_schema(tmp_path) -> None:
+def _alembic_version(db_path) -> tuple[str] | None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    finally:
+        conn.close()
+
+
+def _build_legacy_database(db_path) -> None:
+    """Reproduce exactly what Store._ensure_schema's legacy branch bootstraps, bypassing
+    its own alembic-vs-legacy dispatch — i.e. what an already-deployed, pre-Alembic
+    coordinator database looks like just before this code ever ran against it."""
+    engine = make_engine(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    try:
+        conn.executescript(_SCHEMA)
+        conn.commit()
+    finally:
+        conn.close()
+    SQLModel.metadata.create_all(engine, tables=[Job.__table__])
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        for table, columns in _MIGRATIONS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for col, ddl in columns.items():
+                if col not in existing:
+                    conn.execute(ddl)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_fresh_database_matches_alembic_baseline(tmp_path) -> None:
+    """A brand-new database, built the way Store._ensure_schema builds one (no
+    pre-existing tables), must match a plain `alembic upgrade head` exactly."""
     store_db = tmp_path / "store.db"
-    Store(str(store_db))  # runs _SCHEMA + _MIGRATIONS + the jobs SQLModel create_all
+    Store(str(store_db))
 
     alembic_db = tmp_path / "alembic.db"
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "head"],
-        cwd=SERVER_DIR,
-        env={"CBK_DB_PATH": str(alembic_db), "PATH": __import__("os").environ["PATH"]},
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    migrate.upgrade_to_head(str(alembic_db))
 
-    store_schema = _schema_signature(store_db)
-    alembic_schema = _schema_signature(alembic_db)
+    assert _schema_signature(store_db) == _schema_signature(alembic_db)
+    assert _alembic_version(store_db) == _alembic_version(alembic_db) == ("0001",)
 
-    assert store_schema.keys() == alembic_schema.keys(), (
-        f"table sets differ: only-in-store={store_schema.keys() - alembic_schema.keys()} "
-        f"only-in-alembic={alembic_schema.keys() - store_schema.keys()}"
-    )
-    for table in store_schema:
-        assert store_schema[table] == alembic_schema[table], (
-            f"schema for '{table}' differs:\n"
-            f"  store-only:   {store_schema[table] - alembic_schema[table]}\n"
-            f"  alembic-only: {alembic_schema[table] - store_schema[table]}"
-        )
+
+def test_legacy_database_is_stamped_not_migrated(tmp_path) -> None:
+    """A pre-Alembic database (tables already exist, no `alembic_version`) must be
+    recognised, brought up to date the old way, and *stamped* rather than having the
+    baseline's `op.create_table` calls run against tables that already exist (which
+    would raise 'table already exists')."""
+    legacy_db = tmp_path / "legacy.db"
+    _build_legacy_database(legacy_db)
+    before = _schema_signature(legacy_db)
+
+    Store(str(legacy_db))  # must not raise, and must not alter the schema
+
+    assert _schema_signature(legacy_db) == before
+    assert _alembic_version(legacy_db) == ("0001",)
+
+    # A second Store() against the now-stamped database takes the "already stamped"
+    # branch (plain `alembic upgrade head`, a no-op since it's already at head).
+    Store(str(legacy_db))
+    assert _schema_signature(legacy_db) == before

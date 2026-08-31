@@ -10,8 +10,6 @@ that's intentional, not drift to fix as part of this migration.
 
 from __future__ import annotations
 
-from typing import Any
-
 from sqlmodel import Field, SQLModel
 
 
@@ -39,9 +37,3 @@ class Job(SQLModel, table=True):
     task_class: str | None = None  # need-shaped task class (for attention scoping)
     promoted_by: str | None = None  # null | 'age' | 'attention' (escalation provenance)
     attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})  # delivery attempts, incremented by the reaper
-
-    def __getitem__(self, key: str) -> Any:
-        """Transitional dict-style access (`row["field"]`) for call sites and tests
-        that predate this migration and still expect a `sqlite3.Row`-like object.
-        New code should use attribute access; drop this once callers are updated."""
-        return getattr(self, key)

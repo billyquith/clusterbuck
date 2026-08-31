@@ -14,6 +14,7 @@ from typing import Iterator
 
 from sqlmodel import Session, SQLModel, select
 
+from . import migrate
 from .db import make_engine
 from .orm.job import Job
 
@@ -204,6 +205,35 @@ class Store:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
         self._engine = make_engine(db_path)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Bring the database up to the current schema, then make sure Alembic knows it.
+
+        Three cases:
+        - Already has `alembic_version` (a database this method has stamped or migrated
+          before): just `alembic upgrade head` — the normal case on every later boot.
+        - No tables at all (a brand-new database, e.g. every test's `tmp_path`): also
+          `alembic upgrade head` — migrations/versions/0001_baseline.py creates the full
+          schema, so this is the only path exercised by new databases from here on.
+        - Has tables but no `alembic_version` (a database from before Alembic existed —
+          e.g. an already-deployed coordinator): bring it up to date the old way first
+          (idempotent — CREATE TABLE IF NOT EXISTS + only-if-missing ALTER TABLE), then
+          `alembic stamp head` to record it's at the baseline WITHOUT running that
+          migration's DDL against tables that already exist.
+        """
+        with self._conn() as c:
+            has_alembic_version = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
+            ).fetchone() is not None
+            has_any_table = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchone() is not None
+
+        if has_alembic_version or not has_any_table:
+            migrate.upgrade_to_head(self._db_path)
+            return
+
         with self._conn() as c:
             c.executescript(_SCHEMA)
         SQLModel.metadata.create_all(self._engine, tables=[Job.__table__])
@@ -213,6 +243,7 @@ class Store:
                 for col, ddl in columns.items():
                     if col not in existing:
                         c.execute(ddl)
+        migrate.stamp_head(self._db_path)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
