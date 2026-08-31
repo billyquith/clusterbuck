@@ -1,0 +1,44 @@
+<section class="panel">
+  <h2>{{ run.label }} &middot; by category</h2>
+  {% if run.by_category %}
+  <table>
+    <tr>
+      <th>category</th><th class="n">n</th><th class="n">served</th>
+      <th class="n">unassigned</th><th class="n">pass rate</th><th class="n">mean latency</th>
+    </tr>
+    {% for c in run.by_category %}
+    <tr>
+      <td>{{ c.category }}</td>
+      <td class="n">{{ c.n }}</td>
+      <td class="n">{{ c.n_served }}</td>
+      <td class="n">{{ c.n_unassigned }}</td>
+      <td class="n">{{ "%.0f%%"|format(c.pass_rate * 100) if c.pass_rate is not none else "—" }}</td>
+      <td class="n">{{ c.mean_latency_s if c.mean_latency_s is not none else "—" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="empty">no measured samples yet</p>
+  {% endif %}
+
+  {% if trouble %}
+  <p class="empty" style="margin-top:.8rem">what's not working right now:</p>
+  <table style="margin-top:.3rem">
+    <tr><th>category</th><th>outcome</th><th>detail</th></tr>
+    {% for s in trouble %}
+    <tr>
+      <td>{{ s.category }}</td>
+      <td><span class="pill warn">{{ s.outcome }}</span></td>
+      <td style="color:var(--muted);font-size:.8rem">{{ s.detail or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if run.snapshot %}
+  <p class="empty" style="margin-top:.8rem">
+    fleet at start: {{ run.snapshot.capabilities.keys() | join(", ") if run.snapshot.capabilities else "—" }}
+    &middot; {{ run.snapshot.nodes | length }} node(s) enrolled
+  </p>
+  {% endif %}
+</section>

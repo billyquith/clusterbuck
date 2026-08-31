@@ -1,0 +1,38 @@
+<h2>Runs</h2>
+{% if runs %}
+<table>
+  <tr>
+    <th>label</th><th>status</th><th class="n">measured</th><th class="n">served</th>
+    <th class="n">unassigned</th><th class="n">pass rate</th><th class="n">latency</th>
+    <th class="n">jobs/s</th><th class="n">tok/s</th><th></th>
+  </tr>
+  {% for r in runs %}
+  <tr>
+    <td>
+      {{ r.label }}<br>
+      <span style="color:var(--muted);font-size:.72rem">{{ r.started_at }}</span>
+    </td>
+    <td>
+      {% if r.status == "running" %}<span class="pill ok">running</span>
+      {% elif r.status == "cancelled" %}<span class="pill warn">cancelled</span>
+      {% else %}<span class="pill">done</span>{% endif %}
+    </td>
+    <td class="n">{{ r.n_measured }}{% if r.n_warmup %}<br><span style="color:var(--muted);font-size:.72rem">+{{ r.n_warmup }} warmup</span>{% endif %}</td>
+    <td class="n">{{ r.n_served }}{% if r.n_failed %}<br><span style="color:var(--bad);font-size:.72rem">{{ r.n_failed }} failed</span>{% endif %}</td>
+    <td class="n">{{ r.n_unassigned }}</td>
+    <td class="n">{{ "%.0f%%"|format(r.pass_rate * 100) if r.pass_rate is not none else "—" }}</td>
+    <td class="n">{{ r.mean_latency_s if r.mean_latency_s is not none else "—" }}</td>
+    <td class="n">{{ r.jobs_per_s if r.jobs_per_s is not none else "—" }}</td>
+    <td class="n">{{ r.tokens_per_s if r.tokens_per_s is not none else "—" }}</td>
+    <td style="white-space:nowrap">
+      <button hx-get="/ui/perf/runs/{{ r.id }}" hx-target="#perf-run-detail" hx-swap="innerHTML">details</button>
+      {% if r.status == "running" %}
+      <button hx-post="/ui/perf/runs/{{ r.id }}/cancel" hx-target="#perf-runs-list" hx-swap="innerHTML">cancel</button>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">no runs yet — start one above</p>
+{% endif %}

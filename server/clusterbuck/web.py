@@ -34,6 +34,15 @@ async def models_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "models.html")
 
 
+@web_routes.get("/performance", response_class=HTMLResponse)
+async def performance_page(request: Request) -> HTMLResponse:
+    from .perf_runner import CATEGORIES
+
+    return templates.TemplateResponse(
+        request, "performance.html", {"categories": sorted(CATEGORIES)}
+    )
+
+
 @web_routes.get("/ui/headline", response_class=HTMLResponse)
 async def ui_headline(request: Request) -> HTMLResponse:
     u = build_usage_summary(request.app.state.store, settings.cloud_budget_monthly)
@@ -148,3 +157,65 @@ async def ui_nodes(request: Request) -> HTMLResponse:
             "profile": n["profile"],
         })
     return templates.TemplateResponse(request, "partials/nodes.html", {"nodes": nodes})
+
+
+@web_routes.get("/ui/perf/runs", response_class=HTMLResponse)
+async def ui_perf_runs(request: Request) -> HTMLResponse:
+    from .perf_runner import perf_run_list_view
+
+    store = request.app.state.store
+    runs = [perf_run_list_view(store, r) for r in store.list_perf_runs()]
+    return templates.TemplateResponse(request, "partials/perf_runs.html", {"runs": runs})
+
+
+@web_routes.get("/ui/perf/runs/{run_id}", response_class=HTMLResponse)
+async def ui_perf_run_detail(request: Request, run_id: str) -> HTMLResponse:
+    from .perf_runner import perf_run_view
+
+    store = request.app.state.store
+    row = store.get_perf_run(run_id)
+    if row is None:
+        return HTMLResponse("<p class=\"empty\">run not found</p>", status_code=404)
+    view = perf_run_view(store, row)
+    trouble = [
+        dict(s) for s in store.perf_run_samples(run_id)
+        if s["phase"] == "measure" and s["outcome"] in ("unassigned", "failed", "timeout")
+    ][:20]
+    return templates.TemplateResponse(
+        request, "partials/perf_run_detail.html", {"run": view, "trouble": trouble},
+    )
+
+
+@web_routes.post("/ui/perf/start", response_class=HTMLResponse)
+async def ui_perf_start(request: Request) -> HTMLResponse:
+    from .models import PerfRunSubmit
+    from .perf_runner import UnknownCategory, start_run
+
+    form = await request.form()
+    categories = form.getlist("categories") or None
+    kwargs: dict = {"label": form.get("label") or "load test"}
+    if categories:
+        kwargs["categories"] = categories
+    for field, cast in (
+        ("concurrency", int), ("duration_s", float), ("warmup_s", float),
+        ("n_jobs", int), ("min_ability_override", int),
+    ):
+        raw = form.get(field)
+        if raw:
+            kwargs[field] = cast(raw)
+    if form.get("pin_model"):
+        kwargs["pin_model"] = form.get("pin_model")
+
+    try:
+        start_run(request.app, PerfRunSubmit(**kwargs))
+    except (UnknownCategory, ValueError):
+        pass  # swallow a bad form submission; the re-rendered list is unaffected
+    return await ui_perf_runs(request)
+
+
+@web_routes.post("/ui/perf/runs/{run_id}/cancel", response_class=HTMLResponse)
+async def ui_perf_cancel(request: Request, run_id: str) -> HTMLResponse:
+    task = request.app.state.perf_tasks.get(run_id)
+    if task is not None and not task.done():
+        task.cancel()
+    return await ui_perf_runs(request)

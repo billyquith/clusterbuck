@@ -169,6 +169,7 @@ bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} rou
 bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not config
 bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval
 bash deploy/e2e/eval.sh           # M7: unmeasured model → eval jobs → scored → routable
+bash deploy/e2e/perf.sh           # Performance page: randomized load run, served vs unassigned
 bash deploy/e2e/auth.sh           # shared secret closes the escalation chain (ADR 26)
 bash deploy/e2e/version.sh        # coordinator quarantines an unfit worker build (ADR 27)
 bash deploy/e2e/selfupdate-py.sh  # signed self-update, REAL zipapp (fast)

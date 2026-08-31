@@ -158,6 +158,43 @@ CREATE TABLE IF NOT EXISTS usage (
     day          TEXT NOT NULL     -- YYYY-MM-DD, for rollups
 );
 
+-- Load-test runs (Performance page): a stream of randomized queries against the real
+-- /jobs API for a sustained duration, scored for adequacy as each reply lands. No cloud
+-- escalation — a request the local fleet can't meet is recorded as `unassigned`, not
+-- retried elsewhere.
+CREATE TABLE IF NOT EXISTS perf_runs (
+    id          TEXT PRIMARY KEY,
+    label       TEXT NOT NULL,
+    status      TEXT NOT NULL,      -- running | done | cancelled
+    config      TEXT NOT NULL,      -- json: categories, concurrency, duration_s, etc.
+    snapshot    TEXT,               -- json: nodes/fleet state observed at start
+    started_at  TEXT NOT NULL,
+    finished_at TEXT
+);
+
+-- One row per generated query. `job_id` is null for `unassigned` (no capability met the
+-- requested ability, so no job was ever created). `passed` is the query's own check verdict
+-- (null when there was no reply to score — failed/expired/unassigned).
+CREATE TABLE IF NOT EXISTS perf_samples (
+    id           TEXT PRIMARY KEY,
+    run_id       TEXT NOT NULL,
+    job_id       TEXT,
+    category     TEXT NOT NULL,
+    task_class   TEXT NOT NULL,
+    min_ability  INTEGER NOT NULL,
+    capability   TEXT,
+    node         TEXT,
+    phase        TEXT NOT NULL,      -- warmup | measure
+    submitted_at REAL NOT NULL,
+    completed_at REAL,
+    latency_s    REAL,
+    tokens_in    INTEGER,
+    tokens_out   INTEGER,
+    outcome      TEXT NOT NULL,      -- done | failed | timeout | unassigned
+    passed       INTEGER,            -- 1 | 0 | NULL
+    detail       TEXT
+);
+
 CREATE TABLE IF NOT EXISTS reservations (
     id           TEXT PRIMARY KEY,
     status       TEXT NOT NULL,   -- confirmed | declined
@@ -814,3 +851,94 @@ class Store:
                  last_heartbeat, node_id),
             )
             return cur.rowcount > 0
+
+    # --- performance load tests ---
+
+    def create_perf_run(self, *, id: str, label: str, config: str, snapshot: str | None,
+                        started_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO perf_runs (id, label, status, config, snapshot, started_at) "
+                "VALUES (?, ?, 'running', ?, ?, ?)",
+                (id, label, config, snapshot, started_at),
+            )
+
+    def finish_perf_run(self, id: str, status: str, finished_at: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "UPDATE perf_runs SET status = ?, finished_at = ? WHERE id = ?",
+                (status, finished_at, id),
+            )
+
+    def get_perf_run(self, id: str) -> sqlite3.Row | None:
+        with self._conn() as c:
+            return c.execute("SELECT * FROM perf_runs WHERE id = ?", (id,)).fetchone()
+
+    def list_perf_runs(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM perf_runs ORDER BY started_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+
+    def add_perf_sample(self, *, id: str, run_id: str, job_id: str | None, category: str,
+                        task_class: str, min_ability: int, capability: str | None,
+                        node: str | None, phase: str, submitted_at: float,
+                        completed_at: float | None, latency_s: float | None,
+                        tokens_in: int | None, tokens_out: int | None, outcome: str,
+                        passed: bool | None, detail: str | None) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO perf_samples (id, run_id, job_id, category, task_class, "
+                "min_ability, capability, node, phase, submitted_at, completed_at, "
+                "latency_s, tokens_in, tokens_out, outcome, passed, detail) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (id, run_id, job_id, category, task_class, min_ability, capability, node,
+                 phase, submitted_at, completed_at, latency_s, tokens_in, tokens_out,
+                 outcome, None if passed is None else (1 if passed else 0), detail),
+            )
+
+    def perf_run_samples(self, run_id: str) -> list[sqlite3.Row]:
+        with self._conn() as c:
+            return c.execute(
+                "SELECT * FROM perf_samples WHERE run_id = ? ORDER BY submitted_at",
+                (run_id,),
+            ).fetchall()
+
+    def perf_run_stats(self, run_id: str) -> sqlite3.Row:
+        """Aggregate stats computed in SQL, for the runs-list view — avoids loading every
+        sample of every run on each dashboard poll. No percentiles (needs the sorted
+        sample list); the single-run detail view still uses perf_run_samples for those."""
+        with self._conn() as c:
+            return c.execute(
+                "SELECT "
+                "SUM(phase = 'measure') AS n_measured, "
+                "SUM(phase = 'warmup') AS n_warmup, "
+                "SUM(phase = 'measure' AND outcome = 'done') AS n_served, "
+                "SUM(phase = 'measure' AND outcome = 'unassigned') AS n_unassigned, "
+                "SUM(phase = 'measure' AND outcome IN ('failed', 'expired', 'timeout')) "
+                "  AS n_failed, "
+                "SUM(phase = 'measure' AND outcome = 'done' AND passed = 1) AS n_passed, "
+                "SUM(phase = 'measure' AND outcome = 'done' AND passed IS NOT NULL) "
+                "  AS n_scored, "
+                "AVG(CASE WHEN phase = 'measure' AND outcome = 'done' "
+                "  THEN latency_s END) AS mean_latency_s, "
+                "SUM(CASE WHEN phase = 'measure' AND outcome = 'done' "
+                "  THEN COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0) ELSE 0 END) "
+                "  AS total_tokens, "
+                "MIN(CASE WHEN phase = 'measure' THEN submitted_at END) AS span_start, "
+                "MAX(CASE WHEN phase = 'measure' "
+                "  THEN COALESCE(completed_at, submitted_at) END) AS span_end "
+                "FROM perf_samples WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+
+    def cancel_stale_perf_runs(self, finished_at: str) -> int:
+        """No perf task can still be running from a previous process — reconcile any row
+        left 'running' (e.g. after a SIGKILL) so its cancel button isn't a no-op forever."""
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE perf_runs SET status = 'cancelled', finished_at = ? "
+                "WHERE status = 'running'",
+                (finished_at,),
+            )
+            return cur.rowcount

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>clusterbuck · performance</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" href="/static/favicon.ico">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>clusterbuck</h1>
+    <span class="tag">LAN LLM worker network · performance</span>
+    <nav class="pages">
+      <a href="/">Usage</a>
+      <a href="/models">Models</a>
+      <a href="/performance" class="active">Performance</a>
+    </nav>
+  </header>
+  <main>
+    <section class="panel" style="margin-bottom:1rem">
+      <h2>Start a run</h2>
+      <form class="run-form" hx-post="/ui/perf/start" hx-target="#perf-runs-list" hx-swap="innerHTML">
+        <label>Label
+          <input type="text" name="label" placeholder="load test">
+        </label>
+        <label>Categories (all if none checked)
+          <span class="cats">
+            {% for c in categories %}
+            <span><input type="checkbox" name="categories" value="{{ c }}"> {{ c }}</span>
+            {% endfor %}
+          </span>
+        </label>
+        <label>Concurrency
+          <input type="number" name="concurrency" value="4" min="1" max="64">
+        </label>
+        <label>Duration (s)
+          <input type="number" name="duration_s" value="60" min="1" max="3600">
+        </label>
+        <label>Warmup (s)
+          <input type="number" name="warmup_s" value="15" min="0">
+        </label>
+        <label>Max jobs
+          <input type="number" name="n_jobs" min="1" placeholder="unlimited">
+        </label>
+        <label>Min ability override
+          <input type="number" name="min_ability_override" min="1" max="10" placeholder="per-category">
+        </label>
+        <label>Pin model
+          <input type="text" name="pin_model" placeholder="optional">
+        </label>
+        <button type="submit">Start run</button>
+      </form>
+    </section>
+    <div id="perf-runs-list" hx-get="/ui/perf/runs" hx-trigger="load, every 3s">…</div>
+    <div id="perf-run-detail" style="margin-top:1rem"></div>
+  </main>
+</body>
+</html>

@@ -26,3 +26,11 @@ def new_node_key() -> str:
 
 def new_join_token() -> str:
     return f"jt_{secrets.token_urlsafe(18)}"
+
+
+def new_perf_run_id() -> str:
+    return f"perf_{uuid.uuid4().hex}"
+
+
+def new_perf_sample_id() -> str:
+    return f"pfs_{uuid.uuid4().hex}"

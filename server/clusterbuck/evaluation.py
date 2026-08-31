@@ -70,6 +70,10 @@ def check_exact(expected: str) -> Callable[[str], bool]:
     return lambda out: (out or "").strip() == expected
 
 
+def check_min_length(n: int) -> Callable[[str], bool]:
+    return lambda out: len((out or "").strip()) >= n
+
+
 @dataclass(frozen=True)
 class EvalItem:
     task_class: str

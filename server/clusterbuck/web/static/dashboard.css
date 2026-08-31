@@ -40,3 +40,19 @@ button {
 button:hover { border-color: var(--accent); color: var(--accent); }
 .kv { display: flex; justify-content: space-between; padding: .25rem 0; }
 .kv .k { color: var(--muted); }
+form.run-form { display: flex; flex-wrap: wrap; gap: .8rem; align-items: flex-end; }
+form.run-form label {
+  display: flex; flex-direction: column; gap: .25rem; font-size: .75rem;
+  color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+}
+form.run-form input, form.run-form select {
+  background: #0f1216; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: .3rem .5rem; font: inherit; font-size: .85rem;
+}
+form.run-form input[type="text"] { width: 10rem; }
+form.run-form input[type="number"] { width: 5.5rem; }
+form.run-form select[multiple] { width: 12rem; height: 5.6rem; }
+form.run-form .cats { display: flex; flex-direction: column; gap: .2rem; font-size: .8rem;
+  color: var(--ink); text-transform: none; letter-spacing: normal; max-height: 5.6rem;
+  overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: .4rem .6rem; }
+form.run-form .cats span { display: flex; gap: .4rem; align-items: center; }

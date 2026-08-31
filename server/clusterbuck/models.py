@@ -104,6 +104,25 @@ class ReservationSubmit(BaseModel):
         return self
 
 
+class PerfRunSubmit(BaseModel):
+    """Client request body for POST /perf/runs (the Performance page's load-test driver).
+
+    Server-only seam — like JobSubmit — so it is validated by Pydantic and is not part of
+    contract/.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    label: str = "load test"
+    categories: list[str] | None = None  # null ⇒ all shipped categories
+    concurrency: int = Field(default=4, ge=1, le=64)
+    duration_s: float = Field(default=60.0, gt=0, le=3600)
+    warmup_s: float = Field(default=15.0, ge=0)
+    n_jobs: int | None = Field(default=None, ge=1)
+    min_ability_override: int | None = Field(default=None, ge=1, le=10)
+    pin_model: str | None = None
+
+
 class AttentionRequest(BaseModel):
     """Client attention signal (protocols.md §9). Server-only ⇒ not in contract/."""
 

@@ -10,13 +10,14 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .auth import install_auth
 from .background import coordinator_loop
 from .catalog import (
     apply_action_result,
@@ -31,9 +32,7 @@ from .coordinator import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
 from .fleet import load_fleet
-from .routing import NoCapableArtifact, resolve_capability
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
-from .auth import install_auth
 from .models import (
     AttentionRequest,
     EnrollRequest,
@@ -41,11 +40,14 @@ from .models import (
     JobRecord,
     JobSubmit,
     NodePolicy,
+    PerfRunSubmit,
     ReservationSubmit,
     Urgency,
 )
+from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
 from .queue import Queue
 from .reservations import admit, iso
+from .routing import NoCapableArtifact, resolve_capability
 from .signing import build_manifest, load_private_pem
 from .store import Store
 from .sync import build_router, sync_routes
@@ -64,7 +66,7 @@ _log = logging.getLogger("clusterbuck")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 # os+arch → .NET runtime identifier. Kept for backward compat with any existing nodes
@@ -147,7 +149,7 @@ def _build_update_for(app, node, flavour: str | None = None) -> dict | None:
 
 
 def _now_iso_at(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(epoch, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
 def create_app(
@@ -163,6 +165,14 @@ def create_app(
     async def lifespan(app: FastAPI):
         app.state.queue = Queue.from_url(redis_url)
         app.state.store = Store(db_path or settings.db_path)
+        app.state.perf_tasks = {}  # run_id -> asyncio.Task, for cancellation
+
+        # A row left 'running' belongs to a process that's gone (crash/SIGKILL — graceful
+        # shutdown below always resolves its own runs) — reconcile so its cancel button
+        # isn't a no-op forever.
+        n_stale = app.state.store.cancel_stale_perf_runs(_now_iso())
+        if n_stale:
+            _log.warning("reconciled %d perf run(s) stuck 'running' from a prior process", n_stale)
 
         # Sync plane: load the fleet registry and build the LiteLLM router if present.
         # Absent fleet.yaml ⇒ sync endpoints return 503; the async plane still works.
@@ -221,6 +231,17 @@ def create_app(
             stop.set()
             if task is not None:
                 await task
+            # Any load-test runs still going must not outlive the app (they hold the
+            # queue/store the shutdown below is about to close).
+            for t in list(app.state.perf_tasks.values()):
+                t.cancel()
+            for t in list(app.state.perf_tasks.values()):
+                try:
+                    await asyncio.wait_for(t, timeout=5)
+                except asyncio.CancelledError:
+                    pass  # expected — we just cancelled it above
+                except Exception:
+                    _log.exception("perf run task raised during shutdown")
             await app.state.queue.aclose()
 
     app = FastAPI(title="clusterbuck server", version="0.0.1", lifespan=lifespan)
@@ -302,6 +323,39 @@ def create_app(
         )
         return {"scored": collected, "dispatched": enqueued}
 
+    # --- performance load tests (Performance page) ---
+
+    @app.post("/perf/runs", status_code=201)
+    async def start_perf_run(body: PerfRunSubmit) -> JSONResponse:
+        try:
+            run_id = start_run(app, body)
+        except UnknownCategory as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        return JSONResponse(status_code=201, content={"id": run_id, "status": "running"})
+
+    @app.get("/perf/runs")
+    async def list_perf_runs() -> dict:
+        return {"runs": [perf_run_list_view(app.state.store, r)
+                          for r in app.state.store.list_perf_runs()]}
+
+    @app.get("/perf/runs/{run_id}")
+    async def get_perf_run(run_id: str) -> dict:
+        row = app.state.store.get_perf_run(run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown perf run id")
+        return perf_run_view(app.state.store, row)
+
+    @app.post("/perf/runs/{run_id}/cancel")
+    async def cancel_perf_run(run_id: str) -> dict:
+        row = app.state.store.get_perf_run(run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown perf run id")
+        task = app.state.perf_tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+            return {"id": run_id, "status": "cancelling"}
+        return {"id": run_id, "status": row["status"]}
+
     @app.get("/queues")
     async def get_queues() -> dict:
         """Per-capability queue depth / pending / live consumers."""
@@ -325,7 +379,7 @@ def create_app(
             return {"promoted": 0, "prewarm": [], "lease_expires": None}
 
         affected = store.attention_promote(body.client_key, body.scope)
-        expires_at = datetime.now(timezone.utc).timestamp() + body.ttl_s
+        expires_at = datetime.now(UTC).timestamp() + body.ttl_s
         store.upsert_attention_lease(
             body.client_key, json.dumps(body.scope) if body.scope else None, expires_at,
         )
@@ -368,7 +422,7 @@ def create_app(
             # Explicit failure beats silently serving below the requested ability floor.
             raise HTTPException(status_code=422, detail=str(e)) from e
         job_id, result_key = new_ids()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         created_at = now.isoformat().replace("+00:00", "Z")
 
         record = JobRecord(
@@ -435,7 +489,9 @@ def create_app(
                 "id": job_id,
                 "status": row["status"],
                 "urgency": row["urgency"],  # reflects escalation (waitable → necessary)
+                "capability": row["capability"],
                 "result": None,
+                "usage": None,
                 "error": None,
                 "attempts": row["attempts"],
                 "worker": None,
@@ -449,7 +505,9 @@ def create_app(
             "id": job_id,
             "status": status,
             "urgency": row["urgency"],
+            "capability": row["capability"],
             "result": result.get("completion"),
+            "usage": result.get("usage"),
             "error": result.get("error"),
             "attempts": row["attempts"],
             "worker": result.get("worker"),
@@ -484,7 +542,7 @@ def create_app(
             lead_s=settings.warm_lead_s,
         )
         rsv_id = new_reservation_id()
-        created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        created_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         # confirmed reservations start their lifecycle; declined ones have none.
         state = "scheduled" if decision.status == "confirmed" else None
         app.state.store.insert_reservation(
