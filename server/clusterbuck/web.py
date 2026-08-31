@@ -78,8 +78,8 @@ async def ui_reservations(request: Request) -> HTMLResponse:
 @web_routes.get("/ui/proposals", response_class=HTMLResponse)
 async def ui_proposals(request: Request) -> HTMLResponse:
     rows = request.app.state.store.list_proposals("pending")
-    props = [{"id": r["id"], "kind": r["kind"], "artifact": r["artifact"],
-              "node": r["node_id"], "rationale": r["rationale"]} for r in rows]
+    props = [{"id": r.id, "kind": r.kind, "artifact": r.artifact,
+              "node": r.node_id, "rationale": r.rationale} for r in rows]
     return templates.TemplateResponse(request, "partials/proposals.html", {"props": props})
 
 
@@ -102,7 +102,7 @@ async def ui_ability(request: Request) -> HTMLResponse:
     rows = request.app.state.store.ability_matrix(SCALE_VERSION)
     by_artifact: dict[str, list[float]] = {}
     for r in rows:
-        by_artifact.setdefault(r["artifact"], []).append(r["score"])
+        by_artifact.setdefault(r.artifact, []).append(r.score)
     arts = sorted(
         ({"artifact": a, "headline": round(sum(s) / len(s), 1)} for a, s in by_artifact.items()),
         key=lambda x: x["headline"], reverse=True,

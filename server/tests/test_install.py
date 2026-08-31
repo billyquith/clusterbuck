@@ -63,8 +63,8 @@ def test_no_install_while_owner_active(store):
     scan_node(store, store.get_node(node_id), now="t")
     # Approve ONLY the upgrade: reclaims are intentionally not presence-gated, so leaving
     # one approved here would mask what this test is checking.
-    up = next(p for p in store.list_proposals("pending") if p["kind"] == "upgrade")
-    store.decide_proposal(up["id"], "approved", "t")
+    up = next(p for p in store.list_proposals("pending") if p.kind == "upgrade")
+    store.decide_proposal(up.id, "approved", "t")
 
     assert next_action(store, store.get_node(node_id), mode="active") is None
     assert next_action(store, store.get_node(node_id), mode="away") is not None
@@ -74,7 +74,7 @@ def test_dedicated_node_may_install_while_active(store):
     node_id = _enrolled(store, profile="dedicated")
     scan_node(store, store.get_node(node_id), now="t")
     for p in store.list_proposals("pending"):
-        store.decide_proposal(p["id"], "approved", "t")
+        store.decide_proposal(p.id, "approved", "t")
     assert next_action(store, store.get_node(node_id), mode="active") is not None
 
 
@@ -91,23 +91,23 @@ def test_only_approved_proposals_become_actions(store):
 def test_action_carries_registry_ref_and_source(store):
     node_id = _enrolled(store)
     scan_node(store, store.get_node(node_id), now="t")
-    up = next(p for p in store.list_proposals("pending") if p["kind"] == "upgrade")
-    store.decide_proposal(up["id"], "approved", "t")
+    up = next(p for p in store.list_proposals("pending") if p.kind == "upgrade")
+    store.decide_proposal(up.id, "approved", "t")
 
     action = next_action(store, store.get_node(node_id), mode="away")
     assert action["kind"] == "install"
-    assert action["proposal_id"] == up["id"]
+    assert action["proposal_id"] == up.id
     assert action["registry_ref"] and action["source"] == "ollama"
 
 
 def test_reclaim_becomes_a_remove_action_even_when_active(store):
     node_id = _enrolled(store)
     scan_node(store, store.get_node(node_id), now="t")
-    rec = next(p for p in store.list_proposals("pending") if p["kind"] == "reclaim")
-    store.decide_proposal(rec["id"], "approved", "t")
+    rec = next(p for p in store.list_proposals("pending") if p.kind == "reclaim")
+    store.decide_proposal(rec.id, "approved", "t")
     # Freeing disk is cheap, so it isn't presence-gated (but `paused` still means stop).
     act = next_action(store, store.get_node(node_id), mode="active")
-    assert act["kind"] == "remove" and act["artifact"] == rec["artifact"]
+    assert act["kind"] == "remove" and act["artifact"] == rec.artifact
     assert next_action(store, store.get_node(node_id), mode="paused") is None
 
 
@@ -116,31 +116,31 @@ def test_reclaim_becomes_a_remove_action_even_when_active(store):
 def test_successful_install_marks_applied_and_demands_reeval(store):
     node_id = _enrolled(store)
     scan_node(store, store.get_node(node_id), now="t")
-    up = next(p for p in store.list_proposals("pending") if p["kind"] == "upgrade")
-    store.decide_proposal(up["id"], "approved", "t")
+    up = next(p for p in store.list_proposals("pending") if p.kind == "upgrade")
+    store.decide_proposal(up.id, "approved", "t")
 
     notes = apply_action_result(store, node_id,
-                               ActionResult(proposal_id=up["id"], ok=True), now="t")
-    assert store.get_proposal(up["id"])["status"] == "applied"
+                               ActionResult(proposal_id=up.id, ok=True), now="t")
+    assert store.get_proposal(up.id).status == "applied"
     # A freshly installed artifact has no measured ability — it must not inherit one.
-    reevals = [p for p in store.list_proposals() if p["kind"] == "reeval"]
-    assert any(p["artifact"] == up["artifact"] for p in reevals)
+    reevals = [p for p in store.list_proposals() if p.kind == "reeval"]
+    assert any(p.artifact == up.artifact for p in reevals)
     assert any("unmeasured" in n for n in notes)
-    assert store.get_ability(up["artifact"], "reason", SCALE_VERSION) is None
+    assert store.get_ability(up.artifact, "reason", SCALE_VERSION) is None
 
 
 def test_failed_install_marks_failed_and_does_not_reeval(store):
     node_id = _enrolled(store)
     scan_node(store, store.get_node(node_id), now="t")
-    up = next(p for p in store.list_proposals("pending") if p["kind"] == "upgrade")
-    store.decide_proposal(up["id"], "approved", "t")
+    up = next(p for p in store.list_proposals("pending") if p.kind == "upgrade")
+    store.decide_proposal(up.id, "approved", "t")
 
     notes = apply_action_result(
         store, node_id,
-        ActionResult(proposal_id=up["id"], ok=False, error="disk full"), now="t")
-    assert store.get_proposal(up["id"])["status"] == "failed"
+        ActionResult(proposal_id=up.id, ok=False, error="disk full"), now="t")
+    assert store.get_proposal(up.id).status == "failed"
     assert any("disk full" in n for n in notes)
-    assert not [p for p in store.list_proposals() if p["kind"] == "reeval"]
+    assert not [p for p in store.list_proposals() if p.kind == "reeval"]
 
 
 def test_unknown_proposal_result_is_ignored(store):
@@ -151,12 +151,12 @@ def test_unknown_proposal_result_is_ignored(store):
 def test_applied_proposal_is_not_reissued(store):
     node_id = _enrolled(store)
     scan_node(store, store.get_node(node_id), now="t")
-    up = next(p for p in store.list_proposals("pending") if p["kind"] == "upgrade")
-    store.decide_proposal(up["id"], "approved", "t")
-    apply_action_result(store, node_id, ActionResult(proposal_id=up["id"], ok=True), now="t")
+    up = next(p for p in store.list_proposals("pending") if p.kind == "upgrade")
+    store.decide_proposal(up.id, "approved", "t")
+    apply_action_result(store, node_id, ActionResult(proposal_id=up.id, ok=True), now="t")
 
     nxt = next_action(store, store.get_node(node_id), mode="away")
-    assert nxt is None or nxt["proposal_id"] != up["id"]
+    assert nxt is None or nxt["proposal_id"] != up.id
 
 
 # --- through the API --------------------------------------------------------

@@ -24,10 +24,15 @@ from sqlmodel import SQLModel
 
 from clusterbuck import migrate
 from clusterbuck.db import make_engine
+from clusterbuck.orm.ability import Ability
 from clusterbuck.orm.attention_lease import AttentionLease
+from clusterbuck.orm.catalog_entry import CatalogEntry
+from clusterbuck.orm.eval_run import EvalRun
 from clusterbuck.orm.job import Job
 from clusterbuck.orm.join_token import JoinToken
 from clusterbuck.orm.node import Node
+from clusterbuck.orm.node_model import NodeModel
+from clusterbuck.orm.proposal import Proposal
 from clusterbuck.orm.reservation import Reservation
 from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
 
@@ -88,7 +93,9 @@ def _build_legacy_database(db_path) -> None:
         conn.close()
     SQLModel.metadata.create_all(engine, tables=[
         Job.__table__, Reservation.__table__, Node.__table__,
-        JoinToken.__table__, AttentionLease.__table__,
+        JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
+        NodeModel.__table__, Proposal.__table__, Ability.__table__,
+        EvalRun.__table__,
     ])
     conn = sqlite3.connect(str(db_path), timeout=5.0)
     conn.row_factory = sqlite3.Row

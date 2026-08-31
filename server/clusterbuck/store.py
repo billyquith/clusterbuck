@@ -16,91 +16,22 @@ from sqlmodel import Session, SQLModel, select
 
 from . import migrate
 from .db import make_engine
+from .orm.ability import Ability
 from .orm.attention_lease import AttentionLease
+from .orm.catalog_entry import CatalogEntry
+from .orm.eval_run import EvalRun
 from .orm.job import Job
 from .orm.join_token import JoinToken
 from .orm.node import Node
+from .orm.node_model import NodeModel
+from .orm.proposal import Proposal
 from .orm.reservation import Reservation
 
-# `jobs` moved to orm/job.py (SQLModel) — the first domain off raw sqlite3. See that
-# module's docstring, and store.py's own docstring history in git, for why. Its table is
-# created via `SQLModel.metadata.create_all` in `Store.__init__`, not this DDL string.
+# Every other table has moved to orm/*.py (SQLModel) — see clusterbuck/orm/job.py's
+# docstring for why. `usage` is the one holdout: `jobs_awaiting_usage` joins it against
+# `jobs`, which is itself ORM-managed, so migrating `usage` cleanly means addressing that
+# join too — left as its own slice rather than bundled in here.
 _SCHEMA = """
--- Model catalog (fleet-management.md → Model catalog): curated known-good artifacts with
--- the metadata the "fits" gate needs. `expected_ability` is an admin-curated hint used only
--- to RANK proposals — the real gate is measured ability after install (ADR 15).
-CREATE TABLE IF NOT EXISTS catalog (
-    artifact         TEXT PRIMARY KEY,
-    family           TEXT,
-    params_b         REAL,
-    quant            TEXT,
-    size_gb          REAL NOT NULL,
-    min_ram_gb       REAL NOT NULL,
-    source           TEXT NOT NULL,     -- model-manager that can install it (e.g. ollama)
-    registry_ref     TEXT NOT NULL,     -- what to ask the model manager to pull
-    expected_ability REAL,
-    added_at         TEXT NOT NULL
-);
-
--- What each node's model server actually reports having, with digests, so an artifact
--- changing upstream is detectable (ADR 15: a new digest is a NEW artifact).
-CREATE TABLE IF NOT EXISTS node_models (
-    node_id    TEXT NOT NULL,
-    artifact   TEXT NOT NULL,
-    digest     TEXT,
-    first_seen TEXT NOT NULL,
-    last_seen  TEXT NOT NULL,
-    PRIMARY KEY (node_id, artifact)
-);
-
--- Planner proposals (fleet-management.md): SUGGESTIONS, never silent changes. Multi-GB
--- weights are never fetched without a human decision (per-node auto_approve is opt-in).
-CREATE TABLE IF NOT EXISTS proposals (
-    id         TEXT PRIMARY KEY,
-    kind       TEXT NOT NULL,           -- upgrade | reeval | reclaim
-    node_id    TEXT NOT NULL,
-    artifact   TEXT NOT NULL,
-    incumbent  TEXT,
-    task_class TEXT,
-    rationale  TEXT NOT NULL,
-    status     TEXT NOT NULL,           -- pending | approved | denied | applied | failed
-    created_at TEXT NOT NULL,
-    decided_at TEXT
-);
-
--- Ability matrix (ADR 15 / model-evaluation.md): ability(artifact, task_class) on an
--- anchored 1-10 scale, versioned. artifact = model + quantisation. Stored data the router
--- reads; tier-1 programmatic eval writes it.
-CREATE TABLE IF NOT EXISTS ability (
-    artifact      TEXT NOT NULL,
-    task_class    TEXT NOT NULL,
-    score         REAL NOT NULL,
-    scale_version TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    -- 'seed' = an anchored placeholder so routing works before anything is measured;
-    -- 'measured' = earned from a real eval run. Seeds must never look measured, or the
-    -- fleet's own models are exempted from evaluation forever.
-    provenance    TEXT NOT NULL DEFAULT 'measured',
-    PRIMARY KEY (artifact, task_class, scale_version)
-);
-
--- Eval runs (M7): one row per dispatched tier-1 eval item. Evals are ordinary jobs on the
--- fleet (model-evaluation.md — "the harness is just another client"), so this table is what
--- correlates a job back to the item it was measuring.
-CREATE TABLE IF NOT EXISTS eval_runs (
-    job_id      TEXT PRIMARY KEY,
-    artifact    TEXT NOT NULL,
-    task_class  TEXT NOT NULL,
-    item_index  INTEGER NOT NULL,
-    result_key  TEXT NOT NULL,
-    state       TEXT NOT NULL DEFAULT 'pending',   -- pending | scored | failed
-    passed      INTEGER,                            -- 1/0 once scored
-    created_at  TEXT NOT NULL
-);
-
--- `attention_leases`, `join_tokens`, and `nodes` moved to orm/*.py (SQLModel), same as
--- `jobs` and `reservations` — see clusterbuck/orm/job.py's docstring.
-
 -- Usage metering (fleet-management.md → Usage accounting): METADATA ONLY. No prompt or
 -- completion text ever lands here; `outcome` is a status enum, not the error string
 -- (errors can echo input). One row per job (PRIMARY KEY) ⇒ capture is idempotent.
@@ -118,8 +49,6 @@ CREATE TABLE IF NOT EXISTS usage (
     day          TEXT NOT NULL     -- YYYY-MM-DD, for rollups
 );
 """
-# `reservations` moved to orm/reservation.py (SQLModel), same as `jobs` — see that
-# module's docstring.
 
 # Columns added after a table's initial schema; applied to pre-existing dev DBs.
 # {table: {column: ALTER statement}}
@@ -188,7 +117,9 @@ class Store:
             c.executescript(_SCHEMA)
         SQLModel.metadata.create_all(self._engine, tables=[
             Job.__table__, Reservation.__table__, Node.__table__,
-            JoinToken.__table__, AttentionLease.__table__,
+            JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
+            NodeModel.__table__, Proposal.__table__, Ability.__table__,
+            EvalRun.__table__,
         ])
         with self._conn() as c:
             for table, columns in _MIGRATIONS.items():
@@ -358,34 +289,38 @@ class Store:
     def set_ability(self, *, artifact: str, task_class: str, score: float,
                     scale_version: str, updated_at: str,
                     provenance: str = "measured") -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO ability "
-                "(artifact, task_class, score, scale_version, updated_at, provenance) "
-                "VALUES (?,?,?,?,?,?) ON CONFLICT(artifact, task_class, scale_version) "
-                "DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at, "
-                "provenance = excluded.provenance",
-                (artifact, task_class, score, scale_version, updated_at, provenance),
-            )
+        with self._session() as s:
+            key = (artifact, task_class, scale_version)
+            row = s.get(Ability, key)
+            if row is None:
+                row = Ability(artifact=artifact, task_class=task_class, score=score,
+                              scale_version=scale_version, updated_at=updated_at,
+                              provenance=provenance)
+            else:
+                row.score = score
+                row.updated_at = updated_at
+                row.provenance = provenance
+            s.add(row)
+            s.commit()
 
     def ability_provenance(self, artifact: str, task_class: str,
                            scale_version: str) -> str | None:
-        with self._conn() as c:
-            row = c.execute(
-                "SELECT provenance FROM ability WHERE artifact = ? AND task_class = ? "
-                "AND scale_version = ?", (artifact, task_class, scale_version),
-            ).fetchone()
-            return row["provenance"] if row else None
+        with self._session() as s:
+            row = s.get(Ability, (artifact, task_class, scale_version))
+            return row.provenance if row else None
 
     def clear_ability(self, artifact: str, scale_version: str) -> int:
         """Drop an artifact's scores so it must be re-measured (ADR 15: a changed digest is
         a NEW artifact and inherits nothing). Returns rows removed."""
-        with self._conn() as c:
-            cur = c.execute(
-                "DELETE FROM ability WHERE artifact = ? AND scale_version = ?",
-                (artifact, scale_version),
+        with self._session() as s:
+            stmt = select(Ability).where(
+                Ability.artifact == artifact, Ability.scale_version == scale_version
             )
-            return cur.rowcount
+            rows = list(s.exec(stmt))
+            for row in rows:
+                s.delete(row)
+            s.commit()
+            return len(rows)
 
     def failed_eval_runs(self, artifact: str, task_class: str) -> int:
         with self._conn() as c:
@@ -396,22 +331,18 @@ class Store:
             ).fetchone()["n"]
 
     def get_ability(self, artifact: str, task_class: str, scale_version: str) -> float | None:
-        with self._conn() as c:
-            row = c.execute(
-                "SELECT score FROM ability WHERE artifact = ? AND task_class = ? "
-                "AND scale_version = ?",
-                (artifact, task_class, scale_version),
-            ).fetchone()
-            return float(row["score"]) if row else None
+        with self._session() as s:
+            row = s.get(Ability, (artifact, task_class, scale_version))
+            return float(row.score) if row else None
 
-    def ability_matrix(self, scale_version: str) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT artifact, task_class, score, provenance FROM ability "
-                "WHERE scale_version = ? "
-                "ORDER BY artifact, task_class",
-                (scale_version,),
-            ).fetchall()
+    def ability_matrix(self, scale_version: str) -> list[Ability]:
+        with self._session() as s:
+            stmt = (
+                select(Ability)
+                .where(Ability.scale_version == scale_version)
+                .order_by(Ability.artifact, Ability.task_class)
+            )
+            return list(s.exec(stmt))
 
     # --- catalog / observed models / proposals (M6b) ---
 
@@ -419,22 +350,31 @@ class Store:
                        quant: str | None, size_gb: float, min_ram_gb: float, source: str,
                        registry_ref: str, expected_ability: float | None,
                        added_at: str) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO catalog (artifact, family, params_b, quant, size_gb, "
-                "min_ram_gb, source, registry_ref, expected_ability, added_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(artifact) DO UPDATE SET "
-                "family=excluded.family, params_b=excluded.params_b, quant=excluded.quant, "
-                "size_gb=excluded.size_gb, min_ram_gb=excluded.min_ram_gb, "
-                "source=excluded.source, registry_ref=excluded.registry_ref, "
-                "expected_ability=excluded.expected_ability",
-                (artifact, family, params_b, quant, size_gb, min_ram_gb, source,
-                 registry_ref, expected_ability, added_at),
-            )
+        with self._session() as s:
+            row = s.get(CatalogEntry, artifact)
+            if row is None:
+                row = CatalogEntry(
+                    artifact=artifact, family=family, params_b=params_b, quant=quant,
+                    size_gb=size_gb, min_ram_gb=min_ram_gb, source=source,
+                    registry_ref=registry_ref, expected_ability=expected_ability,
+                    added_at=added_at,
+                )
+            else:
+                row.family = family
+                row.params_b = params_b
+                row.quant = quant
+                row.size_gb = size_gb
+                row.min_ram_gb = min_ram_gb
+                row.source = source
+                row.registry_ref = registry_ref
+                row.expected_ability = expected_ability
+            s.add(row)
+            s.commit()
 
-    def list_catalog(self) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute("SELECT * FROM catalog ORDER BY min_ram_gb, artifact").fetchall()
+    def list_catalog(self) -> list[CatalogEntry]:
+        with self._session() as s:
+            stmt = select(CatalogEntry).order_by(CatalogEntry.min_ram_gb, CatalogEntry.artifact)
+            return list(s.exec(stmt))
 
     def catalog_count(self) -> int:
         with self._conn() as c:
@@ -445,91 +385,92 @@ class Store:
         """Record what a node reports having. Returns (artifact, old_digest, new_digest)
         for artifacts whose digest CHANGED — i.e. the artifact was updated upstream."""
         changed: list[tuple[str, str | None, str | None]] = []
-        with self._conn() as c:
+        with self._session() as s:
             for artifact, digest in artifacts.items():
-                row = c.execute(
-                    "SELECT digest FROM node_models WHERE node_id = ? AND artifact = ?",
-                    (node_id, artifact),
-                ).fetchone()
+                row = s.get(NodeModel, (node_id, artifact))
                 if row is None:
-                    c.execute(
-                        "INSERT INTO node_models (node_id, artifact, digest, first_seen, "
-                        "last_seen) VALUES (?,?,?,?,?)",
-                        (node_id, artifact, digest, now, now),
-                    )
+                    s.add(NodeModel(node_id=node_id, artifact=artifact, digest=digest,
+                                    first_seen=now, last_seen=now))
                 else:
-                    old = row["digest"]
+                    old = row.digest
                     if digest is not None and old is not None and digest != old:
                         changed.append((artifact, old, digest))
-                    c.execute(
-                        "UPDATE node_models SET digest = COALESCE(?, digest), last_seen = ? "
-                        "WHERE node_id = ? AND artifact = ?",
-                        (digest, now, node_id, artifact),
-                    )
+                    row.digest = digest if digest is not None else row.digest
+                    row.last_seen = now
+                    s.add(row)
+            s.commit()
         return changed
 
-    def node_models(self, node_id: str) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT * FROM node_models WHERE node_id = ? ORDER BY artifact", (node_id,)
-            ).fetchall()
+    def node_models(self, node_id: str) -> list[NodeModel]:
+        with self._session() as s:
+            stmt = (
+                select(NodeModel)
+                .where(NodeModel.node_id == node_id)
+                .order_by(NodeModel.artifact)
+            )
+            return list(s.exec(stmt))
 
     def insert_proposal(self, *, id: str, kind: str, node_id: str, artifact: str,
                         incumbent: str | None, task_class: str | None, rationale: str,
                         status: str, created_at: str) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO proposals (id, kind, node_id, artifact, incumbent, task_class, "
-                "rationale, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (id, kind, node_id, artifact, incumbent, task_class, rationale, status,
-                 created_at),
-            )
+        with self._session() as s:
+            s.add(Proposal(
+                id=id, kind=kind, node_id=node_id, artifact=artifact, incumbent=incumbent,
+                task_class=task_class, rationale=rationale, status=status,
+                created_at=created_at,
+            ))
+            s.commit()
 
     def open_proposal_exists(self, *, kind: str, node_id: str, artifact: str) -> bool:
         """True if an undecided/approved proposal already covers this — keeps the scan
         idempotent so a repeating tick can't spam duplicates."""
-        with self._conn() as c:
-            row = c.execute(
-                "SELECT 1 FROM proposals WHERE kind = ? AND node_id = ? AND artifact = ? "
-                "AND status IN ('pending', 'approved') LIMIT 1",
-                (kind, node_id, artifact),
-            ).fetchone()
-            return row is not None
+        with self._session() as s:
+            stmt = select(Proposal).where(
+                Proposal.kind == kind, Proposal.node_id == node_id,
+                Proposal.artifact == artifact,
+                Proposal.status.in_(["pending", "approved"]),
+            ).limit(1)
+            return s.exec(stmt).first() is not None
 
-    def list_proposals(self, status: str | None = None) -> list[sqlite3.Row]:
-        with self._conn() as c:
+    def list_proposals(self, status: str | None = None) -> list[Proposal]:
+        with self._session() as s:
+            stmt = select(Proposal)
             if status:
-                return c.execute(
-                    "SELECT * FROM proposals WHERE status = ? ORDER BY created_at DESC",
-                    (status,),
-                ).fetchall()
-            return c.execute("SELECT * FROM proposals ORDER BY created_at DESC").fetchall()
+                stmt = stmt.where(Proposal.status == status)
+            stmt = stmt.order_by(Proposal.created_at.desc())
+            return list(s.exec(stmt))
 
-    def get_proposal(self, id: str) -> sqlite3.Row | None:
-        with self._conn() as c:
-            return c.execute("SELECT * FROM proposals WHERE id = ?", (id,)).fetchone()
+    def get_proposal(self, id: str) -> Proposal | None:
+        with self._session() as s:
+            return s.get(Proposal, id)
 
     def decide_proposal(self, id: str, status: str, decided_at: str) -> bool:
         """Approve/deny a pending proposal. False if it wasn't pending (already decided)."""
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE proposals SET status = ?, decided_at = ? "
-                "WHERE id = ? AND status = 'pending'",
-                (status, decided_at, id),
-            )
-            return cur.rowcount > 0
+        with self._session() as s:
+            row = s.get(Proposal, id)
+            if row is None or row.status != "pending":
+                return False
+            row.status = status
+            row.decided_at = decided_at
+            s.add(row)
+            s.commit()
+            return True
 
     def set_proposal_status(self, id: str, status: str) -> None:
-        with self._conn() as c:
-            c.execute("UPDATE proposals SET status = ? WHERE id = ?", (status, id))
+        with self._session() as s:
+            row = s.get(Proposal, id)
+            if row is not None:
+                row.status = status
+                s.add(row)
+                s.commit()
 
-    def approved_proposals_for_node(self, node_id: str, kind: str) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT * FROM proposals WHERE node_id = ? AND kind = ? AND status = 'approved' "
-                "ORDER BY created_at",
-                (node_id, kind),
-            ).fetchall()
+    def approved_proposals_for_node(self, node_id: str, kind: str) -> list[Proposal]:
+        with self._session() as s:
+            stmt = select(Proposal).where(
+                Proposal.node_id == node_id, Proposal.kind == kind,
+                Proposal.status == "approved",
+            ).order_by(Proposal.created_at)
+            return list(s.exec(stmt))
 
     def set_node_flags(self, node_id: str, *, disk_quota_gb: float | None = None,
                        auto_approve: bool | None = None,
@@ -560,31 +501,41 @@ class Store:
 
     def add_eval_run(self, *, job_id: str, artifact: str, task_class: str,
                      item_index: int, result_key: str, created_at: str) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT OR IGNORE INTO eval_runs "
-                "(job_id, artifact, task_class, item_index, result_key, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (job_id, artifact, task_class, item_index, result_key, created_at),
-            )
+        with self._session() as s:
+            if s.get(EvalRun, job_id) is not None:
+                return  # INSERT OR IGNORE equivalent
+            s.add(EvalRun(
+                job_id=job_id, artifact=artifact, task_class=task_class,
+                item_index=item_index, result_key=result_key, created_at=created_at,
+            ))
+            s.commit()
 
-    def pending_eval_runs(self) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT * FROM eval_runs WHERE state = 'pending' ORDER BY created_at"
-            ).fetchall()
+    def pending_eval_runs(self) -> list[EvalRun]:
+        with self._session() as s:
+            stmt = (
+                select(EvalRun)
+                .where(EvalRun.state == "pending")
+                .order_by(EvalRun.created_at)
+            )
+            return list(s.exec(stmt))
 
     def score_eval_run(self, job_id: str, passed: bool) -> None:
-        with self._conn() as c:
-            c.execute(
-                "UPDATE eval_runs SET state = 'scored', passed = ? WHERE job_id = ?",
-                (1 if passed else 0, job_id),
-            )
+        with self._session() as s:
+            row = s.get(EvalRun, job_id)
+            if row is not None:
+                row.state = "scored"
+                row.passed = 1 if passed else 0
+                s.add(row)
+                s.commit()
 
     def fail_eval_run(self, job_id: str) -> None:
         """The job itself failed/expired — the item yields no signal, so don't score it."""
-        with self._conn() as c:
-            c.execute("UPDATE eval_runs SET state = 'failed' WHERE job_id = ?", (job_id,))
+        with self._session() as s:
+            row = s.get(EvalRun, job_id)
+            if row is not None:
+                row.state = "failed"
+                s.add(row)
+                s.commit()
 
     def eval_progress(self, artifact: str, task_class: str) -> tuple[int, int, int, int]:
         """(pending, scored, passed, failed) for one (artifact, task_class) batch.

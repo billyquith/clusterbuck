@@ -264,13 +264,13 @@ def create_app(
     async def get_ability() -> dict:
         """The ability matrix + a per-artifact headline scalar (ADR 15/16)."""
         rows = app.state.store.ability_matrix(SCALE_VERSION)
-        matrix = [{"artifact": r["artifact"], "task_class": r["task_class"],
-                   "score": r["score"]} for r in rows]
+        matrix = [{"artifact": r.artifact, "task_class": r.task_class,
+                   "score": r.score} for r in rows]
         # Headline scalar per artifact = mean over its measured task classes (equal-weight
         # for now; a workload-weighted headline is the documented refinement).
         by_artifact: dict[str, list[float]] = {}
         for r in rows:
-            by_artifact.setdefault(r["artifact"], []).append(r["score"])
+            by_artifact.setdefault(r.artifact, []).append(r.score)
         headline = {a: round(sum(s) / len(s), 1) for a, s in by_artifact.items()}
         return {"scale_version": SCALE_VERSION, "task_classes": TASK_CLASSES,
                 "matrix": matrix, "headline": headline}
@@ -643,19 +643,19 @@ def create_app(
     @app.get("/catalog")
     async def get_catalog() -> dict:
         return {"artifacts": [
-            {"artifact": r["artifact"], "family": r["family"], "params_b": r["params_b"],
-             "quant": r["quant"], "size_gb": r["size_gb"], "min_ram_gb": r["min_ram_gb"],
-             "source": r["source"], "registry_ref": r["registry_ref"],
-             "expected_ability": r["expected_ability"]}
+            {"artifact": r.artifact, "family": r.family, "params_b": r.params_b,
+             "quant": r.quant, "size_gb": r.size_gb, "min_ram_gb": r.min_ram_gb,
+             "source": r.source, "registry_ref": r.registry_ref,
+             "expected_ability": r.expected_ability}
             for r in app.state.store.list_catalog()]}
 
     @app.get("/proposals")
     async def get_proposals(status: str | None = None) -> dict:
         return {"proposals": [
-            {"id": r["id"], "kind": r["kind"], "node_id": r["node_id"],
-             "artifact": r["artifact"], "task_class": r["task_class"],
-             "rationale": r["rationale"], "status": r["status"],
-             "created_at": r["created_at"], "decided_at": r["decided_at"]}
+            {"id": r.id, "kind": r.kind, "node_id": r.node_id,
+             "artifact": r.artifact, "task_class": r.task_class,
+             "rationale": r.rationale, "status": r.status,
+             "created_at": r.created_at, "decided_at": r.decided_at}
             for r in app.state.store.list_proposals(status)]}
 
     @app.post("/proposals/scan")
@@ -679,7 +679,7 @@ def create_app(
         if not store.decide_proposal(proposal_id, status, _now_iso()):
             raise HTTPException(status_code=409, detail="proposal already decided")
         row = store.get_proposal(proposal_id)
-        return {"id": row["id"], "status": row["status"], "decided_at": row["decided_at"]}
+        return {"id": row.id, "status": row.status, "decided_at": row.decided_at}
 
     @app.post("/nodes/{node_id}/policy")
     async def set_node_policy(node_id: str, body: NodePolicy) -> dict:

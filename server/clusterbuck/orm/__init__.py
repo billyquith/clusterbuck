@@ -6,10 +6,18 @@ Alembic autogenerate, see `server/migrations/env.py`) knows about its table.
 
 from __future__ import annotations
 
+from .ability import Ability
 from .attention_lease import AttentionLease
+from .catalog_entry import CatalogEntry
+from .eval_run import EvalRun
 from .job import Job
 from .join_token import JoinToken
 from .node import Node
+from .node_model import NodeModel
+from .proposal import Proposal
 from .reservation import Reservation
 
-__all__ = ["AttentionLease", "Job", "JoinToken", "Node", "Reservation"]
+__all__ = [
+    "Ability", "AttentionLease", "CatalogEntry", "EvalRun", "Job", "JoinToken",
+    "Node", "NodeModel", "Proposal", "Reservation",
+]
