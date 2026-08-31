@@ -148,6 +148,28 @@ def test_unknown_proposal_result_is_ignored(store):
                                ActionResult(proposal_id="prop_nope", ok=True), now="t") == []
 
 
+def test_a_node_cannot_report_on_another_nodes_proposal(store):
+    """The heartbeat proves WHICH node is speaking (node_key), but the proposal id is just a
+    string in the body. Unchecked, any enrolled node could mark another node's approved
+    install `applied` — recording an install that never happened and triggering a re-eval for
+    it — or `failed`, cancelling one that was approved."""
+    owner = _enrolled(store)
+    scan_node(store, store.get_node(owner), now="t")
+    up = next(p for p in store.list_proposals("pending") if p.kind == "upgrade")
+    store.decide_proposal(up.id, "approved", "t")
+
+    assert apply_action_result(store, "node-somebody-else",
+                               ActionResult(proposal_id=up.id, ok=True), now="t") == []
+    assert store.get_proposal(up.id).status == "approved", \
+        "another node's report must not advance this proposal"
+    assert not [p for p in store.list_proposals() if p.kind == "reeval"]
+
+    # The owning node still can.
+    assert apply_action_result(store, owner,
+                               ActionResult(proposal_id=up.id, ok=True), now="t")
+    assert store.get_proposal(up.id).status == "applied"
+
+
 def test_applied_proposal_is_not_reissued(store):
     node_id = _enrolled(store)
     scan_node(store, store.get_node(node_id), now="t")

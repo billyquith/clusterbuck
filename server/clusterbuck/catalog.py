@@ -230,6 +230,16 @@ def apply_action_result(store: Store, node_id: str, result, *, now: str) -> list
     prop = store.get_proposal(result.proposal_id)
     if prop is None:
         return notes
+    # A node may only report on its OWN actions. The heartbeat proves which node is
+    # speaking (node_key), but the proposal id is just a string in the body — unchecked, any
+    # enrolled node could mark another node's install `applied` (recording an install that
+    # never happened, and triggering a re-eval proposal for it) or `failed` (cancelling one
+    # that was approved). Nodes are not adversaries here, but a confused or restored-from-
+    # backup node reporting a stale proposal_id is entirely ordinary.
+    if prop.node_id != node_id:
+        _log.warning("node %s reported on proposal %s, which belongs to %s — ignored",
+                     node_id, prop.id, prop.node_id)
+        return notes
     if not result.ok:
         store.set_proposal_status(prop.id, "failed")
         notes.append(f"{prop.artifact}: {prop.kind} failed — {result.error}")

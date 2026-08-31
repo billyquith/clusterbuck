@@ -116,3 +116,22 @@ async def test_url_is_built_from_the_openai_base():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         await ModelClient(http, cfg).complete(_job(prompt="x"))
     assert seen == ["http://localhost:11434/v1/chat/completions"]
+
+
+async def test_params_cannot_hijack_the_request_envelope():
+    """`params` is forwarded verbatim so the worker stays out of the way of whatever the
+    model server supports — but not the three keys that are the envelope rather than an
+    inference knob. `stream` is the one that bites: this path reads a single JSON body, so a
+    streamed response fails to parse and the job comes back `failed` for what the client
+    meant as a preference."""
+    transport, seen = _capture()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ModelClient(http, WorkerConfig(model_name="cfg-model")).complete(_job(
+            prompt="ping",
+            params={"stream": True, "messages": [{"role": "user", "content": "hijacked"}],
+                    "response_format": "json_object", "temperature": 0.2}))
+    sent = seen[0]
+    assert sent["stream"] is False
+    assert sent["messages"] == [{"role": "user", "content": "ping"}]
+    assert "response_format" not in sent
+    assert sent["temperature"] == 0.2      # real params still pass straight through

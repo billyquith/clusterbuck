@@ -126,5 +126,11 @@ def admin_headers() -> dict[str, str]:
     return {"X-CBK-Api-Key": key} if key else {}
 
 
+# Must match the coordinator's own default (server/clusterbuck/__main__.py → DEFAULT_PORT).
+# The two drifted once already: the docs and installers moved to 8018 while both code
+# defaults stayed on 8000, so an un-configured `cbk submit` talked to the wrong port.
+DEFAULT_SERVER_URL = "http://localhost:8018"
+
+
 def server_url(cli_value: str | None = None) -> str:
-    return (cli_value or os.environ.get("CBK_SERVER_URL") or "http://localhost:8000").rstrip("/")
+    return (cli_value or os.environ.get("CBK_SERVER_URL") or DEFAULT_SERVER_URL).rstrip("/")

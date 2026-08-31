@@ -13,6 +13,16 @@ import httpx
 from .config import WorkerConfig
 from .models import Job
 
+# `params` is forwarded verbatim so the worker stays out of the way of whatever the model
+# server supports — but three keys are the request envelope, not inference parameters, and
+# letting a job set them breaks the loop rather than tuning it:
+#
+#   stream    — this path reads one JSON body; a streamed response fails to parse, so the
+#               job returns `failed` for a param the client meant as a preference.
+#   messages  — assembled above from the job's own messages/prompt.
+#   response_format — a hint only (protocols.md §3), deliberately not passed on.
+_PARAMS_NOT_FORWARDED = {"stream", "messages", "response_format"}
+
 
 class ModelClient:
     def __init__(self, client: httpx.AsyncClient, cfg: WorkerConfig) -> None:
@@ -40,8 +50,8 @@ class ModelClient:
         # and the pin arrives in `params`. Setting the configured model afterwards would
         # silently score the wrong model.
         for name, value in (job.params or {}).items():
-            if name == "response_format":
-                continue        # a hint only (protocols.md §3)
+            if name in _PARAMS_NOT_FORWARDED:
+                continue
             request[name] = value
 
         url = self._cfg.model_server_url.rstrip("/") + "/chat/completions"

@@ -137,7 +137,7 @@ def test_operator_key_is_presented_only_when_configured(monkeypatch):
 
 def test_server_url_precedence(monkeypatch):
     _clean(monkeypatch)
-    assert server_url() == "http://localhost:8000"
+    assert server_url() == "http://localhost:8018"
     monkeypatch.setenv("CBK_SERVER_URL", "http://coordinator:8077/")
     assert server_url() == "http://coordinator:8077"
     assert server_url("http://explicit:9000/") == "http://explicit:9000"
