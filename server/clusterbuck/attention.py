@@ -23,7 +23,7 @@ async def attention_tick(store: Store, queue: Queue, *, now: float | None = None
     now = time.time() if now is None else now
     demoted = 0
     for lease in store.expired_attention_leases(now):
-        client_key = lease["client_key"]
+        client_key = lease.client_key
         for job in store.attention_promoted_jobs(client_key):
             # Only demote work that hasn't been served — started/finished stays as-is.
             if await queue.read_result(job.result_key) is None:

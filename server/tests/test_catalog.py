@@ -16,6 +16,7 @@ from clusterbuck.catalog import (
     seed_catalog,
 )
 from clusterbuck.evaluation import SCALE_VERSION, seed_ability
+from clusterbuck.orm.node import Node
 from clusterbuck.store import Store
 
 
@@ -27,17 +28,17 @@ def store(tmp_path) -> Store:
     return s
 
 
-class _Node(dict):
-    """Row-like stand-in (sqlite3.Row is read-only, and tests need to vary fields)."""
-
-
-def _node(**over) -> _Node:
+def _node(**over) -> Node:
+    """A `Node` not persisted through `Store` — `fits`/`scan_node`/`next_action` only
+    read attributes, so building one directly lets tests vary just the fields they
+    care about without an enroll_node() round trip."""
     base = {
-        "node_id": "node-a", "profile": "shared", "ram_gb": 64.0, "disk_quota_gb": None,
-        "auto_approve": 0, "installed": json.dumps(["llama3.2:3b"]),
+        "node_id": "node-a", "node_key": "k", "profile": "shared", "ram_gb": 64.0,
+        "disk_quota_gb": None, "auto_approve": 0, "installed": json.dumps(["llama3.2:3b"]),
+        "enrolled_at": "t",
     }
     base.update(over)
-    return _Node(base)
+    return Node(**base)
 
 
 # --- gate 1: fits ------------------------------------------------------------

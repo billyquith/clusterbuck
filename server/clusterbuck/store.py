@@ -16,7 +16,10 @@ from sqlmodel import Session, SQLModel, select
 
 from . import migrate
 from .db import make_engine
+from .orm.attention_lease import AttentionLease
 from .orm.job import Job
+from .orm.join_token import JoinToken
+from .orm.node import Node
 from .orm.reservation import Reservation
 
 # `jobs` moved to orm/job.py (SQLModel) — the first domain off raw sqlite3. See that
@@ -95,44 +98,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     created_at  TEXT NOT NULL
 );
 
--- Client attention leases (ADR 18 / protocols §9): a client's active-user signal that
--- promotes its waitable backlog; expiry demotes the unstarted promotions gracefully.
-CREATE TABLE IF NOT EXISTS attention_leases (
-    client_key  TEXT PRIMARY KEY,
-    scope       TEXT,             -- json array of task_class, or null (all)
-    expires_at  REAL NOT NULL
-);
-
--- Dynamic registry (ADR 9): nodes self-enroll and heartbeat; fleet.yaml is only the seed.
-CREATE TABLE IF NOT EXISTS join_tokens (
-    token       TEXT PRIMARY KEY,
-    created_at  TEXT NOT NULL,
-    used        INTEGER NOT NULL DEFAULT 0,
-    used_by     TEXT
-);
-
-CREATE TABLE IF NOT EXISTS nodes (
-    node_id        TEXT PRIMARY KEY,
-    node_key       TEXT NOT NULL,
-    hostname       TEXT, os TEXT, arch TEXT,
-    ram_gb         REAL, accelerator TEXT, vram_gb REAL, disk_free_gb REAL, bench_tps_small REAL,
-    profile        TEXT,
-    capabilities   TEXT,          -- json array
-    disk_quota_gb  REAL,          -- owner's contract for model storage (profile-derived)
-    auto_approve   INTEGER NOT NULL DEFAULT 0,  -- opt-in: install without asking a human
-    auto_update    INTEGER NOT NULL DEFAULT 0,  -- opt-in: apply a signed worker update
-    mode           TEXT,
-    installed      TEXT, loaded TEXT, queues TEXT,  -- json arrays
-    jobs_done      INTEGER DEFAULT 0,
-    tps            REAL,
-    last_heartbeat TEXT,
-    agent_version  TEXT,          -- the worker's build-stamped release version
-    agent_flavour  TEXT,          -- python (or dotnet for legacy nodes): which artifact it can execute
-    protocol_version INTEGER,     -- queue-contract version it speaks
-    fitness        TEXT,          -- ok | stale | quarantine (coordinator's last verdict)
-    fitness_reason TEXT,
-    enrolled_at    TEXT NOT NULL
-);
+-- `attention_leases`, `join_tokens`, and `nodes` moved to orm/*.py (SQLModel), same as
+-- `jobs` and `reservations` — see clusterbuck/orm/job.py's docstring.
 
 -- Usage metering (fleet-management.md → Usage accounting): METADATA ONLY. No prompt or
 -- completion text ever lands here; `outcome` is a status enum, not the error string
@@ -219,9 +186,10 @@ class Store:
 
         with self._conn() as c:
             c.executescript(_SCHEMA)
-        SQLModel.metadata.create_all(
-            self._engine, tables=[Job.__table__, Reservation.__table__]
-        )
+        SQLModel.metadata.create_all(self._engine, tables=[
+            Job.__table__, Reservation.__table__, Node.__table__,
+            JoinToken.__table__, AttentionLease.__table__,
+        ])
         with self._conn() as c:
             for table, columns in _MIGRATIONS.items():
                 existing = {row["name"] for row in c.execute(f"PRAGMA table_info({table})")}
@@ -363,23 +331,27 @@ class Store:
                 s.commit()
 
     def upsert_attention_lease(self, client_key: str, scope: str | None, expires_at: float) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO attention_leases (client_key, scope, expires_at) VALUES (?,?,?) "
-                "ON CONFLICT(client_key) DO UPDATE SET scope = excluded.scope, "
-                "expires_at = excluded.expires_at",
-                (client_key, scope, expires_at),
-            )
+        with self._session() as s:
+            lease = s.get(AttentionLease, client_key)
+            if lease is None:
+                lease = AttentionLease(client_key=client_key, scope=scope, expires_at=expires_at)
+            else:
+                lease.scope = scope
+                lease.expires_at = expires_at
+            s.add(lease)
+            s.commit()
 
     def delete_attention_lease(self, client_key: str) -> None:
-        with self._conn() as c:
-            c.execute("DELETE FROM attention_leases WHERE client_key = ?", (client_key,))
+        with self._session() as s:
+            lease = s.get(AttentionLease, client_key)
+            if lease is not None:
+                s.delete(lease)
+                s.commit()
 
-    def expired_attention_leases(self, now: float) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT client_key FROM attention_leases WHERE expires_at <= ?", (now,)
-            ).fetchall()
+    def expired_attention_leases(self, now: float) -> list[AttentionLease]:
+        with self._session() as s:
+            stmt = select(AttentionLease).where(AttentionLease.expires_at <= now)
+            return list(s.exec(stmt))
 
     # --- ability matrix (M5) ---
 
@@ -562,16 +534,18 @@ class Store:
     def set_node_flags(self, node_id: str, *, disk_quota_gb: float | None = None,
                        auto_approve: bool | None = None,
                        auto_update: bool | None = None) -> None:
-        with self._conn() as c:
+        with self._session() as s:
+            node = s.get(Node, node_id)
+            if node is None:
+                return
             if disk_quota_gb is not None:
-                c.execute("UPDATE nodes SET disk_quota_gb = ? WHERE node_id = ?",
-                          (disk_quota_gb, node_id))
+                node.disk_quota_gb = disk_quota_gb
             if auto_approve is not None:
-                c.execute("UPDATE nodes SET auto_approve = ? WHERE node_id = ?",
-                          (1 if auto_approve else 0, node_id))
+                node.auto_approve = 1 if auto_approve else 0
             if auto_update is not None:
-                c.execute("UPDATE nodes SET auto_update = ? WHERE node_id = ?",
-                          (1 if auto_update else 0, node_id))
+                node.auto_update = 1 if auto_update else 0
+            s.add(node)
+            s.commit()
 
     def models_used_since(self, day: str) -> set[str]:
         """Models that served at least one job on/after `day` (for reclaim proposals)."""
@@ -653,9 +627,9 @@ class Store:
         """(node_id, artifact, node_capabilities) for every artifact observed on a node."""
         out: list[tuple[str, str, list[str]]] = []
         for n in self.list_nodes():
-            caps = json.loads(n["capabilities"] or "[]")
-            for artifact in json.loads(n["installed"] or "[]"):
-                out.append((n["node_id"], artifact, caps))
+            caps = json.loads(n.capabilities or "[]")
+            for artifact in json.loads(n.installed or "[]"):
+                out.append((n.node_id, artifact, caps))
         return out
 
     def ability_count(self, scale_version: str) -> int:
@@ -788,41 +762,42 @@ class Store:
     # --- dynamic registry (M4a) ---
 
     def mint_token(self, token: str, created_at: str) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO join_tokens (token, created_at) VALUES (?, ?)",
-                (token, created_at),
-            )
+        with self._session() as s:
+            s.add(JoinToken(token=token, created_at=created_at))
+            s.commit()
 
     def claim_token(self, token: str, used_by: str) -> bool:
         """Atomically burn a one-time join token. True only on the first claim."""
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE join_tokens SET used = 1, used_by = ? WHERE token = ? AND used = 0",
-                (used_by, token),
-            )
-            return cur.rowcount > 0
+        with self._session() as s:
+            t = s.get(JoinToken, token)
+            if t is None or t.used:
+                return False
+            t.used = 1
+            t.used_by = used_by
+            s.add(t)
+            s.commit()
+            return True
 
     def enroll_node(self, *, node_id: str, node_key: str, req, capabilities: str,
                     enrolled_at: str) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO nodes (node_id, node_key, hostname, os, arch, ram_gb, "
-                "accelerator, vram_gb, disk_free_gb, bench_tps_small, profile, "
-                "capabilities, mode, enrolled_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (node_id, node_key, req.hostname, req.os, req.arch, req.hw.ram_gb,
-                 req.hw.accelerator, req.hw.vram_gb, req.hw.disk_free_gb,
-                 req.hw.bench_tps_small, req.profile, capabilities, "active", enrolled_at),
-            )
+        with self._session() as s:
+            s.add(Node(
+                node_id=node_id, node_key=node_key, hostname=req.hostname, os=req.os,
+                arch=req.arch, ram_gb=req.hw.ram_gb, accelerator=req.hw.accelerator,
+                vram_gb=req.hw.vram_gb, disk_free_gb=req.hw.disk_free_gb,
+                bench_tps_small=req.hw.bench_tps_small, profile=req.profile,
+                capabilities=capabilities, mode="active", enrolled_at=enrolled_at,
+            ))
+            s.commit()
 
-    def get_node(self, node_id: str) -> sqlite3.Row | None:
-        with self._conn() as c:
-            return c.execute("SELECT * FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
+    def get_node(self, node_id: str) -> Node | None:
+        with self._session() as s:
+            return s.get(Node, node_id)
 
-    def list_nodes(self) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute("SELECT * FROM nodes ORDER BY enrolled_at").fetchall()
+    def list_nodes(self) -> list[Node]:
+        with self._session() as s:
+            stmt = select(Node).order_by(Node.enrolled_at)
+            return list(s.exec(stmt))
 
     def record_heartbeat(self, *, node_id: str, mode: str, installed: str, loaded: str,
                          queues: str, jobs_done: int | None, tps: float | None,
@@ -831,17 +806,27 @@ class Store:
                          protocol_version: int | None = None,
                          fitness: str | None = None,
                          fitness_reason: str | None = None) -> bool:
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE nodes SET mode = ?, installed = ?, loaded = ?, queues = ?, "
-                "agent_version = COALESCE(?, agent_version), "
-                "agent_flavour = COALESCE(?, agent_flavour), "
-                "protocol_version = COALESCE(?, protocol_version), "
-                "fitness = ?, fitness_reason = ?, "
-                "jobs_done = COALESCE(?, jobs_done), tps = COALESCE(?, tps), "
-                "last_heartbeat = ? WHERE node_id = ?",
-                (mode, installed, loaded, queues, agent_version, agent_flavour,
-                 protocol_version, fitness, fitness_reason, jobs_done, tps,
-                 last_heartbeat, node_id),
-            )
-            return cur.rowcount > 0
+        with self._session() as s:
+            node = s.get(Node, node_id)
+            if node is None:
+                return False
+            node.mode = mode
+            node.installed = installed
+            node.loaded = loaded
+            node.queues = queues
+            if agent_version is not None:
+                node.agent_version = agent_version
+            if agent_flavour is not None:
+                node.agent_flavour = agent_flavour
+            if protocol_version is not None:
+                node.protocol_version = protocol_version
+            node.fitness = fitness
+            node.fitness_reason = fitness_reason
+            if jobs_done is not None:
+                node.jobs_done = jobs_done
+            if tps is not None:
+                node.tps = tps
+            node.last_heartbeat = last_heartbeat
+            s.add(node)
+            s.commit()
+            return True

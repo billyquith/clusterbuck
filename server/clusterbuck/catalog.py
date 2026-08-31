@@ -81,7 +81,7 @@ def quota_for(profile: str | None, explicit: float | None) -> float:
 
 def fits(candidate, node, quota_gb: float) -> tuple[bool, str]:
     """Gate 1: hardware + the owner's disk contract."""
-    ram = node["ram_gb"] or 0
+    ram = node.ram_gb or 0
     if candidate["min_ram_gb"] > ram:
         return False, f"needs {candidate['min_ram_gb']:g} GB RAM, node has {ram:g}"
     if candidate["size_gb"] > quota_gb:
@@ -98,10 +98,10 @@ def scan_node(store: Store, node, *, now: str, scale_version: str = SCALE_VERSIO
     import json as _json
 
     created: list[str] = []
-    node_id = node["node_id"]
-    installed = set(_json.loads(node["installed"] or "[]"))
-    quota = quota_for(node["profile"], node["disk_quota_gb"])
-    auto = bool(node["auto_approve"])
+    node_id = node.node_id
+    installed = set(_json.loads(node.installed or "[]"))
+    quota = quota_for(node.profile, node.disk_quota_gb)
+    auto = bool(node.auto_approve)
     initial_status = "approved" if auto else "pending"
 
     # --- upgrade: a fitting catalog artifact that would raise ability somewhere ---
@@ -203,7 +203,7 @@ def install_allowed(mode: str, profile: str | None) -> bool:
 
 def next_action(store: Store, node, *, mode: str) -> dict | None:
     """The next approved action this node should carry out, if any is permitted now."""
-    node_id = node["node_id"]
+    node_id = node.node_id
 
     # Removals are cheap and free disk — allowed in any non-paused mode.
     if mode != "paused":
@@ -211,7 +211,7 @@ def next_action(store: Store, node, *, mode: str) -> dict | None:
             return {"proposal_id": prop["id"], "kind": "remove",
                     "artifact": prop["artifact"], "source": "ollama"}
 
-    if not install_allowed(mode, node["profile"]):
+    if not install_allowed(mode, node.profile):
         return None
     for prop in store.approved_proposals_for_node(node_id, "upgrade"):
         cand = next((c for c in store.list_catalog() if c["artifact"] == prop["artifact"]), None)
