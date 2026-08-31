@@ -15,8 +15,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=worker.sh
 source "$REPO/deploy/e2e/worker.sh"
-PORT="${CBK_PORT:-8089}"
-MODEL_PORT="${CBK_MODEL_PORT:-11447}"
+# Ports are per-script and must not collide: ci.sh runs these back to back, and a
+# script that binds a port its predecessor has not released yet ends up talking to
+# the WRONG coordinator. 8089/11447 were auth.sh's and version.sh's.
+PORT="${CBK_PORT:-8091}"
+MODEL_PORT="${CBK_MODEL_PORT:-11448}"
 URL="http://127.0.0.1:$PORT"
 ARTIFACT="llama3.2:3b"
 CAP="8b-extract"
