@@ -63,6 +63,20 @@ def test_routing_explicit_capability_wins(seeded):
                               task_class=None, min_ability=None) == "32b-reason"
 
 
+def test_routing_fails_explicitly_for_unknown_capability(seeded):
+    """A typo'd capability must fail fast (422) rather than park in a stream no worker
+    consumes — the same explicit-failure guarantee need-shaped addressing already gets."""
+    with pytest.raises(NoCapableArtifact, match="unknown capability '70b-genius'"):
+        resolve_capability(_fleet(), seeded, capability="70b-genius",
+                           task_class=None, min_ability=None)
+
+
+def test_routing_fails_explicitly_for_capability_with_no_fleet(seeded):
+    with pytest.raises(NoCapableArtifact, match="no fleet registry is configured"):
+        resolve_capability(None, seeded, capability="8b-extract",
+                           task_class=None, min_ability=None)
+
+
 def test_routing_fails_when_nothing_is_measured(tmp_path):
     """An empty matrix cannot promise an ability floor, so it must refuse rather than guess."""
     empty = Store(str(tmp_path / "empty.db"))  # not seeded
