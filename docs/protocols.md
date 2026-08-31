@@ -285,6 +285,7 @@ the operator shared secret (ADR 26) except where noted.
 | `POST /nodes/{id}/policy` | The owner's contract for a node — `{disk_quota_gb, auto_approve}` as a **JSON body**. `auto_approve` opts that node out of human approval for installs. |
 | `GET /usage` | Metering rollups + the avoided-cloud-spend headline + budget burn (fleet-management.md → Usage accounting). Budget is **displayed, not enforced**. |
 | `GET /ability` | The ability matrix `ability(artifact, task_class)` with its scale version, each row marked `seed` or `measured`, plus a per-artifact headline scalar (ADR 15/16). |
+| `POST /ability/clear?artifact=<name>` | Drop an artifact's scores so the eval harness re-measures it. The heartbeat handler already does this automatically when a model's digest changes (ADR 15); this is the same reset for an operator to trigger by hand when an artifact's behaviour changed without its digest moving (e.g. a model-server config or template edit). |
 | `GET /eval` | Eval-harness state: artifacts still needing measurement, and per-batch progress. |
 | `POST /eval/run` | Run one harness pass now instead of waiting for the coordinator cadence. |
 | `GET /catalog` | Known-good artifacts with the metadata the "fits" gate needs (ADR 25). |
