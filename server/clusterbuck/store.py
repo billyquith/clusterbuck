@@ -1,8 +1,10 @@
-"""SQLite job registry — the durable system of record (Redis stays purely the broker).
+"""`Store`: the SQLite-backed durable system of record (Redis stays purely the broker).
 
-Tracks the id → result_key mapping, the last-known lifecycle state, and the urgency
-trajectory (urgency + escalation deadline) so the escalation engine can promote patient
-work without re-reading the queue payloads.
+One class fronting every table the coordinator persists — jobs, reservations, the
+dynamic fleet registry, the model catalog/proposals/ability/eval-runs cluster, and
+usage metering. Each table is a SQLModel class under `orm/`; this module is the
+repository layer (query/insert/update methods) plus schema bootstrap
+(`Store._ensure_schema`, which hands off to Alembic — see `clusterbuck/migrate.py`).
 """
 
 from __future__ import annotations
