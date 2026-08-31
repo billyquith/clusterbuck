@@ -64,7 +64,7 @@ async def coordinator_loop(
             # Measuring an unmeasured artifact is background work: collect finished eval
             # jobs and dispatch new ones on a slower cadence than the live ticks.
             if ticks % eval_every == 0:
-                await eval_tick(store, queue, now=_now())
+                await eval_tick(store, queue, now=_now(), fleet=fleet)
             # The planner is advisory and compares slow-moving state, so it runs far less
             # often than the latency-sensitive ticks above.
             if ticks % planner_every == 0:

@@ -18,6 +18,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from clusterbuck.api import create_app
+from clusterbuck.fleet import CapabilitySpec, Fleet
+from clusterbuck.sync import build_router
 
 FAKE_SERVER = Path(__file__).resolve().parents[1] / "tools" / "fake_model_server.py"
 
@@ -99,6 +101,34 @@ def test_unknown_capability_errors(sync_client):
         json={"model": "does-not-exist", "messages": [{"role": "user", "content": "x"}]},
     )
     assert resp.status_code == 502
+
+
+# --- registered provider accounts on the sync plane (ADR 30) ---
+
+def test_build_router_excludes_unkeyed_provider_account(monkeypatch):
+    monkeypatch.delenv("CBK_TEST_PROVIDER_KEY", raising=False)
+    fleet = Fleet(capabilities={
+        "claude-sonnet": CapabilitySpec(queue="q:claude-sonnet", model="anthropic/claude-x",
+                                        cloud=True, api_key_env="CBK_TEST_PROVIDER_KEY"),
+    })
+    router = build_router(fleet)
+    assert router is None  # no other capability, and this one has no usable key
+
+
+def test_build_router_includes_keyed_provider_account(monkeypatch):
+    monkeypatch.setenv("CBK_TEST_PROVIDER_KEY", "sk-test-123")
+    fleet = Fleet(capabilities={
+        "claude-sonnet": CapabilitySpec(queue="q:claude-sonnet", model="anthropic/claude-x",
+                                        cloud=True, api_key_env="CBK_TEST_PROVIDER_KEY"),
+    })
+    router = build_router(fleet)
+    assert router is not None
+    params = router.model_list[0]["litellm_params"]
+    # No api_base and no "openai/" prefix: a no-host capability is called natively, not
+    # treated as a local OpenAI-compatible endpoint.
+    assert params["model"] == "anthropic/claude-x"
+    assert params["api_key"] == "sk-test-123"
+    assert params.get("api_base") is None
 
 
 def test_sync_disabled_without_fleet(tmp_path):

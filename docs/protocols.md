@@ -122,6 +122,14 @@ vLLM, or LM Studio interchangeably — the worker only speaks the wire protocol,
 vendor SDK. Local models don't reliably honour structured-output flags, so JSON-shape
 requests are made in the prompt and validated by the client, not assumed here.
 
+If that model server sits behind an authenticated gateway, `CBK_MODEL_SERVER_API_KEY` (node
+env) sends `Authorization: Bearer <key>` on every call. This is node-local config, the same
+trust boundary as `CBK_MODEL_SERVER_URL` — it is **not** how a registered cloud provider
+account is reached (§5, ADR 30): those keys live only on the coordinator, which calls the
+provider itself rather than ever handing a worker that key. A job's own `params` can never
+supply or override `api_key`/`api_base` (contract/protocols.md §2's envelope rule, same as
+`stream`/`messages`).
+
 ## 4. Coordinator ↔ node (Wake-on-LAN)
 
 Waking a sleeping machine is a pure network action, needing no software on the target:
@@ -155,7 +163,26 @@ capabilities:
   8b-extract:  { queue: "q:8b",  model_server: "http://localhost:11434/v1", model: "…" }
   32b-reason:  { queue: "q:32b", model_server: "http://localhost:11434/v1", model: "…" }
   70b-reason:  { queue: "q:70b", model_server: "http://localhost:11434/v1", model: "…" }
+
+  # A registered provider account (ADR 30): no `model_server` — it has no host node, so
+  # the coordinator calls it directly instead of dispatching to a worker. `model` is a
+  # LiteLLM "<provider>/<model>" id; `api_key_env` NAMES the env var holding the key (never
+  # the key itself). Enters the ability matrix unscored, like any new artifact (ADR 15).
+  claude-sonnet:
+    queue: "q:claude-sonnet"
+    model: "anthropic/claude-3-5-sonnet-20241022"
+    api_key_env: CBK_ANTHROPIC_API_KEY
+    cloud: true
+    price_in_per_1k: 0.003
+    price_out_per_1k: 0.015
 ```
+
+A capability's `model_server` distinguishes two different cloud shapes, both `cloud: true`:
+a **hosted OpenAI-compatible endpoint** (`model_server` set — some other reachable HTTP
+server, called by a real worker exactly like a local one) versus a **registered provider
+account** (`model_server` absent — no host node at all, drained only by the coordinator's
+own cloud executor, ADR 30). `fleet.py` rejects a node listing the latter at load time: no
+worker can ever serve a capability with no host.
 
 ## 6. Node enrollment & heartbeat (fleet-management phase)
 

@@ -228,3 +228,9 @@ class JobRecord(BaseModel):
     def to_wire(self) -> dict[str, Any]:
         """Contract-shaped dict: drop null optionals so it validates cleanly."""
         return self.model_dump(mode="json", exclude_none=True)
+
+    @classmethod
+    def from_wire(cls, data: dict[str, Any]) -> "JobRecord":
+        """The inverse of `to_wire` — used by the coordinator's own cloud executor (ADR 30)
+        to read back a job it (or a client) enqueued, the same way a worker parses one."""
+        return cls.model_validate(data)

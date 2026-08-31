@@ -1,0 +1,81 @@
+"""Cloud budget pacing + reserve enforcement (ADR 30; model-evaluation.md → Provider
+accounts, budget, and the cost-quality loop; fleet-management.md → Cloud tier: budget).
+
+Before this module the monthly cap was display-only (`usage.py` computed `remaining`/
+`over` but nothing read them to gate a routing decision) — CLAUDE.md's hardening-pass note
+calls exactly this out as the kind of gap that got fixed elsewhere and should not recur
+here. This is the real gate: `routing.resolve_capability` calls it before offering a
+cloud candidate.
+
+Two properties, matching the urgency ladder (fleet-management.md → Urgency, escalation &
+client attention): `waitable` never reaches this function at all — cloud is a wake-rights
+question for it (ADR 18: "no wake, no cloud, no demand"), decided by the caller before any
+budget is considered. `necessary` may spend the **paced pool** — the monthly cap minus the
+reserve, scaled by how much of the month has elapsed, so week one can't burn the month.
+`urgent` may additionally draw the **reserve**, bounded only by the full monthly cap.
+"""
+
+from __future__ import annotations
+
+import calendar
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from .store import Store
+
+DEFAULT_RESERVE_FRACTION = 0.2
+
+
+@dataclass(frozen=True)
+class BudgetDecision:
+    allowed: bool
+    reason: str | None = None
+
+
+def check_cloud_budget(
+    store: Store,
+    *,
+    monthly_cap: float | None,
+    urgency: str,
+    reserve_fraction: float = DEFAULT_RESERVE_FRACTION,
+    now: float | None = None,
+) -> BudgetDecision:
+    """Whether a job of this urgency may still spend from the cloud budget right now.
+
+    No cap configured ⇒ unlimited (the pre-existing default: an operator who never set
+    CBK_CLOUD_BUDGET_MONTHLY gets today's unrestricted behaviour, not a surprise refusal).
+    """
+    if monthly_cap is None:
+        return BudgetDecision(True)
+
+    now = time.time() if now is None else now
+    dt = datetime.fromtimestamp(now, tz=UTC)
+    month = dt.strftime("%Y-%m")
+    days_in_month = calendar.monthrange(dt.year, dt.month)[1]
+    elapsed_days = dt.day  # 1..days_in_month — today already counts as elapsed
+
+    month_spend = store.cloud_spend_in_month(month)
+    paced_pool = monthly_cap * (1.0 - reserve_fraction)
+    allowed_by_now = paced_pool * elapsed_days / days_in_month
+
+    if urgency == "urgent":
+        # The reserve exists for exactly this case: pacing may already be exhausted, but an
+        # urgent job may still spend up to the FULL monthly cap.
+        if month_spend >= monthly_cap:
+            return BudgetDecision(
+                False,
+                f"monthly cloud budget (${monthly_cap:g}) exhausted, including the "
+                f"urgent reserve",
+            )
+        return BudgetDecision(True)
+
+    # necessary (the only other urgency that should ever reach this function).
+    if month_spend >= allowed_by_now:
+        return BudgetDecision(
+            False,
+            f"paced cloud budget exhausted: ${month_spend:.2f} spent of "
+            f"${allowed_by_now:.2f} allowed by day {elapsed_days}/{days_in_month} "
+            f"(${monthly_cap:g}/mo, {reserve_fraction:.0%} reserved for urgent jobs)",
+        )
+    return BudgetDecision(True)

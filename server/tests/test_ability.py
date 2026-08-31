@@ -80,7 +80,13 @@ def test_routing_fails_explicitly_when_bar_unmeetable(seeded):
 
 
 def test_local_only_excludes_cloud_artifacts(seeded):
-    """privacy=local_only must never select a cloud-backed capability, whatever its ability."""
+    """privacy=local_only must never select a cloud-backed capability, whatever its ability.
+
+    urgency="necessary" here isolates the privacy check from the separate urgency gate
+    (ADR 18/30, tested below): a `waitable` job (the default) never reaches cloud at all,
+    regardless of privacy, so this test picks the urgency that lets privacy be the only
+    variable.
+    """
     from clusterbuck.fleet import CapabilitySpec
 
     f = _fleet()
@@ -90,13 +96,95 @@ def test_local_only_excludes_cloud_artifacts(seeded):
     seeded.set_ability(artifact="frontier-x", task_class="reason", score=10.0,
                        scale_version=SCALE_VERSION, updated_at="t")
 
-    # cloud_ok can use it…
+    # cloud_ok + necessary can use it…
     assert resolve_capability(f, seeded, capability=None, task_class="reason",
-                              min_ability=9, privacy="cloud_ok") == "frontier"
+                              min_ability=9, privacy="cloud_ok",
+                              urgency="necessary") == "frontier"
     # …local_only cannot, and says so.
     with pytest.raises(NoCapableArtifact, match="excluded by privacy"):
         resolve_capability(f, seeded, capability=None, task_class="reason",
-                           min_ability=9, privacy="local_only")
+                           min_ability=9, privacy="local_only", urgency="necessary")
+
+
+def test_waitable_never_reaches_cloud(seeded):
+    """ADR 18/30: waitable never creates capacity for itself — no wake, no cloud, no
+    demand — even when privacy would otherwise allow it and no local artifact clears the
+    bar. This is a wake-rights question, checked before budget is ever considered."""
+    from clusterbuck.fleet import CapabilitySpec
+
+    f = _fleet()
+    f.capabilities["frontier"] = CapabilitySpec(
+        queue="q:frontier", model_server="https://api.example.invalid/v1",
+        model="frontier-x", cloud=True)
+    seeded.set_ability(artifact="frontier-x", task_class="reason", score=10.0,
+                       scale_version=SCALE_VERSION, updated_at="t")
+
+    with pytest.raises(NoCapableArtifact, match="no artifact reaches ability 9"):
+        resolve_capability(f, seeded, capability=None, task_class="reason",
+                           min_ability=9, privacy="cloud_ok", urgency="waitable")
+
+
+def test_explicit_cloud_capability_still_enforces_privacy_and_urgency(seeded):
+    """Explicit `capability` addressing is a power-user shortcut, not a bypass: naming a
+    cloud capability directly must still respect ADR 14/18, matching fleet-management.md's
+    "submission validation rejects incoherent combos... fast, at the API"."""
+    from clusterbuck.fleet import CapabilitySpec
+
+    f = _fleet()
+    f.capabilities["frontier"] = CapabilitySpec(
+        queue="q:frontier", model_server="https://api.example.invalid/v1",
+        model="frontier-x", cloud=True)
+
+    with pytest.raises(NoCapableArtifact, match="local_only"):
+        resolve_capability(f, seeded, capability="frontier", task_class=None,
+                           min_ability=None, privacy="local_only", urgency="necessary")
+    with pytest.raises(NoCapableArtifact, match="waitable"):
+        resolve_capability(f, seeded, capability="frontier", task_class=None,
+                           min_ability=None, privacy="cloud_ok", urgency="waitable")
+    # necessary + cloud_ok is the coherent combo — it still wins explicitly.
+    assert resolve_capability(f, seeded, capability="frontier", task_class=None,
+                              min_ability=None, privacy="cloud_ok",
+                              urgency="necessary") == "frontier"
+
+
+def test_local_preferred_over_cheaper_cloud(seeded):
+    """ADR 16: prefer local, THEN cheapest — a cloud artifact that happens to be cheaper
+    than a qualifying local one must still lose to it."""
+    from clusterbuck.fleet import CapabilitySpec
+
+    f = _fleet()
+    # Cheaper than every local capability, and clears the bar.
+    f.capabilities["bargain-cloud"] = CapabilitySpec(
+        queue="q:bargain-cloud", model_server="https://api.example.invalid/v1",
+        model="bargain-x", cloud=True, price_in_per_1k=0.00001, price_out_per_1k=0.00001)
+    seeded.set_ability(artifact="bargain-x", task_class="summarize", score=9.0,
+                       scale_version=SCALE_VERSION, updated_at="t")
+
+    assert resolve_capability(f, seeded, capability=None, task_class="summarize",
+                              min_ability=4, privacy="cloud_ok",
+                              urgency="necessary") == "8b-extract"
+
+
+def test_cloud_candidate_excluded_by_exhausted_budget(seeded):
+    """A cloud candidate that would otherwise win must be excluded once the paced budget
+    (necessary) is exhausted, and the failure names the budget rather than looking like a
+    plain ability miss."""
+    from clusterbuck.fleet import CapabilitySpec
+
+    f = Fleet(capabilities={
+        "frontier": CapabilitySpec(queue="q:frontier", model_server="x",
+                                   model="frontier-x", cloud=True),
+    })
+    seeded.set_ability(artifact="frontier-x", task_class="reason", score=10.0,
+                       scale_version=SCALE_VERSION, updated_at="t")
+    seeded.record_usage(job_id="already-spent", ts="t", capability="frontier",
+                        model="frontier-x", node="cloud:x", venue="cloud",
+                        tokens_in=0, tokens_out=0, outcome="done", cost=100.0, day="2026-01-01")
+
+    with pytest.raises(NoCapableArtifact, match="budget"):
+        resolve_capability(f, seeded, capability=None, task_class="reason", min_ability=9,
+                           privacy="cloud_ok", urgency="necessary",
+                           cloud_budget_monthly=10.0, now=1767225600.0)  # 2026-01-01 UTC
 
 
 def test_seeded_scores_are_labelled_as_seeds(seeded):

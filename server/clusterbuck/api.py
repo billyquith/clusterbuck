@@ -27,6 +27,7 @@ from .catalog import (
     scan_all,
     seed_catalog,
 )
+from .cloud_executor import CloudExecutor, cloud_capabilities
 from .config import settings
 from .coordinator import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
@@ -225,12 +226,27 @@ def create_app(
                 )
             )
 
+        # Cloud executor (ADR 30): drains registered provider accounts' streams in-process,
+        # so their API keys never leave the coordinator. Only started when the fleet
+        # actually declares one, so a plain local fleet.yaml (and start_scheduler=False
+        # tests) are unaffected.
+        cloud_stop = asyncio.Event()
+        cloud_task: asyncio.Task | None = None
+        if start_scheduler and cloud_capabilities(app.state.fleet):
+            app.state.cloud_executor = CloudExecutor(
+                app.state.queue, app.state.fleet, consumer_group=settings.consumer_group,
+            )
+            cloud_task = asyncio.create_task(app.state.cloud_executor.run(cloud_stop))
+
         try:
             yield
         finally:
             stop.set()
             if task is not None:
                 await task
+            cloud_stop.set()
+            if cloud_task is not None:
+                await cloud_task
             # Any load-test runs still going must not outlive the app (they hold the
             # queue/store the shutdown below is about to close).
             for t in list(app.state.perf_tasks.values()):
@@ -267,7 +283,8 @@ def create_app(
             return {"capabilities": {}, "nodes": []}
         return {
             "capabilities": {
-                name: {"queue": c.queue, "model": c.model, "model_server": c.model_server}
+                name: {"queue": c.queue, "model": c.model, "model_server": c.model_server,
+                       "cloud": c.cloud}
                 for name, c in fleet.capabilities.items()
             },
             "nodes": [
@@ -319,7 +336,7 @@ def create_app(
         store = app.state.store
         pending = [
             {"artifact": a, "capabilities": caps}
-            for a, caps in artifacts_needing_eval(store)
+            for a, caps in artifacts_needing_eval(store, fleet=app.state.fleet)
         ]
         return {
             "scale_version": SCALE_VERSION,
@@ -336,7 +353,7 @@ def create_app(
     async def run_eval() -> dict:
         """Trigger a harness pass now instead of waiting for the coordinator's cadence."""
         collected, enqueued = await eval_tick(
-            app.state.store, app.state.queue, now=_now_iso()
+            app.state.store, app.state.queue, now=_now_iso(), fleet=app.state.fleet
         )
         return {"scored": collected, "dispatched": enqueued}
 
@@ -434,6 +451,9 @@ def create_app(
                 task_class=body.task_class,
                 min_ability=body.min_ability,
                 privacy=body.privacy.value,
+                urgency=body.urgency.value,
+                cloud_budget_monthly=settings.cloud_budget_monthly,
+                cloud_budget_reserve_fraction=settings.cloud_budget_reserve_fraction,
             )
         except NoCapableArtifact as e:
             # Explicit failure beats silently serving below the requested ability floor.

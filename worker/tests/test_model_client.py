@@ -120,7 +120,7 @@ async def test_url_is_built_from_the_openai_base():
 
 async def test_params_cannot_hijack_the_request_envelope():
     """`params` is forwarded verbatim so the worker stays out of the way of whatever the
-    model server supports — but not the three keys that are the envelope rather than an
+    model server supports — but not the five keys that are the envelope rather than an
     inference knob. `stream` is the one that bites: this path reads a single JSON body, so a
     streamed response fails to parse and the job comes back `failed` for what the client
     meant as a preference."""
@@ -135,3 +135,56 @@ async def test_params_cannot_hijack_the_request_envelope():
     assert sent["messages"] == [{"role": "user", "content": "ping"}]
     assert "response_format" not in sent
     assert sent["temperature"] == 0.2      # real params still pass straight through
+
+
+# --- this node's own model server auth (worker fix, ADR 30) ---
+
+def _capture_headers() -> tuple[httpx.MockTransport, list[httpx.Headers]]:
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(200, json=_OK)
+
+    return httpx.MockTransport(handler), seen
+
+
+async def test_no_authorization_header_when_unconfigured(monkeypatch):
+    """Unchanged default: a plain local model server (e.g. Ollama) needs no key, and never
+    got one before this fix either — only its absence (never ANY header) was the bug."""
+    monkeypatch.delenv("CBK_MODEL_SERVER_API_KEY", raising=False)
+    transport, seen = _capture_headers()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ModelClient(http, WorkerConfig()).complete(_job(prompt="x"))
+    assert "authorization" not in seen[0]
+
+
+async def test_authorization_header_sent_when_configured(monkeypatch):
+    """The actual gap: a node's own model server behind an authenticated gateway could not
+    be reached at all, because no code path ever sent an Authorization header."""
+    monkeypatch.setenv("CBK_MODEL_SERVER_API_KEY", "sk-node-local")
+    transport, seen = _capture_headers()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ModelClient(http, WorkerConfig()).complete(_job(prompt="x"))
+    assert seen[0]["authorization"] == "Bearer sk-node-local"
+
+
+async def test_job_params_cannot_supply_or_override_the_key_or_base(monkeypatch):
+    """A job's `params` must never be able to redirect this call to a different endpoint or
+    substitute a different key — that would let any client exfiltrate whatever key is
+    configured for this node, or make the worker call an arbitrary host."""
+    monkeypatch.setenv("CBK_MODEL_SERVER_API_KEY", "sk-node-local")
+    transport, seen = _capture()
+    header_transport, header_seen = _capture_headers()
+
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ModelClient(http, WorkerConfig()).complete(_job(
+            prompt="x", params={"api_key": "sk-attacker", "api_base": "https://evil.invalid"}))
+    assert "api_key" not in seen[0]
+    assert "api_base" not in seen[0]
+
+    async with httpx.AsyncClient(transport=header_transport) as http:
+        await ModelClient(http, WorkerConfig()).complete(_job(
+            prompt="x", params={"api_key": "sk-attacker"}))
+    # The node's OWN configured key still wins — the job's params never substitute one.
+    assert header_seen[0]["authorization"] == "Bearer sk-node-local"

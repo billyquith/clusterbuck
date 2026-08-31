@@ -97,6 +97,25 @@ class Queue:
     async def ack(self, capability: str, group: str, entry_id: str) -> None:
         await self._r.xack(stream_key(capability), group, entry_id)
 
+    async def read_one(
+        self, capability: str, group: str, consumer: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """XREADGROUP one new entry for `capability`, or None if there isn't one.
+
+        Used by the coordinator's own cloud executor (ADR 30) — the same consumption
+        primitive a worker uses over the wire (worker/src/cbk_worker/work_loop.py), just
+        called in-process because that executor lives in this Python process too.
+        """
+        entries = await self._r.xreadgroup(group, consumer, {stream_key(capability): ">"}, count=1)
+        for _stream, messages in entries or []:
+            for entry_id, fields in messages:
+                raw = fields.get("job")
+                if raw is None:
+                    await self._r.xack(stream_key(capability), group, entry_id)
+                    continue
+                return entry_id, json.loads(raw)
+        return None
+
     async def write_result(self, result_key: str, result: dict[str, Any]) -> None:
         await self._r.set(result_key, json.dumps(result), ex=settings.result_ttl_s)
 

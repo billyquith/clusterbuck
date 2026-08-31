@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -86,6 +87,40 @@ async def test_no_deadline_no_result_not_captured(store, queue):
     assert store.usage_headline()["jobs"] == 0
 
 
+CLOUD_CAP = "frontier"
+FLEET_WITH_CLOUD = Fleet(capabilities={
+    CAP: FLEET.capabilities[CAP],
+    CLOUD_CAP: CapabilitySpec(queue="q:frontier", model_server="https://api.example.invalid/v1",
+                              model="frontier-x", cloud=True,
+                              price_in_per_1k=0.003, price_out_per_1k=0.015),
+})
+
+
+async def test_cloud_capability_is_captured_with_cloud_venue_and_real_cost(store, queue):
+    """Regression: `venue` used to be hardcoded 'local' for every row, so
+    `cloud_spend_in_month` — and therefore any budget gate built on it — was structurally
+    always zero, no matter how the capability was configured."""
+    store.insert(id="job_cloud", result_key="res_job_cloud", capability=CLOUD_CAP,
+                created_at="t")
+    await _result(queue, "job_cloud", tin=1000, tout=1000)
+
+    assert await usage_scan(store, queue, FLEET_WITH_CLOUD) == 1
+    h = store.usage_headline()
+    assert h["local_cost"] == 0.0
+    assert abs(h["cloud_cost"] - 0.018) < 1e-9  # 1000/1k*0.003 + 1000/1k*0.015
+    assert store.cloud_spend_in_month(datetime.now(UTC).strftime("%Y-%m")) > 0.0
+
+
+async def test_local_capability_still_captured_as_local_venue(store, queue):
+    """The fix must not flip local capabilities to 'cloud' — only ones flagged `cloud`."""
+    _job(store, "job_local")
+    await _result(queue, "job_local", tin=1000, tout=1000)
+
+    assert await usage_scan(store, queue, FLEET_WITH_CLOUD) == 1
+    assert store.cloud_spend_in_month(datetime.now(UTC).strftime("%Y-%m")) == 0.0
+    assert store.usage_headline()["local_cost"] > 0.0
+
+
 def test_summary_headline_and_budget(store):
     store.record_usage(job_id="j1", ts="t", capability=CAP, model="m", node="n",
                        venue="local", tokens_in=1000, tokens_out=0, outcome="done",
@@ -96,8 +131,16 @@ def test_summary_headline_and_budget(store):
     assert s["headline"]["net_avoided"] == 0.001
     assert s["budget"]["monthly_cap"] == 10.0
     assert s["budget"]["cloud_spent_this_month"] == 0.0
-    assert s["budget"]["enforced"] is False
+    # A configured cap is now really enforced (routing.py → budget.py, ADR 30), not just
+    # shown — `enforced` reflects that a cap is set, not merely that it's been hit.
+    assert s["budget"]["enforced"] is True
     assert s["totals"]["jobs"] == 1
+
+
+def test_summary_unenforced_when_no_cap_configured(store):
+    s = build_usage_summary(store, budget_monthly=None)
+    assert s["budget"]["monthly_cap"] is None
+    assert s["budget"]["enforced"] is False
 
 
 def test_usage_endpoint_shape(client):

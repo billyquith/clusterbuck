@@ -21,7 +21,9 @@ import litellm
 from fastapi import APIRouter, HTTPException, Request
 from litellm import Router
 
-from .fleet import Fleet
+from .fleet import Fleet, resolve_api_key
+
+_log = logging.getLogger("clusterbuck.sync")
 
 # Local/custom models aren't in LiteLLM's cost map and drop_params keeps unknown params
 # from erroring; quiet the resulting per-call warnings so server logs stay clean.
@@ -39,15 +41,38 @@ _NOOP_KEY = "sk-noop"  # local servers ignore the key; LiteLLM requires one pres
 
 
 def build_router(fleet: Fleet, cloud_fallback_model: str | None = None) -> Router | None:
-    """Build a LiteLLM Router from the fleet's capabilities. None if there's nothing to serve."""
+    """Build a LiteLLM Router from the fleet's capabilities. None if there's nothing to serve.
+
+    ADR 23 stands: this stays config-level for the sync plane. A no-host provider account
+    (ADR 30, `model_server is None`) is included here too — the sync plane may as well use
+    the same registered accounts — but it is unmetered (usage.py never captures a sync
+    completion) and therefore ungated by the cloud budget (budget.py), same as the older
+    single `CBK_CLOUD_FALLBACK_MODEL` always was.
+    """
     model_list: list[dict] = []
     for name, spec in fleet.capabilities.items():
+        if spec.model_server is None:
+            # A registered provider account: no api_base, LiteLLM resolves the provider
+            # from the "<provider>/<model>" string itself. Missing key ⇒ excluded rather
+            # than a broken deployment entry (fail closed for routing, not for boot).
+            key = resolve_api_key(spec)
+            if not key:
+                _log.warning(
+                    "cloud capability %r has no usable API key (%s unset) — excluded from "
+                    "the sync plane", name, spec.api_key_env or "no api_key_env configured",
+                )
+                continue
+            model_list.append({
+                "model_name": name,
+                "litellm_params": {"model": spec.model, "api_key": key},
+            })
+            continue
         model_list.append({
             "model_name": name,
             "litellm_params": {
                 "model": f"openai/{spec.model}",
                 "api_base": spec.model_server,
-                "api_key": _NOOP_KEY,
+                "api_key": resolve_api_key(spec) or _NOOP_KEY,
             },
         })
 

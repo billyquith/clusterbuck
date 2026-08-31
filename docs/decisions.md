@@ -510,3 +510,94 @@ venv per release (more moving parts than a file swap, and `pip` would fetch unsi
 dependencies at update time, so the signature would no longer cover everything that runs);
 linking Homebrew's dylibs explicitly to unblock AOT (makes the binary require Homebrew at
 runtime — the exact defect, formalised).
+
+## 30. Cloud provider accounts are executed by the coordinator, never by a worker
+
+**Decision:** a registered provider account (Anthropic, OpenAI, …) is a `fleet.yaml`
+capability with `cloud: true` and **no `model_server`** — it has no host node. Its API key
+lives only in the coordinator's own environment (`api_key_env` names the variable; the key
+itself is never written to `fleet.yaml`). A job routed to one of these never reaches a
+worker's queue: the coordinator's own **`CloudExecutor`** (`cloud_executor.py`) drains that
+capability's Redis stream directly, under the *same* consumer group real workers use, and
+calls the provider via LiteLLM in-process. Nothing about the queue contract changes —
+`contract/` is untouched, and a cloud job is an ordinary `JobRecord` on an ordinary stream.
+
+**Why.** This is the third piece of the cloud design (model-evaluation.md → "Provider
+accounts, budget, and the cost-quality loop"; fleet-management.md → "Cloud tier") actually
+built, and the key-custody question was the one that mattered: ADR 26 closed an anonymous
+chain reaching model installs and deletions specifically because handing trust to every
+node on a heterogeneous, owner-controlled fleet (ADR 10) is a real attack surface, not a
+theoretical one. Handing real Anthropic/OpenAI keys to every worker's `worker.env` would
+reopen that exact class of hole for a strictly more valuable secret. The repo had already
+answered this shape of problem twice:
+- **ADR 12** already splits "runs the fabric" from "drains the queue": an attached endpoint
+  runs no fabric code at all, and a **coordinator-side proxy worker pulls from its queues on
+  its behalf**. A provider account is that shape exactly — no fabric code is possible on
+  Anthropic's or OpenAI's servers, so the coordinator is the proxy worker, full stop.
+- **The sync plane already does this.** `sync.build_router`'s `CBK_CLOUD_FALLBACK_MODEL`
+  path has always called cloud models in-process via LiteLLM, with the key held by the
+  gateway process. This decision gives the async plane the same custody, not a different
+  one — there was no principled reason for the two planes to disagree.
+- **`orm/usage.py`'s `node` column comment** — `"worker id, or 'cloud:<provider>' (future)"`
+  — and fleet-management.md's usage-record shape (`node | "cloud:<provider>"`) already
+  assumed a cloud job has no real node. The schema was drawn before this ADR existed.
+
+**Considered:**
+- **A short-lived, scoped credential minted per job**, handed to the worker for that one
+  call. Rejected on inspection, not merely on principle: neither Anthropic nor OpenAI mints
+  per-request scoped tokens, so building this would mean a coordinator-side endpoint the
+  worker calls with a clusterbuck-issued token, which the coordinator then exchanges for the
+  real call — i.e. direction 1 again, plus an extra hop that relays prompt bodies through
+  the worker for zero custody gain over just answering the job coordinator-side.
+- **Giving every worker every provider key directly.** Simplest to wire, but exactly the
+  anonymous-chain shape ADR 26 exists to prevent, widened to cover real third-party billing
+  credentials instead of local model management.
+
+**Consequences.**
+- **Budget enforcement is now real** (`budget.py`), not display-only. The prior `/usage`
+  budget figure was inert for a structural reason beyond "no cloud path existed yet":
+  `usage_scan` hardcoded `venue="local"` for every row, so `cloud_spend_in_month` was
+  always zero regardless of what ran. Fixed alongside this ADR by deriving `venue` from the
+  capability's own `cloud` flag — the same flag privacy filtering already reads. A
+  configured `CBK_CLOUD_BUDGET_MONTHLY` is **paced**: `necessary` jobs may spend the
+  monthly cap minus a reserve (`CBK_CLOUD_BUDGET_RESERVE_FRACTION`, default 20%), scaled by
+  how much of the month has elapsed (the cumulative form of "week one can't burn the
+  month" — a flat daily slice would let unused early days evaporate); `urgent` jobs may
+  additionally spend the reserve, bounded by the full monthly cap. `waitable` never reaches
+  the budget check at all — ADR 18 already settled that "no wake, no cloud, no demand" is a
+  wake-rights question, not a spending one, so it is excluded earlier in
+  `routing.resolve_capability` regardless of budget state.
+- **Explicit `capability` addressing is no longer a free pass around privacy or urgency.**
+  Before a no-host cloud capability could exist, `resolve_capability`'s `capability is not
+  None` branch returning immediately was harmless. The moment one exists,
+  `{capability: "claude-sonnet", privacy: "local_only"}` would have routed a `local_only`
+  job off-LAN — the exact incoherent combo fleet-management.md says submission validation
+  must reject "fast, at the API". Closed in the same function: an explicit cloud capability
+  is checked against privacy, urgency, and budget exactly like a need-shaped one.
+- **Ability is measured, never assumed, for a cloud artifact too** (ADR 15's rule extended,
+  not relaxed). `eval_runner.artifacts_needing_eval` gained a second source alongside
+  `store.installed_artifacts()`: every no-host cloud capability with a resolvable key. Its
+  eval jobs carry `privacy: cloud_ok` (a `local_only` eval job aimed at a cloud artifact
+  would just be refused by the privacy rule) and bypass `budget.py` entirely — the harness
+  builds `JobRecord`s directly rather than calling `resolve_capability`, the same way local
+  eval jobs already do. This is a deliberate, bounded exception
+  (`MAX_ARTIFACTS_IN_FLIGHT=2` × a handful of seed-suite items ≈ a dozen small calls per
+  artifact), not an oversight — model-evaluation.md already says judge/eval calls draw on
+  the cloud budget because the cost is trivial next to normal usage.
+- **`routing.resolve_capability` now prefers local over cloud correctly.** The prior sort
+  key was price alone; a cheap cloud artifact could beat a pricier qualifying local one,
+  contradicting ADR 16's stated order ("prefer local → cheapest"). The sort key is now
+  `(is_cloud, price, capability)`.
+- **The sync plane stays separate and unmetered, on purpose** (ADR 23 stands). A registered
+  provider account may also be used as a sync-plane deployment, but sync completions are
+  never captured by `usage_scan` (they return straight through LiteLLM, no job, no result
+  blob) — wiring the budget gate to a spend figure that structurally can never see sync
+  traffic would be an unenforceable claim, worse than the honest asymmetry recorded here.
+  Per-request sync metering is the named next step, not a promise this ADR makes.
+- **The worker's missing `Authorization` header is fixed, narrowly.** `model_client.py` sent
+  no auth header at all, which was already a real gap independent of this ADR: a node's own
+  configured model server might sit behind an authenticated gateway. `CBK_MODEL_SERVER_API_KEY`
+  (worker env) fixes exactly that, node-local, same trust boundary as
+  `CBK_MODEL_SERVER_URL` — **not** a channel for provider keys, which never reach a worker
+  under this decision. `api_key`/`api_base` join `_PARAMS_NOT_FORWARDED` so a job can never
+  supply or override either.

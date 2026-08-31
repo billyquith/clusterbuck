@@ -44,3 +44,27 @@ capabilities:
     model: "llama3.1:70b"
     price_in_per_1k: 0.0027
     price_out_per_1k: 0.0035
+
+  # Registered provider accounts (ADR 30; model-evaluation.md → Provider accounts, budget,
+  # and the cost-quality loop). No `model_server` — these have no host node, so the
+  # coordinator calls the provider directly in-process and never gives a worker the key.
+  # `model` is a LiteLLM "<provider>/<model>" id; `api_key_env` names the environment
+  # variable holding that provider's key (never the key itself — set it in the
+  # coordinator's own environment, not here). An unset env var excludes the artifact from
+  # routing with a warning; it does not stop the server from starting. Like any capability,
+  # these enter the ability matrix unscored and are measured by the eval harness before
+  # they are ever selected — nothing here is assumed quality, only priced.
+  claude-sonnet:
+    queue: "q:claude-sonnet"
+    model: "anthropic/claude-3-5-sonnet-20241022"
+    api_key_env: CBK_ANTHROPIC_API_KEY
+    cloud: true
+    price_in_per_1k: 0.003
+    price_out_per_1k: 0.015
+  gpt-4o-mini:
+    queue: "q:gpt-4o-mini"
+    model: "openai/gpt-4o-mini"
+    api_key_env: CBK_OPENAI_API_KEY
+    cloud: true
+    price_in_per_1k: 0.00015
+    price_out_per_1k: 0.0006

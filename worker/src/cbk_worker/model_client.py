@@ -10,18 +10,23 @@ from typing import Any
 
 import httpx
 
-from .config import WorkerConfig
+from .config import WorkerConfig, model_server_api_key
 from .models import Job
 
 # `params` is forwarded verbatim so the worker stays out of the way of whatever the model
-# server supports — but three keys are the request envelope, not inference parameters, and
+# server supports — but five keys are the request envelope, not inference parameters, and
 # letting a job set them breaks the loop rather than tuning it:
 #
 #   stream    — this path reads one JSON body; a streamed response fails to parse, so the
 #               job returns `failed` for a param the client meant as a preference.
 #   messages  — assembled above from the job's own messages/prompt.
 #   response_format — a hint only (protocols.md §3), deliberately not passed on.
-_PARAMS_NOT_FORWARDED = {"stream", "messages", "response_format"}
+#   api_key, api_base — this node's OWN model server and its key (if any) are node-local
+#               config (CBK_MODEL_SERVER_URL / CBK_MODEL_SERVER_API_KEY), never a per-job
+#               value. Letting a job set either would let any client redirect this worker's
+#               HTTP call to an arbitrary endpoint and/or exfiltrate whatever key is
+#               configured for it — the same class of hole ADR 26 closed for the HTTP API.
+_PARAMS_NOT_FORWARDED = {"stream", "messages", "response_format", "api_key", "api_base"}
 
 
 class ModelClient:
@@ -55,7 +60,9 @@ class ModelClient:
             request[name] = value
 
         url = self._cfg.model_server_url.rstrip("/") + "/chat/completions"
-        resp = await self._client.post(url, json=request)
+        key = model_server_api_key()
+        headers = {"Authorization": f"Bearer {key}"} if key else None
+        resp = await self._client.post(url, json=request, headers=headers)
         resp.raise_for_status()
         body = resp.json()
         usage = body.get("usage") if isinstance(body, dict) else None

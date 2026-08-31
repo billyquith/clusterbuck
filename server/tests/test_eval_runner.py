@@ -14,7 +14,8 @@ from clusterbuck.eval_runner import (
     eval_tick,
 )
 from clusterbuck.evaluation import SCALE_VERSION, EvalItem, check_json_valid
-from clusterbuck.models import EnrollRequest, HwProbe
+from clusterbuck.fleet import CapabilitySpec, Fleet
+from clusterbuck.models import EnrollRequest, HwProbe, Privacy
 from clusterbuck.queue import Queue, stream_key
 from clusterbuck.store import Store
 
@@ -177,6 +178,61 @@ async def test_tick_measures_a_new_artifact_end_to_end(store, queue):
     assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 10.0
     # Measured now, so nothing further is queued for it.
     assert dispatched == 0
+
+
+# --- cloud provider artifacts (ADR 30) enter the same measurement path ---
+
+CLOUD_ARTIFACT = "anthropic/claude-3-5-sonnet-20241022"
+CLOUD_CAP = "claude-sonnet"
+
+
+def _cloud_fleet(monkeypatch, *, keyed: bool = True) -> Fleet:
+    if keyed:
+        monkeypatch.setenv("CBK_TEST_PROVIDER_KEY", "sk-test-123")
+    return Fleet(capabilities={
+        CLOUD_CAP: CapabilitySpec(queue=f"q:{CLOUD_CAP}", model=CLOUD_ARTIFACT, cloud=True,
+                                  api_key_env="CBK_TEST_PROVIDER_KEY"),
+    })
+
+
+def test_unkeyed_cloud_artifacts_are_not_candidates(store, monkeypatch):
+    """No point spending eval budget on a provider whose key isn't configured — it can
+    only ever fail, the same reason sync.build_router excludes it from the sync plane."""
+    monkeypatch.delenv("CBK_TEST_PROVIDER_KEY", raising=False)
+    fleet = _cloud_fleet(monkeypatch, keyed=False)
+    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE) == []
+
+
+def test_keyed_cloud_artifact_is_a_candidate(store, monkeypatch):
+    fleet = _cloud_fleet(monkeypatch)
+    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE) == [(CLOUD_ARTIFACT, [CLOUD_CAP])]
+
+
+async def test_cloud_artifact_dispatch_uses_cloud_ok_privacy(store, queue, monkeypatch):
+    """A cloud artifact can only be measured by actually calling the provider, so its eval
+    jobs must carry cloud_ok — local_only would just have them refused (ADR 14)."""
+    fleet = _cloud_fleet(monkeypatch)
+    assert await dispatch(store, queue, now="t", fleet=fleet, suite=SUITE) == 2
+
+    entries = await queue.client.xrange(stream_key(CLOUD_CAP))
+    assert len(entries) == 2
+    for _id, fields in entries:
+        job = json.loads(fields["job"])
+        assert job["params"]["model"] == CLOUD_ARTIFACT
+        assert job["privacy"] == Privacy.cloud_ok.value
+        assert job["urgency"] == "waitable"
+
+
+async def test_cloud_artifact_scored_end_to_end(store, queue, monkeypatch):
+    fleet = _cloud_fleet(monkeypatch)
+    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE)
+    assert (collected, dispatched) == (0, 2)
+
+    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
+                  else "the fox")
+    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE)
+    assert collected == 2
+    assert store.get_ability(CLOUD_ARTIFACT, "extract", SCALE_VERSION) == 10.0
 
 
 # --- endpoints ---

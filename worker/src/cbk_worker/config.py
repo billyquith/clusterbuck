@@ -120,6 +120,19 @@ def api_key() -> str | None:
     return os.environ.get("CBK_API_KEY") or None
 
 
+def model_server_api_key() -> str | None:
+    """Bearer token for THIS node's own configured model server (CBK_MODEL_SERVER_API_KEY).
+
+    Node-local config, same trust boundary as CBK_MODEL_SERVER_URL — an operator who put an
+    authenticated gateway behind that URL can now give the worker a key for it. This is
+    NOT how cloud provider accounts are reached: those are registered on the coordinator
+    and called by the coordinator itself, so their keys never reach a worker (ADR 30). A
+    job's own `params` can never substitute a different key or base URL — see
+    model_client.py's `_PARAMS_NOT_FORWARDED`.
+    """
+    return os.environ.get("CBK_MODEL_SERVER_API_KEY") or None
+
+
 def admin_headers() -> dict[str, str]:
     """Headers presenting the operator key, when one is configured."""
     key = api_key()

@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 
 from .evaluation import SCALE_VERSION, SEED_SUITE, EvalItem, score_to_ability
+from .fleet import Fleet, resolve_api_key
 from .ids import new_ids
 from .models import JobRecord, Message, Privacy, Urgency
 from .queue import Queue
@@ -52,20 +53,40 @@ def _suite_classes(suite: list[EvalItem]) -> set[str]:
     return {item.task_class for item in suite}
 
 
-def artifacts_needing_eval(
-    store: Store, *, suite: list[EvalItem] = SEED_SUITE, scale_version: str = SCALE_VERSION,
-) -> list[tuple[str, list[str]]]:
-    """(artifact, capabilities) for installed artifacts missing any tested task class.
+def _cloud_artifacts(fleet: Fleet | None) -> list[tuple[str, list[str]]]:
+    """(artifact, [capability]) for every registered provider-account artifact (ADR 30).
 
-    Only artifacts actually observed on a node are candidates — we can only measure what
-    some worker can serve.
+    A cloud artifact has no node to be "installed" on — it IS a fleet.yaml capability
+    (`cloud: true`, no `model_server`) — so it needs its own source alongside
+    `store.installed_artifacts()` rather than trying to make that method cover both.
+
+    Skips a provider whose API key isn't configured: there is no point spending eval
+    budget dispatching a batch that can only ever fail (the cloud executor would refuse
+    every job for the same reason `sync.build_router` excludes it from the sync plane).
+    """
+    if fleet is None:
+        return []
+    return [(spec.model, [name]) for name, spec in fleet.capabilities.items()
+            if spec.cloud and spec.model_server is None and resolve_api_key(spec)]
+
+
+def artifacts_needing_eval(
+    store: Store, *, fleet: Fleet | None = None,
+    suite: list[EvalItem] = SEED_SUITE, scale_version: str = SCALE_VERSION,
+) -> list[tuple[str, list[str]]]:
+    """(artifact, capabilities) for artifacts missing any tested task class.
+
+    Two sources: artifacts actually observed on a node (we can only measure what some
+    worker can serve), and registered cloud provider accounts (ADR 30) — measured the same
+    way, just dispatched to the coordinator's own cloud executor instead of a worker.
     """
     classes = _suite_classes(suite)
     busy = store.artifacts_under_eval()
     seen: dict[str, list[str]] = {}
-    for _node_id, artifact, caps in store.installed_artifacts():
+
+    def consider(artifact: str, caps: list[str]) -> None:
         if artifact in busy or artifact in seen or not caps:
-            continue
+            return
         generation = store.current_eval_generation(artifact)
         missing = [
             tc for tc in sorted(classes)
@@ -79,18 +100,35 @@ def artifacts_needing_eval(
         ]
         if missing:
             seen[artifact] = caps
+
+    for _node_id, artifact, caps in store.installed_artifacts():
+        consider(artifact, caps)
+    for artifact, caps in _cloud_artifacts(fleet):
+        consider(artifact, caps)
+
     return list(seen.items())
 
 
 async def dispatch(
-    store: Store, queue: Queue, *, now: str, suite: list[EvalItem] = SEED_SUITE,
-    scale_version: str = SCALE_VERSION,
+    store: Store, queue: Queue, *, now: str, fleet: Fleet | None = None,
+    suite: list[EvalItem] = SEED_SUITE, scale_version: str = SCALE_VERSION,
 ) -> int:
-    """Submit eval jobs for unmeasured installed artifacts. Returns jobs enqueued."""
+    """Submit eval jobs for unmeasured artifacts (local or registered cloud). Returns jobs
+    enqueued."""
     enqueued = 0
-    candidates = artifacts_needing_eval(store, suite=suite, scale_version=scale_version)
+    candidates = artifacts_needing_eval(store, fleet=fleet, suite=suite,
+                                        scale_version=scale_version)
     for artifact, caps in candidates[:MAX_ARTIFACTS_IN_FLIGHT]:
         capability = caps[0]  # any capability this node serves reaches its model server
+        spec = fleet.capabilities.get(capability) if fleet else None
+        is_cloud = bool(spec and spec.cloud)
+        # A cloud artifact can only be measured by actually calling the provider — the
+        # eval harness spends real cloud budget to do it (model-evaluation.md: "judge calls
+        # draw on the cloud budget; suites are small"). This bypasses budget.py entirely,
+        # deliberately: eval jobs go straight onto the resolved capability's own stream
+        # rather than through routing.resolve_capability, and the bound is small on its own
+        # (MAX_ARTIFACTS_IN_FLIGHT capped batches of a handful of items each).
+        privacy = Privacy.cloud_ok if is_cloud else Privacy.local_only
         generation = store.current_eval_generation(artifact)
         for index, item in enumerate(suite):
             measured = (
@@ -104,10 +142,11 @@ async def dispatch(
             record = JobRecord(
                 id=job_id, created_at=now, capability=capability,
                 messages=[Message(role="user", content=item.prompt)],
-                # Pin the artifact under test; the worker forwards this to its model server.
+                # Pin the artifact under test; the executor (worker or cloud, ADR 30)
+                # forwards this to override its capability's own default model.
                 params={"model": artifact, "temperature": 0.0, "max_tokens": 256},
-                urgency=Urgency.waitable,          # never wakes a machine for an eval
-                privacy=Privacy.local_only,        # eval material stays on the LAN
+                urgency=Urgency.waitable,   # never wakes a machine for an eval
+                privacy=privacy,
                 result_key=result_key,
             )
             store.insert(
@@ -196,10 +235,11 @@ async def collect(
 
 
 async def eval_tick(
-    store: Store, queue: Queue, *, now: str, suite: list[EvalItem] = SEED_SUITE,
-    scale_version: str = SCALE_VERSION,
+    store: Store, queue: Queue, *, now: str, fleet: Fleet | None = None,
+    suite: list[EvalItem] = SEED_SUITE, scale_version: str = SCALE_VERSION,
 ) -> tuple[int, int]:
     """One coordinator pass: collect finished work first, then dispatch new work."""
     collected = await collect(store, queue, now=now, suite=suite, scale_version=scale_version)
-    enqueued = await dispatch(store, queue, now=now, suite=suite, scale_version=scale_version)
+    enqueued = await dispatch(store, queue, now=now, fleet=fleet, suite=suite,
+                              scale_version=scale_version)
     return collected, enqueued

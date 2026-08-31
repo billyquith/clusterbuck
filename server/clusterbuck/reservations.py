@@ -78,9 +78,14 @@ def admit(
         return Admission("declined", reason="no fleet registry")
 
     try:
+        # A reservation is a deliberate, admitted booking — not the lazy "never demands
+        # capacity" behaviour `waitable` means for ordinary jobs (ADR 18) — so it is checked
+        # as `necessary` for cloud eligibility (paced budget, no reserve). In practice this
+        # rarely matters: a no-host cloud capability (ADR 30) has no node either, so the
+        # `not nodes` check just below declines it regardless.
         capability = resolve_capability(
             fleet, store, capability=None, task_class=task_class,
-            min_ability=min_ability, privacy=privacy,
+            min_ability=min_ability, privacy=privacy, urgency="necessary",
         )
     except NoCapableArtifact as e:
         # Admission control is exactly where an unmeetable need should surface, and the

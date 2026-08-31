@@ -53,11 +53,18 @@ class Settings:
     # The signing key is operator-held and must live OUTSIDE the repo (it's RCE if leaked).
     update_signing_key: str | None = os.environ.get("CBK_UPDATE_SIGNING_KEY") or None
     update_release: str | None = os.environ.get("CBK_UPDATE_RELEASE") or None
-    # Monthly cloud budget cap (USD) for the /usage burn display. Unset ⇒ no cap shown.
+    # Monthly cloud budget cap (USD). Unset ⇒ no cap: shown as null on /usage and never
+    # gates routing (budget.py). Set ⇒ actually enforced (ADR 30), not just displayed.
     cloud_budget_monthly: float | None = (
         float(os.environ["CBK_CLOUD_BUDGET_MONTHLY"])
         if os.environ.get("CBK_CLOUD_BUDGET_MONTHLY")
         else None
+    )
+    # Fraction of the monthly cap held back for `urgent` jobs only (budget.py). The rest
+    # (the "paced pool") is what `necessary` jobs may draw from, spread across the month
+    # so week one can't burn it — model-evaluation.md's "soft daily allowance".
+    cloud_budget_reserve_fraction: float = float(
+        os.environ.get("CBK_CLOUD_BUDGET_RESERVE_FRACTION", "0.2")
     )
 
 
