@@ -24,7 +24,7 @@ python3 "$REPO/server/tools/fake_model_server.py" --port 11441 >/dev/null 2>&1 &
 wait_for "http://127.0.0.1:11441/healthz" "fake model server"
 # exec so the backgrounded subshell *becomes* uvicorn — $! is the real server pid, so
 # cleanup can actually kill it (a plain `( … & )` orphans the grandchild).
-( cd "$REPO/server" && exec env CBK_REDIS_URL="redis://localhost:6379/0" \
+( cd "$REPO/server" && exec env CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" CBK_FLEET_PATH="$REPO/server/fleet.yaml" \
   CBK_ESCALATION_INTERVAL_S=1 CBK_WOL_BROADCAST=127.0.0.1 \
   .venv/bin/python -m clusterbuck >/dev/null 2>&1 ) &
@@ -48,7 +48,7 @@ cbk_worker enroll --token "$TOKEN" --server "$URL" --state "$WORKDIR/n2.json" >/
   && fail "reused join token was accepted" || log "reused token rejected ✓"
 
 # Start the worker (enrolled mode) and wait for a heartbeat to land.
-CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
+CBK_NODE_STATE="$STATE" CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_MODEL_SERVER_URL="http://127.0.0.1:11441/v1" CBK_MODEL="fake" CBK_HEARTBEAT_MS=1000 \
   cbk_worker_bg work >/dev/null 2>&1 & PIDS+=($!)
 

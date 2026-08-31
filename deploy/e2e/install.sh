@@ -41,7 +41,7 @@ else
   log "using fake model server (instant /api/pull)"
 fi
 
-( cd "$REPO/server" && exec env CBK_REDIS_URL="redis://localhost:6379/0" \
+( cd "$REPO/server" && exec env CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" CBK_FLEET_PATH="$REPO/server/fleet.yaml" \
   CBK_WOL_BROADCAST=127.0.0.1 .venv/bin/python -m clusterbuck >/dev/null 2>&1 ) &
 PIDS+=($!)
@@ -84,7 +84,7 @@ PY
 # The presence ladder damps the climb to `away` by 120s in production (cold loads are
 # expensive, ADR 10). Shorten it here so the test exercises the install path rather than
 # spending two minutes waiting out a timer.
-CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
+CBK_NODE_STATE="$STATE" CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_MODEL_SERVER_URL="$MODEL_URL" CBK_HEARTBEAT_MS=1000 CBK_LADDER_HYSTERESIS_S=1 \
   cbk_worker_bg work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)
 

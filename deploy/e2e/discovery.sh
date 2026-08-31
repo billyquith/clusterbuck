@@ -38,7 +38,7 @@ else
   log "using fake model server; expecting to discover: $EXPECT"
 fi
 
-( cd "$REPO/server" && exec env CBK_REDIS_URL="redis://localhost:6379/0" \
+( cd "$REPO/server" && exec env CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" CBK_FLEET_PATH="$REPO/server/fleet.yaml" \
   CBK_WOL_BROADCAST=127.0.0.1 .venv/bin/python -m clusterbuck >/dev/null 2>&1 ) &
 PIDS+=($!)
@@ -49,7 +49,7 @@ cbk_worker enroll --token "$TOKEN" --server "$URL" --state "$STATE" >/dev/null
 NODE_ID=$(python3 -c "import json;print(json.load(open('$STATE'))['node_id'])")
 log "node $NODE_ID enrolled"
 
-CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
+CBK_NODE_STATE="$STATE" CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_MODEL_SERVER_URL="$MODEL_URL" CBK_HEARTBEAT_MS=1000 \
   cbk_worker_bg work >/dev/null 2>&1 & PIDS+=($!)
 

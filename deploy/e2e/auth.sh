@@ -28,7 +28,7 @@ code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 ${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
 
 ( cd "$REPO/server" && exec env \
-  CBK_REDIS_URL="redis://localhost:6379/0" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
+  CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
   CBK_FLEET_PATH="$REPO/server/fleet.yaml" CBK_API_KEY="$KEY" \
   CBK_WOL_BROADCAST=127.0.0.1 .venv/bin/python -m clusterbuck >/dev/null 2>&1 ) &
 PIDS+=($!)

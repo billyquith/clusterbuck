@@ -95,7 +95,7 @@ wait_for "http://127.0.0.1:$MODEL_PORT/healthz" "model server"
 ${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
 
 ( cd "$REPO/server" && exec env \
-  CBK_REDIS_URL="redis://localhost:6379/0" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
+  CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
   CBK_FLEET_PATH="$REPO/server/fleet.yaml" CBK_WOL_BROADCAST=127.0.0.1 \
   CBK_WORKER_CURRENT_VERSION=0.9.9 \
   CBK_UPDATE_SIGNING_KEY="$KEYDIR/sign.key.pem" CBK_UPDATE_RELEASE="$WORKDIR/release.json" \
@@ -108,7 +108,7 @@ CBK_MODEL_SERVER_URL="http://127.0.0.1:$MODEL_PORT/v1" \
 NODE=$(python3 -c "import json;print(json.load(open('$STATE'))['node_id'])")
 
 run_worker(){   # $1 = extra env
-  env CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
+  env CBK_NODE_STATE="$STATE" CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
     CBK_MODEL_SERVER_URL="http://127.0.0.1:$MODEL_PORT/v1" CBK_MODEL="fake" \
     CBK_HEARTBEAT_MS=500 CBK_LADDER_HYSTERESIS_S=1 $1 \
     "$PY" "$INSTALL/cbk.pyz" work >>"$WORKDIR/worker.log" 2>&1 &

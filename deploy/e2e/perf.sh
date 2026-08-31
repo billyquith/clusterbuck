@@ -46,7 +46,7 @@ capabilities:
 YAML
 
 ( cd "$REPO/server" && exec env \
-  CBK_REDIS_URL="redis://localhost:6379/0" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
+  CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
   CBK_FLEET_PATH="$WORKDIR/fleet.yaml" CBK_WOL_BROADCAST=127.0.0.1 \
   .venv/bin/python -m clusterbuck >/dev/null 2>&1 ) &
 PIDS+=($!)
@@ -58,7 +58,7 @@ CBK_MODEL_SERVER_URL="http://127.0.0.1:$MODEL_PORT/v1" \
 NODE=$(python3 -c "import json;print(json.load(open('$STATE'))['node_id'])")
 log "node $NODE enrolled, serving $ARTIFACT via $CAP"
 
-CBK_NODE_STATE="$STATE" CBK_REDIS_URL="redis://localhost:6379/0" \
+CBK_NODE_STATE="$STATE" CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_MODEL_SERVER_URL="http://127.0.0.1:$MODEL_PORT/v1" CBK_MODEL="$ARTIFACT" \
   CBK_HEARTBEAT_MS=500 CBK_POLL_MS=250 \
   cbk_worker_bg work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)

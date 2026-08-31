@@ -25,13 +25,13 @@ python3 "$REPO/server/tools/fake_model_server.py" --port 11439 & PIDS+=($!)
 wait_for "http://127.0.0.1:11439/healthz" "fake model server"
 
 ( cd "$REPO/server" && exec env \
-  CBK_REDIS_URL="redis://localhost:6379/0" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
+  CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
   CBK_FLEET_PATH="$REPO/server/fleet.yaml" CBK_ESCALATION_INTERVAL_S=1 \
   CBK_WOL_BROADCAST=127.0.0.1 .venv/bin/python -m clusterbuck ) &
 PIDS+=($!)
 wait_for "$URL/healthz" "server"
 
-CBK_REDIS_URL="redis://localhost:6379/0" CBK_MODEL_SERVER_URL="http://127.0.0.1:11439/v1" \
+CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" CBK_MODEL_SERVER_URL="http://127.0.0.1:11439/v1" \
   CBK_MODEL="fake" CBK_CAPABILITIES="$CAP" CBK_WORKER_ID="node-usage" \
   cbk_worker_bg work & PIDS+=($!)
 sleep 1
