@@ -188,7 +188,8 @@ def _gen_reason_logic(rng: random.Random) -> GeneratedQuery:
     thing = rng.choice(["coins", "marbles", "weights", "balls"])
     prompt = (
         f"You have 8 identical-looking {thing}, one of which is heavier than the rest. "
-        "Using a balance scale exactly twice, describe a procedure to find the heavier one."
+        "Using a balance scale exactly twice, describe a procedure to find the heavier one. "
+        "Answer in at most 3 short sentences — steps only, no explanation of why it works."
     )
     check = _wrap(
         check_contains("2"), "ok",
