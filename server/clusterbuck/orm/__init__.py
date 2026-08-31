@@ -16,8 +16,9 @@ from .node import Node
 from .node_model import NodeModel
 from .proposal import Proposal
 from .reservation import Reservation
+from .usage import Usage
 
 __all__ = [
     "Ability", "AttentionLease", "CatalogEntry", "EvalRun", "Job", "JoinToken",
-    "Node", "NodeModel", "Proposal", "Reservation",
+    "Node", "NodeModel", "Proposal", "Reservation", "Usage",
 ]

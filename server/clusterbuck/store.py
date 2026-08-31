@@ -26,29 +26,12 @@ from .orm.node import Node
 from .orm.node_model import NodeModel
 from .orm.proposal import Proposal
 from .orm.reservation import Reservation
+from .orm.usage import Usage
 
-# Every other table has moved to orm/*.py (SQLModel) — see clusterbuck/orm/job.py's
-# docstring for why. `usage` is the one holdout: `jobs_awaiting_usage` joins it against
-# `jobs`, which is itself ORM-managed, so migrating `usage` cleanly means addressing that
-# join too — left as its own slice rather than bundled in here.
-_SCHEMA = """
--- Usage metering (fleet-management.md → Usage accounting): METADATA ONLY. No prompt or
--- completion text ever lands here; `outcome` is a status enum, not the error string
--- (errors can echo input). One row per job (PRIMARY KEY) ⇒ capture is idempotent.
-CREATE TABLE IF NOT EXISTS usage (
-    job_id       TEXT PRIMARY KEY,
-    ts           TEXT NOT NULL,
-    capability   TEXT,
-    model        TEXT,
-    node         TEXT,             -- worker id, or 'cloud:<provider>' (future)
-    venue        TEXT NOT NULL,    -- local | cloud
-    tokens_in    INTEGER NOT NULL DEFAULT 0,
-    tokens_out   INTEGER NOT NULL DEFAULT 0,
-    outcome      TEXT NOT NULL,    -- done | failed | expired  (enum, never error text)
-    cost         REAL NOT NULL DEFAULT 0,  -- local: avoided (tokens×cloud rate); cloud: actual
-    day          TEXT NOT NULL     -- YYYY-MM-DD, for rollups
-);
-"""
+# All tables have moved to orm/*.py (SQLModel) — see clusterbuck/orm/job.py's docstring
+# for why. Nothing left to bootstrap here; kept as an empty string (rather than removed)
+# so `Store._ensure_schema`'s legacy branch doesn't need a special case for "no DDL left".
+_SCHEMA = ""
 
 # Columns added after a table's initial schema; applied to pre-existing dev DBs.
 # {table: {column: ALTER statement}}
@@ -119,7 +102,7 @@ class Store:
             Job.__table__, Reservation.__table__, Node.__table__,
             JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
             NodeModel.__table__, Proposal.__table__, Ability.__table__,
-            EvalRun.__table__,
+            EvalRun.__table__, Usage.__table__,
         ])
         with self._conn() as c:
             for table, columns in _MIGRATIONS.items():
@@ -651,29 +634,33 @@ class Store:
 
     # --- usage metering (M3a) ---
 
-    def jobs_awaiting_usage(self) -> list[sqlite3.Row]:
+    def jobs_awaiting_usage(self) -> list[Job]:
         """Jobs with no usage record yet. Capture is gated on this (not job status), so a
         client's GET flipping status to done can't make the scan miss a job. Rows drop out
         once a usage row exists, keeping the scan bounded to uncaptured work."""
-        with self._conn() as c:
-            return c.execute(
-                "SELECT j.id, j.result_key, j.capability, j.deadline_epoch "
-                "FROM jobs j LEFT JOIN usage u ON u.job_id = j.id "
-                "WHERE u.job_id IS NULL"
-            ).fetchall()
+        with self._session() as s:
+            stmt = (
+                select(Job)
+                .join(Usage, Usage.job_id == Job.id, isouter=True)
+                .where(Usage.job_id.is_(None))
+            )
+            return list(s.exec(stmt))
 
     def record_usage(self, *, job_id: str, ts: str, capability: str | None,
                      model: str | None, node: str | None, venue: str,
                      tokens_in: int, tokens_out: int, outcome: str, cost: float,
                      day: str) -> None:
-        """Write one usage record. INSERT OR IGNORE ⇒ idempotent under tick/GET races."""
-        with self._conn() as c:
-            c.execute(
-                "INSERT OR IGNORE INTO usage (job_id, ts, capability, model, node, venue, "
-                "tokens_in, tokens_out, outcome, cost, day) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (job_id, ts, capability, model, node, venue, tokens_in, tokens_out,
-                 outcome, cost, day),
-            )
+        """Write one usage record. Idempotent under tick/GET races — silently does
+        nothing if a row for this job already exists (INSERT OR IGNORE equivalent)."""
+        with self._session() as s:
+            if s.get(Usage, job_id) is not None:
+                return
+            s.add(Usage(
+                job_id=job_id, ts=ts, capability=capability, model=model, node=node,
+                venue=venue, tokens_in=tokens_in, tokens_out=tokens_out, outcome=outcome,
+                cost=cost, day=day,
+            ))
+            s.commit()
 
     def usage_headline(self) -> sqlite3.Row:
         """Totals + local/cloud cost split for the avoided-cloud-spend headline."""

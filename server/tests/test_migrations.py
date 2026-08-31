@@ -34,6 +34,7 @@ from clusterbuck.orm.node import Node
 from clusterbuck.orm.node_model import NodeModel
 from clusterbuck.orm.proposal import Proposal
 from clusterbuck.orm.reservation import Reservation
+from clusterbuck.orm.usage import Usage
 from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
 
 
@@ -95,7 +96,7 @@ def _build_legacy_database(db_path) -> None:
         Job.__table__, Reservation.__table__, Node.__table__,
         JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
         NodeModel.__table__, Proposal.__table__, Ability.__table__,
-        EvalRun.__table__,
+        EvalRun.__table__, Usage.__table__,
     ])
     conn = sqlite3.connect(str(db_path), timeout=5.0)
     conn.row_factory = sqlite3.Row
