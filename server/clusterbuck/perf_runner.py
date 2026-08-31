@@ -35,6 +35,8 @@ from .config import settings
 from .evaluation import check_contains, check_json_valid
 from .ids import new_perf_run_id, new_perf_sample_id
 from .models import PerfRunSubmit
+from .orm.perf_run import PerfRun
+from .orm.perf_sample import PerfSample
 from .store import Store
 
 _log = logging.getLogger("clusterbuck.perf")
@@ -406,7 +408,7 @@ def _snapshot(app) -> str:
         if fleet else {}
     )
     nodes = [
-        {"id": n["node_id"], "mode": n["mode"], "installed": json.loads(n["installed"] or "[]")}
+        {"id": n.node_id, "mode": n.mode, "installed": json.loads(n.installed or "[]")}
         for n in app.state.store.list_nodes()
     ]
     return json.dumps({"capabilities": caps, "nodes": nodes})
@@ -438,20 +440,20 @@ def start_run(app, body: PerfRunSubmit) -> str:
     return run_id
 
 
-def summarize_run(samples: list[dict]) -> dict:
+def summarize_run(samples: list[PerfSample]) -> dict:
     """Aggregate stats from `phase='measure'` samples only (warmup stays in the raw log
     but doesn't skew steady-state numbers)."""
-    measured = [s for s in samples if s["phase"] == "measure"]
-    served = [s for s in measured if s["outcome"] == "done"]
-    unassigned = [s for s in measured if s["outcome"] == "unassigned"]
-    scored = [s for s in served if s["passed"] is not None]
-    passed = [s for s in scored if s["passed"]]
-    latencies = sorted(s["latency_s"] for s in served if s["latency_s"] is not None)
-    total_tokens = sum((s["tokens_in"] or 0) + (s["tokens_out"] or 0) for s in served)
+    measured = [s for s in samples if s.phase == "measure"]
+    served = [s for s in measured if s.outcome == "done"]
+    unassigned = [s for s in measured if s.outcome == "unassigned"]
+    scored = [s for s in served if s.passed is not None]
+    passed = [s for s in scored if s.passed]
+    latencies = sorted(s.latency_s for s in served if s.latency_s is not None)
+    total_tokens = sum((s.tokens_in or 0) + (s.tokens_out or 0) for s in served)
     span = None
     if measured:
-        span = max(s["completed_at"] or s["submitted_at"] for s in measured) - min(
-            s["submitted_at"] for s in measured
+        span = max(s.completed_at or s.submitted_at for s in measured) - min(
+            s.submitted_at for s in measured
         )
 
     def pct(p: float) -> float | None:
@@ -465,7 +467,7 @@ def summarize_run(samples: list[dict]) -> dict:
         "n_measured": len(measured),
         "n_served": len(served),
         "n_unassigned": len(unassigned),
-        "n_failed": len([s for s in measured if s["outcome"] in ("failed", "expired", "timeout")]),
+        "n_failed": len([s for s in measured if s.outcome in ("failed", "expired", "timeout")]),
         "pass_rate": round(len(passed) / len(scored), 3) if scored else None,
         "p50_latency_s": pct(0.5), "p90_latency_s": pct(0.9),
         "mean_latency_s": round(sum(latencies) / len(latencies), 3) if latencies else None,
@@ -475,32 +477,32 @@ def summarize_run(samples: list[dict]) -> dict:
     }
 
 
-def perf_run_view(store: Store, row) -> dict:
+def perf_run_view(store: Store, row: PerfRun) -> dict:
     """One run's metadata + full aggregate stats (incl. percentiles/by-category), for the
     single-run detail view and the single-run JSON API. Loads every sample of this one
     run — proportionate for one run at a time, not for a list of many."""
-    samples = [dict(s) for s in store.perf_run_samples(row["id"])]
+    samples = store.perf_run_samples(row.id)
     return {
-        "id": row["id"], "label": row["label"], "status": row["status"],
-        "config": json.loads(row["config"]),
-        "snapshot": json.loads(row["snapshot"]) if row["snapshot"] else None,
-        "started_at": row["started_at"], "finished_at": row["finished_at"],
+        "id": row.id, "label": row.label, "status": row.status,
+        "config": json.loads(row.config),
+        "snapshot": json.loads(row.snapshot) if row.snapshot else None,
+        "started_at": row.started_at, "finished_at": row.finished_at,
         **summarize_run(samples),
     }
 
 
-def perf_run_list_view(store: Store, row) -> dict:
+def perf_run_list_view(store: Store, row: PerfRun) -> dict:
     """One run's metadata + aggregate stats computed in SQL, for the runs list — a run
     with tens of thousands of samples must not mean loading them all on every 3s poll of
     the list. No percentiles (that needs the sorted sample list; see perf_run_view)."""
-    s = store.perf_run_stats(row["id"])
+    s = store.perf_run_stats(row.id)
     span = None
     if s["span_start"] is not None and s["span_end"] is not None:
         span = s["span_end"] - s["span_start"]
     n_scored = s["n_scored"] or 0
     return {
-        "id": row["id"], "label": row["label"], "status": row["status"],
-        "started_at": row["started_at"], "finished_at": row["finished_at"],
+        "id": row.id, "label": row.label, "status": row.status,
+        "started_at": row.started_at, "finished_at": row.finished_at,
         "n_warmup": s["n_warmup"] or 0, "n_measured": s["n_measured"] or 0,
         "n_served": s["n_served"] or 0, "n_unassigned": s["n_unassigned"] or 0,
         "n_failed": s["n_failed"] or 0,
@@ -512,19 +514,19 @@ def perf_run_list_view(store: Store, row) -> dict:
     }
 
 
-def _by_key(samples: list[dict], key: str) -> list[dict]:
-    groups: dict[str, list[dict]] = {}
+def _by_key(samples: list[PerfSample], key: str) -> list[dict]:
+    groups: dict[str, list[PerfSample]] = {}
     for s in samples:
-        groups.setdefault(s[key], []).append(s)
+        groups.setdefault(getattr(s, key), []).append(s)
     out = []
     for k, rows in sorted(groups.items()):
-        served = [r for r in rows if r["outcome"] == "done"]
-        scored = [r for r in served if r["passed"] is not None]
-        passed = [r for r in scored if r["passed"]]
-        latencies = sorted(r["latency_s"] for r in served if r["latency_s"] is not None)
+        served = [r for r in rows if r.outcome == "done"]
+        scored = [r for r in served if r.passed is not None]
+        passed = [r for r in scored if r.passed]
+        latencies = sorted(r.latency_s for r in served if r.latency_s is not None)
         out.append({
             key: k, "n": len(rows), "n_served": len(served),
-            "n_unassigned": len([r for r in rows if r["outcome"] == "unassigned"]),
+            "n_unassigned": len([r for r in rows if r.outcome == "unassigned"]),
             "pass_rate": round(len(passed) / len(scored), 3) if scored else None,
             "mean_latency_s": (round(sum(latencies) / len(latencies), 3)
                                if latencies else None),

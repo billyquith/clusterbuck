@@ -107,10 +107,10 @@ def _drain_pending_jobs(store, redis_url: str, content: str = "generic reply") -
     conn = redis.from_url(redis_url, decode_responses=True)
     try:
         for row in store.jobs_awaiting_usage():
-            if conn.exists(row["result_key"]):
+            if conn.exists(row.result_key):
                 continue
-            conn.set(row["result_key"], json.dumps({
-                "job_id": row["id"], "status": "done", "worker": "node-fake",
+            conn.set(row.result_key, json.dumps({
+                "job_id": row.id, "status": "done", "worker": "node-fake",
                 "completed_at": "t",
                 "completion": {"choices": [
                     {"message": {"role": "assistant", "content": content}}
@@ -291,5 +291,5 @@ def test_cancel_stale_perf_runs_reconciles_orphaned_running_row(app_client):
     n = store.cancel_stale_perf_runs("2020-01-01T00:05:00Z")
     assert n == 1
     row = store.get_perf_run("perf_orphan")
-    assert row["status"] == "cancelled"
-    assert row["finished_at"] == "2020-01-01T00:05:00Z"
+    assert row.status == "cancelled"
+    assert row.finished_at == "2020-01-01T00:05:00Z"

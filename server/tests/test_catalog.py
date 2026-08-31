@@ -16,6 +16,7 @@ from clusterbuck.catalog import (
     seed_catalog,
 )
 from clusterbuck.evaluation import SCALE_VERSION, seed_ability
+from clusterbuck.orm.node import Node
 from clusterbuck.store import Store
 
 
@@ -27,17 +28,17 @@ def store(tmp_path) -> Store:
     return s
 
 
-class _Node(dict):
-    """Row-like stand-in (sqlite3.Row is read-only, and tests need to vary fields)."""
-
-
-def _node(**over) -> _Node:
+def _node(**over) -> Node:
+    """A `Node` not persisted through `Store` — `fits`/`scan_node`/`next_action` only
+    read attributes, so building one directly lets tests vary just the fields they
+    care about without an enroll_node() round trip."""
     base = {
-        "node_id": "node-a", "profile": "shared", "ram_gb": 64.0, "disk_quota_gb": None,
-        "auto_approve": 0, "installed": json.dumps(["llama3.2:3b"]),
+        "node_id": "node-a", "node_key": "k", "profile": "shared", "ram_gb": 64.0,
+        "disk_quota_gb": None, "auto_approve": 0, "installed": json.dumps(["llama3.2:3b"]),
+        "enrolled_at": "t",
     }
     base.update(over)
-    return _Node(base)
+    return Node(**base)
 
 
 # --- gate 1: fits ------------------------------------------------------------
@@ -49,19 +50,19 @@ def test_quota_defaults_follow_profile():
 
 
 def test_fits_rejects_insufficient_ram(store):
-    big = next(r for r in store.list_catalog() if r["artifact"] == "llama3.1:70b")
+    big = next(r for r in store.list_catalog() if r.artifact == "llama3.1:70b")
     ok, why = fits(big, _node(ram_gb=16.0), quota_gb=500)
     assert not ok and "RAM" in why
 
 
 def test_fits_rejects_over_quota(store):
-    big = next(r for r in store.list_catalog() if r["artifact"] == "llama3.1:70b")
+    big = next(r for r in store.list_catalog() if r.artifact == "llama3.1:70b")
     ok, why = fits(big, _node(ram_gb=128.0), quota_gb=10.0)
     assert not ok and "quota" in why
 
 
 def test_fits_accepts_when_within_both(store):
-    small = next(r for r in store.list_catalog() if r["artifact"] == "llama3.1:8b")
+    small = next(r for r in store.list_catalog() if r.artifact == "llama3.1:8b")
     ok, _ = fits(small, _node(ram_gb=64.0), quota_gb=100.0)
     assert ok
 
@@ -70,25 +71,25 @@ def test_fits_accepts_when_within_both(store):
 
 def test_upgrade_proposed_for_better_fitting_artifact(store):
     ids = scan_node(store, _node(), now="t")
-    props = {p["artifact"]: p for p in store.list_proposals()}
+    props = {p.artifact: p for p in store.list_proposals()}
     # 64 GB / 50 GB shared quota: 8b, 14b, 32b fit; 70b needs 64 GB RAM (ok) but is 40 GB
     # (within 50) — so it fits too. All beat the installed 3b's ability.
     assert "qwen2.5:32b" in props
-    assert props["qwen2.5:32b"]["kind"] == "upgrade"
-    assert props["qwen2.5:32b"]["status"] == "pending"   # human decides by default
+    assert props["qwen2.5:32b"].kind == "upgrade"
+    assert props["qwen2.5:32b"].status == "pending"   # human decides by default
     assert len(ids) >= 1
 
 
 def test_no_upgrade_when_nothing_fits(store):
     # A tiny node with a tiny quota: the only fitting artifact is already installed.
     ids = scan_node(store, _node(ram_gb=8.0, disk_quota_gb=3.0), now="t")
-    kinds = {p["kind"] for p in store.list_proposals()}
+    kinds = {p.kind for p in store.list_proposals()}
     assert "upgrade" not in kinds
 
 
 def test_installed_artifact_is_not_proposed(store):
     scan_node(store, _node(installed=json.dumps(["qwen2.5:32b"])), now="t")
-    arts = {p["artifact"] for p in store.list_proposals() if p["kind"] == "upgrade"}
+    arts = {p.artifact for p in store.list_proposals() if p.kind == "upgrade"}
     assert "qwen2.5:32b" not in arts
 
 
@@ -102,15 +103,15 @@ def test_scan_is_idempotent(store):
 
 def test_auto_approve_opt_in_skips_human(store):
     scan_node(store, _node(auto_approve=1), now="t")
-    ups = [p for p in store.list_proposals() if p["kind"] == "upgrade"]
-    assert ups and all(p["status"] == "approved" for p in ups)
+    ups = [p for p in store.list_proposals() if p.kind == "upgrade"]
+    assert ups and all(p.status == "approved" for p in ups)
 
 
 def test_reclaim_is_never_auto_approved(store):
     # Even with auto_approve on, deleting an owner's data waits for a human.
     scan_node(store, _node(auto_approve=1, installed=json.dumps(["unused:1b"])), now="t")
-    rec = [p for p in store.list_proposals() if p["kind"] == "reclaim"]
-    assert rec and all(p["status"] == "pending" for p in rec)
+    rec = [p for p in store.list_proposals() if p.kind == "reclaim"]
+    assert rec and all(p.status == "pending" for p in rec)
 
 
 def test_decide_proposal_is_single_shot(store):
@@ -118,14 +119,14 @@ def test_decide_proposal_is_single_shot(store):
     pid = ids[0]
     assert store.decide_proposal(pid, "approved", "t2") is True
     assert store.decide_proposal(pid, "denied", "t3") is False  # already decided
-    assert store.get_proposal(pid)["status"] == "approved"
+    assert store.get_proposal(pid).status == "approved"
 
 
 # --- reclaim + reeval -------------------------------------------------------
 
 def test_reclaim_proposed_for_unused_model(store):
     scan_node(store, _node(installed=json.dumps(["llama3.2:3b", "stale:7b"])), now="t")
-    rec = {p["artifact"] for p in store.list_proposals() if p["kind"] == "reclaim"}
+    rec = {p.artifact for p in store.list_proposals() if p.kind == "reclaim"}
     assert "stale:7b" in rec  # no usage rows at all ⇒ unused
 
 
@@ -137,7 +138,7 @@ def test_reclaim_skipped_for_recently_used_model(store):
                        node="node-a", venue="local", tokens_in=1, tokens_out=1,
                        outcome="done", cost=0.0, day=today)
     scan_node(store, _node(installed=json.dumps(["busy:7b"])), now="t")
-    rec = {p["artifact"] for p in store.list_proposals() if p["kind"] == "reclaim"}
+    rec = {p.artifact for p in store.list_proposals() if p.kind == "reclaim"}
     assert "busy:7b" not in rec
 
 
@@ -150,7 +151,7 @@ def test_digest_change_records_and_proposes_reeval(store):
     pid = propose_reeval(store, "node-a", "m:7b", "sha256:aaa", "sha256:bbb", now=now)
     assert pid is not None
     prop = store.get_proposal(pid)
-    assert prop["kind"] == "reeval" and prop["status"] == "pending"
+    assert prop.kind == "reeval" and prop.status == "pending"
     # Idempotent while one is open.
     assert propose_reeval(store, "node-a", "m:7b", "sha256:aaa", "sha256:bbb", now=now) is None
 

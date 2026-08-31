@@ -81,11 +81,11 @@ def quota_for(profile: str | None, explicit: float | None) -> float:
 
 def fits(candidate, node, quota_gb: float) -> tuple[bool, str]:
     """Gate 1: hardware + the owner's disk contract."""
-    ram = node["ram_gb"] or 0
-    if candidate["min_ram_gb"] > ram:
-        return False, f"needs {candidate['min_ram_gb']:g} GB RAM, node has {ram:g}"
-    if candidate["size_gb"] > quota_gb:
-        return False, f"{candidate['size_gb']:g} GB exceeds {quota_gb:g} GB disk quota"
+    ram = node.ram_gb or 0
+    if candidate.min_ram_gb > ram:
+        return False, f"needs {candidate.min_ram_gb:g} GB RAM, node has {ram:g}"
+    if candidate.size_gb > quota_gb:
+        return False, f"{candidate.size_gb:g} GB exceeds {quota_gb:g} GB disk quota"
     return True, "fits"
 
 
@@ -98,21 +98,21 @@ def scan_node(store: Store, node, *, now: str, scale_version: str = SCALE_VERSIO
     import json as _json
 
     created: list[str] = []
-    node_id = node["node_id"]
-    installed = set(_json.loads(node["installed"] or "[]"))
-    quota = quota_for(node["profile"], node["disk_quota_gb"])
-    auto = bool(node["auto_approve"])
+    node_id = node.node_id
+    installed = set(_json.loads(node.installed or "[]"))
+    quota = quota_for(node.profile, node.disk_quota_gb)
+    auto = bool(node.auto_approve)
     initial_status = "approved" if auto else "pending"
 
     # --- upgrade: a fitting catalog artifact that would raise ability somewhere ---
     for cand in store.list_catalog():
-        artifact = cand["artifact"]
+        artifact = cand.artifact
         if artifact in installed:
             continue
         ok, why = fits(cand, node, quota)
         if not ok:
             continue
-        hint = cand["expected_ability"]
+        hint = cand.expected_ability
         if hint is None:
             continue
         # Best measured ability the node can currently reach, per task class.
@@ -136,7 +136,7 @@ def scan_node(store: Store, node, *, now: str, scale_version: str = SCALE_VERSIO
             id=pid, kind="upgrade", node_id=node_id, artifact=artifact,
             incumbent=None, task_class=task_class, status=initial_status, created_at=now,
             rationale=(
-                f"{artifact} ({cand['size_gb']:g} GB, needs {cand['min_ram_gb']:g} GB RAM) "
+                f"{artifact} ({cand.size_gb:g} GB, needs {cand.min_ram_gb:g} GB RAM) "
                 f"{why}; expected ability {hint:g} for {task_class} vs best installed "
                 f"{incumbent_best:g} (+{gain:g}). Ability is re-measured after install."
             ),
@@ -203,23 +203,23 @@ def install_allowed(mode: str, profile: str | None) -> bool:
 
 def next_action(store: Store, node, *, mode: str) -> dict | None:
     """The next approved action this node should carry out, if any is permitted now."""
-    node_id = node["node_id"]
+    node_id = node.node_id
 
     # Removals are cheap and free disk — allowed in any non-paused mode.
     if mode != "paused":
         for prop in store.approved_proposals_for_node(node_id, "reclaim"):
-            return {"proposal_id": prop["id"], "kind": "remove",
-                    "artifact": prop["artifact"], "source": "ollama"}
+            return {"proposal_id": prop.id, "kind": "remove",
+                    "artifact": prop.artifact, "source": "ollama"}
 
-    if not install_allowed(mode, node["profile"]):
+    if not install_allowed(mode, node.profile):
         return None
     for prop in store.approved_proposals_for_node(node_id, "upgrade"):
-        cand = next((c for c in store.list_catalog() if c["artifact"] == prop["artifact"]), None)
+        cand = next((c for c in store.list_catalog() if c.artifact == prop.artifact), None)
         if cand is None:
             continue
-        return {"proposal_id": prop["id"], "kind": "install",
-                "artifact": prop["artifact"], "registry_ref": cand["registry_ref"],
-                "source": cand["source"]}
+        return {"proposal_id": prop.id, "kind": "install",
+                "artifact": prop.artifact, "registry_ref": cand.registry_ref,
+                "source": cand.source}
     return None
 
 
@@ -231,18 +231,18 @@ def apply_action_result(store: Store, node_id: str, result, *, now: str) -> list
     if prop is None:
         return notes
     if not result.ok:
-        store.set_proposal_status(prop["id"], "failed")
-        notes.append(f"{prop['artifact']}: {prop['kind']} failed — {result.error}")
-        _log.warning("action %s failed on %s: %s", prop["id"], node_id, result.error)
+        store.set_proposal_status(prop.id, "failed")
+        notes.append(f"{prop.artifact}: {prop.kind} failed — {result.error}")
+        _log.warning("action %s failed on %s: %s", prop.id, node_id, result.error)
         return notes
 
-    store.set_proposal_status(prop["id"], "applied")
-    notes.append(f"{prop['artifact']}: {prop['kind']} applied")
-    if prop["kind"] == "upgrade":
+    store.set_proposal_status(prop.id, "applied")
+    notes.append(f"{prop.artifact}: {prop.kind} applied")
+    if prop.kind == "upgrade":
         # Newly installed ⇒ unmeasured on this scale. Flag it for measurement; running the
         # tier-1 suite as ordinary jobs (model-evaluation.md) is the next step.
-        if propose_reeval(store, node_id, prop["artifact"], None, None, now=now):
-            notes.append(f"{prop['artifact']}: ability unmeasured — evaluation proposed")
+        if propose_reeval(store, node_id, prop.artifact, None, None, now=now):
+            notes.append(f"{prop.artifact}: ability unmeasured — evaluation proposed")
     return notes
 
 
