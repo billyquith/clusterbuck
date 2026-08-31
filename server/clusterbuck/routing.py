@@ -74,13 +74,25 @@ def resolve_capability(
     )
 
     if capability is not None:
-        spec = fleet.capabilities.get(capability) if fleet else None
-        if spec is not None:
-            excluded = _cloud_gate(spec.cloud, privacy=privacy, urgency=urgency, budget=budget)
-            if excluded is not None:
-                raise NoCapableArtifact(
-                    f"capability {capability!r} is cloud-backed and excluded: {excluded}"
-                )
+        if fleet is None:
+            raise NoCapableArtifact(
+                f"capability {capability!r} requested but no fleet registry is configured"
+            )
+        if capability not in fleet.capabilities:
+            detail = f"unknown capability {capability!r}"
+            available = sorted(fleet.capabilities)
+            detail += (
+                f" (available: {', '.join(available)})"
+                if available
+                else " (fleet registry has no capabilities registered)"
+            )
+            raise NoCapableArtifact(detail)
+        spec = fleet.capabilities[capability]
+        excluded = _cloud_gate(spec.cloud, privacy=privacy, urgency=urgency, budget=budget)
+        if excluded is not None:
+            raise NoCapableArtifact(
+                f"capability {capability!r} is cloud-backed and excluded: {excluded}"
+            )
         return capability
 
     if fleet is None or task_class is None or min_ability is None:

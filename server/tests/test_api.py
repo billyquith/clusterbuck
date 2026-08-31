@@ -56,6 +56,19 @@ def test_need_shaped_addressing_resolves_capability(client, redis_url):
     assert len(entries) == 1
 
 
+def test_unknown_capability_rejected_not_parked(client, redis_url):
+    """An unknown capability must fail at submit time (422), not queue forever on a
+    stream no worker will ever consume."""
+    r = _submit(client, capability="70b-genius")
+    assert r.status_code == 422
+    assert "unknown capability" in r.json()["detail"]
+
+    conn = redis.from_url(redis_url, decode_responses=True)
+    entries = conn.xrange(stream_key("70b-genius"))
+    conn.close()
+    assert entries == []
+
+
 def test_poll_queued_then_done(client, redis_url):
     submit = _submit(client).json()
     job_id, result_key = submit["id"], submit["result_key"]

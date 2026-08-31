@@ -48,6 +48,12 @@ POST /jobs
 { "id": "job_…", "result_key": "res_…", "status": "queued" }
 ```
 
+Both addressing forms **fail explicitly** (`422`) at submit time rather than queuing a job
+nothing will ever serve: `task_class`/`min_ability` when no artifact clears the ability bar
+(model-evaluation.md), and `capability` when the name isn't in the fleet registry — a typo'd
+capability would otherwise sit on a stream no worker consumes, with no error and no expiry
+short of `deadline`.
+
 Poll for the result:
 
 ```
