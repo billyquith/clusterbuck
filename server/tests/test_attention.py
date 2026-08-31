@@ -74,12 +74,12 @@ async def test_tick_demotes_unstarted_on_expiry(store, queue):
     store.insert(id="j1", result_key="res_j1", capability="8b-extract", created_at="t",
                  client_key="c1", task_class="summarize")
     store.attention_promote("c1", None)
-    assert store.get("j1")["urgency"] == "necessary"
+    assert store.get("j1").urgency == "necessary"
     store.upsert_attention_lease("c1", None, expires_at=100.0)
 
     assert await attention_tick(store, queue, now=200.0) == 1
     row = store.get("j1")
-    assert row["urgency"] == "waitable" and row["promoted_by"] is None
+    assert row.urgency == "waitable" and row.promoted_by is None
 
 
 async def test_tick_keeps_served_jobs(store, queue):
@@ -90,4 +90,4 @@ async def test_tick_keeps_served_jobs(store, queue):
     await queue.client.set("res_j2", json.dumps({"job_id": "j2", "status": "done"}))
 
     assert await attention_tick(store, queue, now=200.0) == 0
-    assert store.get("j2")["urgency"] == "necessary"  # served → left promoted
+    assert store.get("j2").urgency == "necessary"  # served → left promoted

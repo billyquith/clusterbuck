@@ -143,22 +143,22 @@ async def collect(
     touched: set[tuple[str, str]] = set()
 
     for run in store.pending_eval_runs():
-        result = await queue.read_result(run["result_key"])
+        result = await queue.read_result(run.result_key)
         if result is None:
             continue  # still queued or running
         if result.get("status") != "done":
-            store.fail_eval_run(run["job_id"])  # no signal from a failed/expired job
-            touched.add((run["artifact"], run["task_class"]))
+            store.fail_eval_run(run.job_id)  # no signal from a failed/expired job
+            touched.add((run.artifact, run.task_class))
             continue
         text = _completion_text(result)
-        index = run["item_index"]
+        index = run.item_index
         if text is None or index >= len(suite):
-            store.fail_eval_run(run["job_id"])
-            touched.add((run["artifact"], run["task_class"]))
+            store.fail_eval_run(run.job_id)
+            touched.add((run.artifact, run.task_class))
             continue
-        store.score_eval_run(run["job_id"], bool(suite[index].check(text)))
+        store.score_eval_run(run.job_id, bool(suite[index].check(text)))
         scored += 1
-        touched.add((run["artifact"], run["task_class"]))
+        touched.add((run.artifact, run.task_class))
 
     # A batch whose items have all settled yields an ability score — but only if enough of
     # them actually produced signal.

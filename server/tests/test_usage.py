@@ -76,7 +76,7 @@ async def test_capture_gated_on_usage_not_status(store, queue):
 async def test_past_deadline_expires_and_records(store, queue):
     _job(store, "job_d", deadline=100.0)  # no result blob
     assert await usage_scan(store, queue, FLEET, now=200.0) == 1
-    assert store.get("job_d")["status"] == "expired"
+    assert store.get("job_d").status == "expired"
     assert store.usage_headline()["jobs"] == 1
 
 

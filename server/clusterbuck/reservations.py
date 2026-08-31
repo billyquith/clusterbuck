@@ -116,25 +116,25 @@ async def reservation_tick(
     """
     now = time.time() if now is None else now
     for r in store.active_reservations():
-        state, rid = r["state"], r["id"]
+        state, rid = r.state, r.id
 
         if state == "scheduled":
-            if now >= r["ends"]:
+            if now >= r.ends:
                 store.set_reservation_state(rid, "closed")  # window missed entirely
-            elif now >= r["warm_by"]:
+            elif now >= r.warm_by:
                 store.set_reservation_state(rid, "warming")
-                await wake.maybe_wake(r["capability"], reason=f"reservation:{rid}")
+                await wake.maybe_wake(r.capability, reason=f"reservation:{rid}")
                 _log.info(
                     "reservation %s warming: pre-load %s on %s (stub)",
-                    rid, r["artifact"], r["node"],
+                    rid, r.artifact, r.node,
                 )
         elif state == "warming":
-            if now >= r["ends"]:
+            if now >= r.ends:
                 store.set_reservation_state(rid, "draining")
-            elif now >= r["starts"]:
+            elif now >= r.starts:
                 store.set_reservation_state(rid, "open")
         elif state == "open":
-            if now >= r["ends"]:
+            if now >= r.ends:
                 store.set_reservation_state(rid, "draining")
         elif state == "draining":
             # Thin pass-through for M2b (no real drain/idle-timeout yet).

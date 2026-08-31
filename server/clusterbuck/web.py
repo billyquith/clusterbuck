@@ -78,8 +78,8 @@ async def ui_reservations(request: Request) -> HTMLResponse:
 @web_routes.get("/ui/proposals", response_class=HTMLResponse)
 async def ui_proposals(request: Request) -> HTMLResponse:
     rows = request.app.state.store.list_proposals("pending")
-    props = [{"id": r["id"], "kind": r["kind"], "artifact": r["artifact"],
-              "node": r["node_id"], "rationale": r["rationale"]} for r in rows]
+    props = [{"id": r.id, "kind": r.kind, "artifact": r.artifact,
+              "node": r.node_id, "rationale": r.rationale} for r in rows]
     return templates.TemplateResponse(request, "partials/proposals.html", {"props": props})
 
 
@@ -102,7 +102,7 @@ async def ui_ability(request: Request) -> HTMLResponse:
     rows = request.app.state.store.ability_matrix(SCALE_VERSION)
     by_artifact: dict[str, list[float]] = {}
     for r in rows:
-        by_artifact.setdefault(r["artifact"], []).append(r["score"])
+        by_artifact.setdefault(r.artifact, []).append(r.score)
     arts = sorted(
         ({"artifact": a, "headline": round(sum(s) / len(s), 1)} for a, s in by_artifact.items()),
         key=lambda x: x["headline"], reverse=True,
@@ -127,24 +127,24 @@ async def ui_nodes(request: Request) -> HTMLResponse:
 
     nodes = []
     for n in request.app.state.store.list_nodes():
-        installed = _json.loads(n["installed"] or "[]")
+        installed = _json.loads(n.installed or "[]")
         nodes.append({
-            "id": n["node_id"], "host": n["hostname"], "mode": n["mode"],
-            "caps": ", ".join(_json.loads(n["capabilities"] or "[]")),
-            "loaded": ", ".join(_json.loads(n["loaded"] or "[]")),
+            "id": n.node_id, "host": n.hostname, "mode": n.mode,
+            "caps": ", ".join(_json.loads(n.capabilities or "[]")),
+            "loaded": ", ".join(_json.loads(n.loaded or "[]")),
             "installed": ", ".join(installed),
             "n_installed": len(installed),
-            "seen": (n["last_heartbeat"] or "—"),
+            "seen": (n.last_heartbeat or "—"),
             # Version governance (ADR 27): drift and unfitness must be visible, not buried.
-            "version": n["agent_version"] or "unknown",
-            "fitness": n["fitness"] or "unknown",
-            "fitness_reason": n["fitness_reason"],
+            "version": n.agent_version or "unknown",
+            "fitness": n.fitness or "unknown",
+            "fitness_reason": n.fitness_reason,
             # Hardware probe (ADR 10 self-enrollment): what the node reported about itself.
-            "os_arch": f"{n['os']}/{n['arch']}" if n["os"] else "—",
-            "ram_gb": n["ram_gb"],
-            "accelerator": n["accelerator"],
-            "vram_gb": n["vram_gb"],
-            "disk_free_gb": n["disk_free_gb"],
-            "profile": n["profile"],
+            "os_arch": f"{n.os}/{n.arch}" if n.os else "—",
+            "ram_gb": n.ram_gb,
+            "accelerator": n.accelerator,
+            "vram_gb": n.vram_gb,
+            "disk_free_gb": n.disk_free_gb,
+            "profile": n.profile,
         })
     return templates.TemplateResponse(request, "partials/nodes.html", {"nodes": nodes})

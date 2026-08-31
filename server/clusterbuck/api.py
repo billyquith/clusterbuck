@@ -121,11 +121,11 @@ def _build_update_for(app, node, flavour: str | None = None) -> dict | None:
     key_path, release_path = app.state.update_signing_key, app.state.update_release
     if not key_path or not release_path:
         return None
-    rid = artifact_key_for(flavour, node["os"], node["arch"])
+    rid = artifact_key_for(flavour, node.os, node.arch)
     if rid is None:
         _log.warning("no artifact mapping for node %s (flavour=%s %s/%s) — cannot offer "
-                     "an update", node["node_id"], flavour or "dotnet",
-                     node["os"], node["arch"])
+                     "an update", node.node_id, flavour or "dotnet",
+                     node.os, node.arch)
         return None
     try:
         release = json.loads(Path(release_path).read_text())
@@ -133,7 +133,7 @@ def _build_update_for(app, node, flavour: str | None = None) -> dict | None:
         if art is None:
             return None
         # Already on the release being offered ⇒ nothing to do.
-        if node["agent_version"] and node["agent_version"] == release["version"]:
+        if node.agent_version and node.agent_version == release["version"]:
             return None
         key = load_private_pem(Path(key_path).read_text())
         return build_manifest(
@@ -142,7 +142,7 @@ def _build_update_for(app, node, flavour: str | None = None) -> dict | None:
             protocol_version=release.get("protocol_version", 1),
         )
     except Exception:
-        _log.exception("could not build an update manifest for %s", node["node_id"])
+        _log.exception("could not build an update manifest for %s", node.node_id)
         return None
 
 
@@ -264,13 +264,13 @@ def create_app(
     async def get_ability() -> dict:
         """The ability matrix + a per-artifact headline scalar (ADR 15/16)."""
         rows = app.state.store.ability_matrix(SCALE_VERSION)
-        matrix = [{"artifact": r["artifact"], "task_class": r["task_class"],
-                   "score": r["score"]} for r in rows]
+        matrix = [{"artifact": r.artifact, "task_class": r.task_class,
+                   "score": r.score} for r in rows]
         # Headline scalar per artifact = mean over its measured task classes (equal-weight
         # for now; a workload-weighted headline is the documented refinement).
         by_artifact: dict[str, list[float]] = {}
         for r in rows:
-            by_artifact.setdefault(r["artifact"], []).append(r["score"])
+            by_artifact.setdefault(r.artifact, []).append(r.score)
         headline = {a: round(sum(s) / len(s), 1) for a, s in by_artifact.items()}
         return {"scale_version": SCALE_VERSION, "task_classes": TASK_CLASSES,
                 "matrix": matrix, "headline": headline}
@@ -319,8 +319,8 @@ def create_app(
         if body.state == "idle":
             # End the lease early: demote this client's unstarted attention-promotions.
             for job in store.attention_promoted_jobs(body.client_key):
-                if await app.state.queue.read_result(job["result_key"]) is None:
-                    store.demote_job(job["id"])
+                if await app.state.queue.read_result(job.result_key) is None:
+                    store.demote_job(job.id)
             store.delete_attention_lease(body.client_key)
             return {"promoted": 0, "prewarm": [], "lease_expires": None}
 
@@ -332,7 +332,7 @@ def create_app(
 
         # Promotion grants wake rights; pre-warm the artifacts the backlog needs.
         fleet = app.state.fleet
-        caps = {r["capability"] for r in affected}
+        caps = {r.capability for r in affected}
         prewarm = []
         for cap in caps:
             await app.state.wake.maybe_wake(cap, reason=f"attention:{body.client_key}")
@@ -351,7 +351,7 @@ def create_app(
         # addressing (the job addresses normally); it's recorded as the linkage (§8).
         if body.reservation is not None:
             rsv = app.state.store.get_reservation(body.reservation)
-            if rsv is None or rsv["status"] != "confirmed":
+            if rsv is None or rsv.status != "confirmed":
                 raise HTTPException(
                     status_code=400, detail="unknown or unconfirmed reservation"
                 )
@@ -428,47 +428,47 @@ def create_app(
         if row is None:
             raise HTTPException(status_code=404, detail="unknown job id")
 
-        result = await app.state.queue.read_result(row["result_key"])
+        result = await app.state.queue.read_result(row.result_key)
         if result is None:
             # No terminal result yet — report the queue-state we last recorded.
             return {
                 "id": job_id,
-                "status": row["status"],
-                "urgency": row["urgency"],  # reflects escalation (waitable → necessary)
+                "status": row.status,
+                "urgency": row.urgency,  # reflects escalation (waitable → necessary)
                 "result": None,
                 "error": None,
-                "attempts": row["attempts"],
+                "attempts": row.attempts,
                 "worker": None,
             }
 
         status = result.get("status", "done")
-        if status in _TERMINAL and row["status"] != status:
+        if status in _TERMINAL and row.status != status:
             app.state.store.set_status(job_id, status)
 
         return {
             "id": job_id,
             "status": status,
-            "urgency": row["urgency"],
+            "urgency": row.urgency,
             "result": result.get("completion"),
             "error": result.get("error"),
-            "attempts": row["attempts"],
+            "attempts": row.attempts,
             "worker": result.get("worker"),
         }
 
     def _reservation_view(row) -> dict:
         plan = None
-        if row["status"] == "confirmed":
+        if row.status == "confirmed":
             plan = {
-                "node": row["node"],
-                "artifact": row["artifact"],
-                "warm_by": iso(row["warm_by"]),
-                "starts": iso(row["starts"]),
-                "ends": iso(row["ends"]),
+                "node": row.node,
+                "artifact": row.artifact,
+                "warm_by": iso(row.warm_by),
+                "starts": iso(row.starts),
+                "ends": iso(row.ends),
             }
         return {
-            "id": row["id"],
-            "status": row["status"],
-            "state": row["state"],
+            "id": row.id,
+            "status": row.status,
+            "state": row.state,
             "plan": plan,
         }
 
@@ -554,7 +554,7 @@ def create_app(
         node = app.state.store.get_node(node_id)
         if node is None:
             raise HTTPException(status_code=404, detail="unknown node")
-        if x_cbk_node_key != node["node_key"]:
+        if x_cbk_node_key != node.node_key:
             raise HTTPException(status_code=401, detail="bad node key")
         now = _now_iso()
         store = app.state.store
@@ -606,7 +606,7 @@ def create_app(
         # worker verifies the signature against its pinned key before touching a byte;
         # without auto_update the operator updates it by hand and this stays null (ADR 13).
         update = None
-        if fitness.status in ("stale", "quarantine") and bool(node["auto_update"]):
+        if fitness.status in ("stale", "quarantine") and bool(node.auto_update):
             update = _build_update_for(app, node, flavour=body.agent_flavour)
             if update is not None:
                 notes.append(
@@ -643,19 +643,19 @@ def create_app(
     @app.get("/catalog")
     async def get_catalog() -> dict:
         return {"artifacts": [
-            {"artifact": r["artifact"], "family": r["family"], "params_b": r["params_b"],
-             "quant": r["quant"], "size_gb": r["size_gb"], "min_ram_gb": r["min_ram_gb"],
-             "source": r["source"], "registry_ref": r["registry_ref"],
-             "expected_ability": r["expected_ability"]}
+            {"artifact": r.artifact, "family": r.family, "params_b": r.params_b,
+             "quant": r.quant, "size_gb": r.size_gb, "min_ram_gb": r.min_ram_gb,
+             "source": r.source, "registry_ref": r.registry_ref,
+             "expected_ability": r.expected_ability}
             for r in app.state.store.list_catalog()]}
 
     @app.get("/proposals")
     async def get_proposals(status: str | None = None) -> dict:
         return {"proposals": [
-            {"id": r["id"], "kind": r["kind"], "node_id": r["node_id"],
-             "artifact": r["artifact"], "task_class": r["task_class"],
-             "rationale": r["rationale"], "status": r["status"],
-             "created_at": r["created_at"], "decided_at": r["decided_at"]}
+            {"id": r.id, "kind": r.kind, "node_id": r.node_id,
+             "artifact": r.artifact, "task_class": r.task_class,
+             "rationale": r.rationale, "status": r.status,
+             "created_at": r.created_at, "decided_at": r.decided_at}
             for r in app.state.store.list_proposals(status)]}
 
     @app.post("/proposals/scan")
@@ -679,7 +679,7 @@ def create_app(
         if not store.decide_proposal(proposal_id, status, _now_iso()):
             raise HTTPException(status_code=409, detail="proposal already decided")
         row = store.get_proposal(proposal_id)
-        return {"id": row["id"], "status": row["status"], "decided_at": row["decided_at"]}
+        return {"id": row.id, "status": row.status, "decided_at": row.decided_at}
 
     @app.post("/nodes/{node_id}/policy")
     async def set_node_policy(node_id: str, body: NodePolicy) -> dict:
@@ -698,31 +698,31 @@ def create_app(
                              auto_update=body.auto_update)
         node = store.get_node(node_id)
         return {"node_id": node_id,
-                "disk_quota_gb": quota_for(node["profile"], node["disk_quota_gb"]),
-                "auto_approve": bool(node["auto_approve"]),
-                "auto_update": bool(node["auto_update"])}
+                "disk_quota_gb": quota_for(node.profile, node.disk_quota_gb),
+                "auto_approve": bool(node.auto_approve),
+                "auto_update": bool(node.auto_update)}
 
     @app.get("/nodes")
     async def list_nodes() -> dict:
         def view(n) -> dict:  # never expose node_key
             return {
-                "node_id": n["node_id"], "hostname": n["hostname"],
-                "os": n["os"], "arch": n["arch"], "profile": n["profile"],
-                "ram_gb": n["ram_gb"], "accelerator": n["accelerator"],
-                "capabilities": json.loads(n["capabilities"] or "[]"),
-                "mode": n["mode"],
+                "node_id": n.node_id, "hostname": n.hostname,
+                "os": n.os, "arch": n.arch, "profile": n.profile,
+                "ram_gb": n.ram_gb, "accelerator": n.accelerator,
+                "capabilities": json.loads(n.capabilities or "[]"),
+                "mode": n.mode,
                 # Observed from the node's model server, not configured (M6a).
-                "installed": json.loads(n["installed"] or "[]"),
-                "loaded": json.loads(n["loaded"] or "[]"),
-                "last_heartbeat": n["last_heartbeat"],
+                "installed": json.loads(n.installed or "[]"),
+                "loaded": json.loads(n.loaded or "[]"),
+                "last_heartbeat": n.last_heartbeat,
                 # Version governance (ADR 27): what it runs and whether that is acceptable.
-                "agent_version": n["agent_version"],
+                "agent_version": n.agent_version,
                 # Which runtime the node runs — decides which release artifact it can execute.
                 # Absent rows default to "dotnet" for backward compat with pre-M4 nodes.
-                "agent_flavour": n["agent_flavour"] or "dotnet",
-                "protocol_version": n["protocol_version"],
-                "fitness": n["fitness"] or "unknown",
-                "fitness_reason": n["fitness_reason"],
+                "agent_flavour": n.agent_flavour or "dotnet",
+                "protocol_version": n.protocol_version,
+                "fitness": n.fitness or "unknown",
+                "fitness_reason": n.fitness_reason,
             }
         return {"nodes": [view(n) for n in app.state.store.list_nodes()]}
 

@@ -39,15 +39,15 @@ async def usage_scan(
 
     captured = 0
     for row in store.jobs_awaiting_usage():
-        result = await queue.read_result(row["result_key"])
+        result = await queue.read_result(row.result_key)
         if result is None:
             # Expire a past-deadline job so it doesn't linger uncaptured (result may have
             # TTL'd away before we saw it). Jobs without a deadline are left as-is.
-            dl = row["deadline_epoch"]
+            dl = row.deadline_epoch
             if dl is not None and now > dl:
-                store.set_status(row["id"], "expired")
+                store.set_status(row.id, "expired")
                 store.record_usage(
-                    job_id=row["id"], ts=ts, capability=row["capability"], model=None,
+                    job_id=row.id, ts=ts, capability=row.capability, model=None,
                     node=None, venue="local", tokens_in=0, tokens_out=0,
                     outcome="expired", cost=0.0, day=day,
                 )
@@ -62,11 +62,11 @@ async def usage_scan(
         model = completion.get("model") if isinstance(completion, dict) else None
 
         store.record_usage(
-            job_id=row["id"], ts=ts, capability=row["capability"], model=model,
+            job_id=row.id, ts=ts, capability=row.capability, model=model,
             node=result.get("worker"), venue="local", tokens_in=tin, tokens_out=tout,
-            outcome=status, cost=_local_cost(fleet, row["capability"], tin, tout), day=day,
+            outcome=status, cost=_local_cost(fleet, row.capability, tin, tout), day=day,
         )
-        store.set_status(row["id"], status)  # so an unpolled completed job shows terminal
+        store.set_status(row.id, status)  # so an unpolled completed job shows terminal
         captured += 1
 
     return captured

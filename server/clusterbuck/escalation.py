@@ -32,10 +32,10 @@ async def escalation_scan(
     now = time.time() if now is None else now
     promoted: list[str] = []
     for row in store.due_for_escalation(now):
-        if await queue.read_result(row["result_key"]) is not None:
+        if await queue.read_result(row.result_key) is not None:
             continue  # already served — don't promote or wake
-        store.mark_escalated(row["id"])
-        promoted.append(row["id"])
-        _log.info("escalate %s [%s] waitable → necessary", row["id"], row["capability"])
-        await wake.maybe_wake(row["capability"], reason="escalation")
+        store.mark_escalated(row.id)
+        promoted.append(row.id)
+        _log.info("escalate %s [%s] waitable → necessary", row.id, row.capability)
+        await wake.maybe_wake(row.capability, reason="escalation")
     return promoted

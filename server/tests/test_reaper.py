@@ -70,7 +70,7 @@ async def test_abandoned_job_is_requeued_and_redeliverable(store, queue):
     assert got
     job = json.loads(got[0][1][0][1]["job"])
     assert job["id"] == "job_lid" and job["attempts"] == 1
-    assert store.get("job_lid")["attempts"] == 1
+    assert store.get("job_lid").attempts == 1
 
 
 async def test_retries_are_bounded_then_dead_lettered(store, queue):
@@ -89,7 +89,7 @@ async def test_retries_are_bounded_then_dead_lettered(store, queue):
     result = await queue.read_result("res_job_doomed")
     assert result is not None and result["status"] == "failed"
     assert "max_attempts" in result["error"]
-    assert store.get("job_doomed")["status"] == "failed"
+    assert store.get("job_doomed").status == "failed"
     assert await _pending(queue) == 0  # nothing left stranded
 
 
@@ -101,7 +101,7 @@ async def test_busy_worker_is_not_robbed(store, queue):
     assert await reaper_scan(store, queue, group=GROUP, min_idle_ms=600_000,
                              capabilities=[CAP]) == {"requeued": 0, "dead_lettered": 0}
     assert await _pending(queue) == 1  # still owned by the original consumer
-    assert store.get("job_busy")["attempts"] == 0
+    assert store.get("job_busy").attempts == 0
 
 
 async def test_finished_but_unacked_job_is_not_rerun(store, queue):

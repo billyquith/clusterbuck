@@ -56,10 +56,10 @@ def _enroll_with(store: Store, artifacts: list[str], caps: list[str] = [CAP]) ->
 async def _finish(queue: Queue, store: Store, *, text_for) -> None:
     """Write worker-style results for every pending eval run."""
     for run in store.pending_eval_runs():
-        await queue.client.set(run["result_key"], json.dumps({
-            "job_id": run["job_id"], "status": "done", "worker": "node-e",
+        await queue.client.set(run.result_key, json.dumps({
+            "job_id": run.job_id, "status": "done", "worker": "node-e",
             "completed_at": "t",
-            "completion": {"model": run["artifact"], "choices": [
+            "completion": {"model": run.artifact, "choices": [
                 {"message": {"role": "assistant", "content": text_for(run)}}]},
         }))
 
@@ -104,8 +104,8 @@ async def test_dispatched_jobs_pin_the_artifact_and_stay_polite(store, queue):
 
     # Jobs are attributed to the harness client, and carry their task class.
     rows = store.pending_eval_runs()
-    assert {r["task_class"] for r in rows} == {"extract", "summarize"}
-    assert all(store.get(r["job_id"])["client_key"] == EVAL_CLIENT_KEY for r in rows)
+    assert {r.task_class for r in rows} == {"extract", "summarize"}
+    assert all(store.get(r.job_id).client_key == EVAL_CLIENT_KEY for r in rows)
 
 
 # --- collect + scoring ---
@@ -113,7 +113,7 @@ async def test_dispatched_jobs_pin_the_artifact_and_stay_polite(store, queue):
 async def test_all_pass_records_top_ability(store, queue):
     _enroll_with(store, [ARTIFACT])
     await dispatch(store, queue, now="t", suite=SUITE)
-    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r["task_class"] == "extract"
+    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "a fox jumped")
 
     assert await collect(store, queue, now="t", suite=SUITE) == 2
@@ -135,9 +135,9 @@ async def test_unfinished_batch_records_nothing(store, queue):
     _enroll_with(store, [ARTIFACT])
     await dispatch(store, queue, now="t", suite=SUITE)
     # Only the extract item comes back.
-    run = next(r for r in store.pending_eval_runs() if r["task_class"] == "extract")
-    await queue.client.set(run["result_key"], json.dumps({
-        "job_id": run["job_id"], "status": "done", "worker": "w", "completed_at": "t",
+    run = next(r for r in store.pending_eval_runs() if r.task_class == "extract")
+    await queue.client.set(run.result_key, json.dumps({
+        "job_id": run.job_id, "status": "done", "worker": "w", "completed_at": "t",
         "completion": {"choices": [{"message": {"role": "a", "content": '{"n":1}'}}]},
     }))
 
@@ -150,8 +150,8 @@ async def test_failed_job_yields_no_score(store, queue):
     _enroll_with(store, [ARTIFACT])
     await dispatch(store, queue, now="t", suite=SUITE)
     for run in store.pending_eval_runs():
-        await queue.client.set(run["result_key"], json.dumps({
-            "job_id": run["job_id"], "status": "failed", "worker": "w",
+        await queue.client.set(run.result_key, json.dumps({
+            "job_id": run.job_id, "status": "failed", "worker": "w",
             "completed_at": "t", "error": "model server down",
         }))
 
@@ -170,7 +170,7 @@ async def test_tick_measures_a_new_artifact_end_to_end(store, queue):
     collected, dispatched = await eval_tick(store, queue, now="t", suite=SUITE)
     assert (collected, dispatched) == (0, 2)
 
-    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r["task_class"] == "extract"
+    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "the fox")
     collected, dispatched = await eval_tick(store, queue, now="t", suite=SUITE)
     assert collected == 2
@@ -208,11 +208,11 @@ async def test_mixed_batch_does_not_score_from_a_shrunken_sample(store, queue):
     assert len(runs) == 2
 
     # One passes, one fails outright (job error, not a wrong answer).
-    await queue.client.set(runs[0]["result_key"], json.dumps({
-        "job_id": runs[0]["job_id"], "status": "done", "worker": "w", "completed_at": "t",
+    await queue.client.set(runs[0].result_key, json.dumps({
+        "job_id": runs[0].job_id, "status": "done", "worker": "w", "completed_at": "t",
         "completion": {"choices": [{"message": {"role": "a", "content": '{"n":1}'}}]}}))
-    await queue.client.set(runs[1]["result_key"], json.dumps({
-        "job_id": runs[1]["job_id"], "status": "failed", "worker": "w",
+    await queue.client.set(runs[1].result_key, json.dumps({
+        "job_id": runs[1].job_id, "status": "failed", "worker": "w",
         "completed_at": "t", "error": "model server down"}))
 
     await collect(store, queue, now="t", suite=single)
@@ -230,8 +230,8 @@ async def test_all_failed_batch_stops_redispatching(store, queue):
     for _ in range(10):
         await dispatch(store, queue, now="t", suite=single)
         for run in store.pending_eval_runs():
-            await queue.client.set(run["result_key"], json.dumps({
-                "job_id": run["job_id"], "status": "failed", "worker": "w",
+            await queue.client.set(run.result_key, json.dumps({
+                "job_id": run.job_id, "status": "failed", "worker": "w",
                 "completed_at": "t", "error": "always broken"}))
         await collect(store, queue, now="t", suite=single)
 
@@ -255,7 +255,7 @@ async def test_seeded_artifacts_are_still_measured(store, queue):
     assert await dispatch(store, queue, now="t", suite=SUITE) == 2
 
     # A real measurement replaces the seed and is labelled as earned.
-    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r["task_class"] == "extract"
+    await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "a fox")
     await collect(store, queue, now="t", suite=SUITE)
     assert store.ability_provenance("llama3.2:3b", "extract", SCALE_VERSION) == "measured"
