@@ -52,9 +52,19 @@ wait_for "$URL/healthz" "server"
 log "server up on $URL (sync plane from fleet.yaml)"
 
 # --- cbk fleet --------------------------------------------------------------
-# Best-effort listing. In a subshell so that worker_assert_ready's fail() (which exit 1s)
-# cannot take this script down — `|| true` does not catch an exit from a function.
-( cbk_worker fleet --server "$URL" ) 2>/dev/null || true
+# Checked, not best-effort. This ran as `( … ) 2>/dev/null || true`, which discarded the
+# verb's stderr AND its exit code — so `cbk fleet` crashed on every non-empty fleet and CI
+# reported a pass. The worker being absent is still tolerated (the sync plane does not need
+# one); the verb *failing* is not.
+if worker_installed; then
+  FLEET_OUT=$(cbk_worker fleet --server "$URL" 2>&1) \
+    || fail "cbk fleet exited non-zero: $FLEET_OUT"
+  grep -q '8b-extract' <<<"$FLEET_OUT" \
+    || fail "cbk fleet listed no capabilities: $FLEET_OUT"
+  log "cbk fleet listed the fleet's capabilities"
+else
+  log "worker not installed — skipping the cbk fleet check"
+fi
 
 # --- OpenAI-compatible chat completion --------------------------------------
 RESP=$(curl -fsS -X POST "$URL/v1/chat/completions" -H 'content-type: application/json' -d '{

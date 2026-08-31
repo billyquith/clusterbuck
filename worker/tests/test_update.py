@@ -18,7 +18,7 @@ from cbk_worker import update as upd
 from cbk_worker.config import AGENT_VERSION, PROTOCOL_VERSION
 from cbk_worker.models import UpdateManifest
 
-CONTRACT = Path(__file__).resolve().parents[3] / "contract"
+CONTRACT = Path(__file__).resolve().parents[2] / "contract"
 EXAMPLES = CONTRACT / "examples"
 
 

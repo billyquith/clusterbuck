@@ -107,7 +107,7 @@ def test_update_pubkey_accepts_inline_pem_or_a_path(monkeypatch, tmp_path):
     _clean(monkeypatch)
     assert update_public_key_pem() is None          # unset ⇒ self-update refused (ADR 13)
 
-    contract = Path(__file__).resolve().parents[3] / "contract" / "examples"
+    contract = Path(__file__).resolve().parents[2] / "contract" / "examples"
     pem = (contract / "update-signing.pub.pem").read_text()
 
     def _usable(value: str | None) -> bool:

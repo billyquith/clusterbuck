@@ -26,7 +26,7 @@ from cbk_worker.models import (
     UpdateManifest,
 )
 
-CONTRACT = Path(__file__).resolve().parents[3] / "contract"
+CONTRACT = Path(__file__).resolve().parents[2] / "contract"
 EXAMPLES = CONTRACT / "examples"
 
 

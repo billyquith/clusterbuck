@@ -7,8 +7,14 @@ _PY_VENV_PYTHON="$REPO/worker/.venv/bin/python"
 _PY_PYZ="$REPO/worker/dist/cbk.pyz"
 WORKER_DESC="Python (worker)"
 
+# Is a worker artifact present? A predicate, not an assertion: a script that only wants to
+# exercise a verb *if* the worker is around needs to ask without being exit'd on the answer.
+worker_installed() {
+  [[ -x "$_PY_VENV_CBK" || -f "$_PY_PYZ" ]]
+}
+
 worker_assert_ready() {
-  if [[ ! -x "$_PY_VENV_CBK" && ! -f "$_PY_PYZ" ]]; then
+  if ! worker_installed; then
     fail "worker not installed — run: (cd $REPO/worker && uv venv && uv pip install -e '.[dev]')"
   fi
 }

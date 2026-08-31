@@ -96,4 +96,31 @@ CONTENT=$(printf '%s' "$RES" | python3 -c 'import sys,json; print(json.load(sys.
 WORKER=$(printf '%s' "$RES" | python3 -c 'import sys,json; print(json.load(sys.stdin)["worker"])')
 log "done by $WORKER"
 log "completion: $CONTENT"
-printf '\033[32m[e2e] PASS — M0 loop end-to-end\033[0m\n'
+
+# --- the same round-trip through the CLI verbs ------------------------------
+# The curl checks above prove the SERVER. These prove the CLI reads what the server
+# actually sends: `cbk submit` and `cbk status` had no coverage anywhere, and both were
+# reading fields the coordinator has never returned — submit printed "submitted None",
+# and status printed the state but silently dropped the completion.
+CLI_SUBMIT=$(cbk_worker submit --server "$SERVER_URL" -p "ping from the cli" \
+  --capability "$CAP" --urgency necessary 2>&1) || fail "cbk submit failed: $CLI_SUBMIT"
+CLI_JOB=$(grep -oE 'job_[0-9a-f]+' <<<"$CLI_SUBMIT" | head -1)
+[[ -n "$CLI_JOB" ]] || fail "cbk submit printed no job id: $CLI_SUBMIT"
+log "cbk submit → $CLI_JOB"
+
+CLI_STATUS=""
+for _ in $(seq 1 100); do
+  CLI_STATUS=$(cbk_worker status --server "$SERVER_URL" "$CLI_JOB" 2>&1) || true
+  grep -q "$CLI_JOB: done" <<<"$CLI_STATUS" && break
+  sleep 0.2
+done
+grep -q "$CLI_JOB: done" <<<"$CLI_STATUS" || fail "cbk status never reported done: $CLI_STATUS"
+# The completion text itself has to reach the terminal. Asserting only on the status line
+# is exactly what made the broken verb look like a pass — so strip the metadata lines and
+# require that something is left. (Not matched against $CONTENT: a real model server under
+# USE_OLLAMA=1 answers this second prompt differently.)
+CLI_BODY=$(grep -vE "^${CLI_JOB}: |^worker: |^attempts: " <<<"$CLI_STATUS" || true)
+[[ -n "${CLI_BODY//[[:space:]]/}" ]] || fail "cbk status printed no completion: $CLI_STATUS"
+log "cbk status printed the completion: $(head -1 <<<"$CLI_BODY")"
+
+printf '\033[32m[e2e] PASS — M0 loop end-to-end (API + CLI)\033[0m\n'

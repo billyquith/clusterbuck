@@ -223,8 +223,11 @@ async def run_submit(args: argparse.Namespace) -> int:
             Out.error(f"submit failed: HTTP {resp.status_code} {resp.text}")
             return 1
         out = resp.json()
-    Out.good(f"submitted {out.get('job_id')}")
-    Out.dim(f"status: {out.get('status')}  capability: {out.get('capability', '?')}")
+    # The 202 body is {id, result_key, status} (protocols.md §1b) — `id` is the handle the
+    # user needs for `cbk status`, so printing anything else makes the verb useless.
+    job_id = out.get("id")
+    Out.good(f"submitted {job_id}")
+    Out.dim(f"status: {out.get('status')}  poll with: cbk status {job_id}")
     return 0
 
 
@@ -237,18 +240,22 @@ async def run_status(args: argparse.Namespace) -> int:
         resp.raise_for_status()
         body = resp.json()
 
+    # The poll body is FLAT (protocols.md §1b): `result` IS the completion object, and
+    # worker/error/attempts sit beside it. Reading `result` as a wrapper found none of
+    # them and printed the status line alone — the answer itself never reached the user.
     status = body.get("status", "?")
     Out.line(f"{args.job_id}: {status}")
-    if result := body.get("result"):
-        if worker := result.get("worker"):
-            Out.dim(f"worker: {worker}")
-        if error := result.get("error"):
-            Out.error(f"error: {error}")
-        completion = result.get("completion") or {}
-        for choice in completion.get("choices", []) or []:
-            content = (choice.get("message") or {}).get("content")
-            if content:
-                Out.line(content)
+    if worker := body.get("worker"):
+        Out.dim(f"worker: {worker}")
+    if (attempts := body.get("attempts") or 0) > 1:
+        Out.dim(f"attempts: {attempts}")
+    if error := body.get("error"):
+        Out.error(f"error: {error}")
+    completion = body.get("result") or {}
+    for choice in completion.get("choices") or []:
+        content = (choice.get("message") or {}).get("content")
+        if content:
+            Out.line(content)
     return 0
 
 
@@ -261,12 +268,20 @@ async def run_fleet(args: argparse.Namespace) -> int:
         nodes_resp = await http.get(f"{base}/nodes")
         nodes = nodes_resp.json().get("nodes", []) if nodes_resp.status_code < 400 else []
 
-    caps = body.get("capabilities") or body.get("fleet") or []
+    # /fleet returns capabilities as an OBJECT keyed by capability name, and the
+    # capability→node mapping only in the other direction (each node lists what it serves),
+    # so invert it here. Iterating the object as a list of rows yielded bare string keys and
+    # died on the first `.get`.
+    caps: dict[str, dict[str, Any]] = body.get("capabilities") or {}
+    serving: dict[str, list[str]] = {}
+    for node in body.get("nodes") or []:
+        for cap in node.get("capabilities") or []:
+            serving.setdefault(cap, []).append(node.get("id", "?"))
     if caps:
         Out.info("capabilities")
         Out.table(["capability", "model", "nodes"],
-                  [[c.get("name", "?"), c.get("model", "-"),
-                    ", ".join(c.get("nodes", []) or []) or "-"] for c in caps])
+                  [[name, spec.get("model", "-"), ", ".join(serving.get(name, [])) or "-"]
+                   for name, spec in caps.items()])
     if nodes:
         Out.line()
         Out.info("nodes")
