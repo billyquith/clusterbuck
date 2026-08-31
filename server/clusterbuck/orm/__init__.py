@@ -7,5 +7,6 @@ Alembic autogenerate, see `server/migrations/env.py`) knows about its table.
 from __future__ import annotations
 
 from .job import Job
+from .reservation import Reservation
 
-__all__ = ["Job"]
+__all__ = ["Job", "Reservation"]

@@ -98,25 +98,25 @@ async def test_lifecycle_progresses_and_wakes_once(tmp_path):
     spy = SpyWake()
 
     await reservation_tick(store, spy, now=50)   # before warm_by
-    assert store.get_reservation("rsv1")["state"] == "scheduled"
+    assert store.get_reservation("rsv1").state == "scheduled"
     assert spy.calls == []
 
     await reservation_tick(store, spy, now=150)  # ≥ warm_by → warming (+ wake once)
-    assert store.get_reservation("rsv1")["state"] == "warming"
+    assert store.get_reservation("rsv1").state == "warming"
     assert len(spy.calls) == 1
 
     await reservation_tick(store, spy, now=160)  # still warming, before starts
-    assert store.get_reservation("rsv1")["state"] == "warming"
+    assert store.get_reservation("rsv1").state == "warming"
     assert len(spy.calls) == 1                   # idempotent — no second wake
 
     await reservation_tick(store, spy, now=250)  # ≥ starts → open
-    assert store.get_reservation("rsv1")["state"] == "open"
+    assert store.get_reservation("rsv1").state == "open"
 
     await reservation_tick(store, spy, now=350)  # ≥ ends → draining
-    assert store.get_reservation("rsv1")["state"] == "draining"
+    assert store.get_reservation("rsv1").state == "draining"
 
     await reservation_tick(store, spy, now=360)  # draining → closed
-    assert store.get_reservation("rsv1")["state"] == "closed"
+    assert store.get_reservation("rsv1").state == "closed"
     assert len(spy.calls) == 1
 
 
@@ -125,7 +125,7 @@ async def test_lifecycle_missed_window_closes_without_waking(tmp_path):
     _seed(store, warm_by=100, starts=200, ends=300)
     spy = SpyWake()
     await reservation_tick(store, spy, now=500)  # whole window already past
-    assert store.get_reservation("rsv1")["state"] == "closed"
+    assert store.get_reservation("rsv1").state == "closed"
     assert spy.calls == []
 
 
@@ -133,10 +133,10 @@ async def test_cancelled_is_ignored_by_tick(tmp_path):
     store = Store(str(tmp_path / "r.db"))
     _seed(store, warm_by=100, starts=200, ends=300)
     assert store.cancel_reservation("rsv1") is True
-    assert store.get_reservation("rsv1")["state"] == "cancelled"
+    assert store.get_reservation("rsv1").state == "cancelled"
     spy = SpyWake()
     await reservation_tick(store, spy, now=150)  # would warm if active
-    assert store.get_reservation("rsv1")["state"] == "cancelled"
+    assert store.get_reservation("rsv1").state == "cancelled"
     assert spy.calls == []
 
 

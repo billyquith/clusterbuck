@@ -351,7 +351,7 @@ def create_app(
         # addressing (the job addresses normally); it's recorded as the linkage (§8).
         if body.reservation is not None:
             rsv = app.state.store.get_reservation(body.reservation)
-            if rsv is None or rsv["status"] != "confirmed":
+            if rsv is None or rsv.status != "confirmed":
                 raise HTTPException(
                     status_code=400, detail="unknown or unconfirmed reservation"
                 )
@@ -457,18 +457,18 @@ def create_app(
 
     def _reservation_view(row) -> dict:
         plan = None
-        if row["status"] == "confirmed":
+        if row.status == "confirmed":
             plan = {
-                "node": row["node"],
-                "artifact": row["artifact"],
-                "warm_by": iso(row["warm_by"]),
-                "starts": iso(row["starts"]),
-                "ends": iso(row["ends"]),
+                "node": row.node,
+                "artifact": row.artifact,
+                "warm_by": iso(row.warm_by),
+                "starts": iso(row.starts),
+                "ends": iso(row.ends),
             }
         return {
-            "id": row["id"],
-            "status": row["status"],
-            "state": row["state"],
+            "id": row.id,
+            "status": row.status,
+            "state": row.state,
             "plan": plan,
         }
 

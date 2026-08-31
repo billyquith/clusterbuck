@@ -17,6 +17,7 @@ from sqlmodel import Session, SQLModel, select
 from . import migrate
 from .db import make_engine
 from .orm.job import Job
+from .orm.reservation import Reservation
 
 # `jobs` moved to orm/job.py (SQLModel) — the first domain off raw sqlite3. See that
 # module's docstring, and store.py's own docstring history in git, for why. Its table is
@@ -149,27 +150,9 @@ CREATE TABLE IF NOT EXISTS usage (
     cost         REAL NOT NULL DEFAULT 0,  -- local: avoided (tokens×cloud rate); cloud: actual
     day          TEXT NOT NULL     -- YYYY-MM-DD, for rollups
 );
-
-CREATE TABLE IF NOT EXISTS reservations (
-    id           TEXT PRIMARY KEY,
-    status       TEXT NOT NULL,   -- confirmed | declined
-    state        TEXT,            -- scheduled|warming|open|draining|closed|cancelled (null if declined)
-    task_class   TEXT,
-    min_ability  INTEGER,
-    capability   TEXT,
-    node         TEXT,
-    artifact     TEXT,
-    priority     TEXT,
-    privacy      TEXT,
-    load         TEXT,
-    duration_min INTEGER,
-    est_jobs     INTEGER,
-    warm_by      REAL,
-    starts       REAL,
-    ends         REAL,
-    created_at   TEXT NOT NULL
-);
 """
+# `reservations` moved to orm/reservation.py (SQLModel), same as `jobs` — see that
+# module's docstring.
 
 # Columns added after a table's initial schema; applied to pre-existing dev DBs.
 # {table: {column: ALTER statement}}
@@ -236,7 +219,9 @@ class Store:
 
         with self._conn() as c:
             c.executescript(_SCHEMA)
-        SQLModel.metadata.create_all(self._engine, tables=[Job.__table__])
+        SQLModel.metadata.create_all(
+            self._engine, tables=[Job.__table__, Reservation.__table__]
+        )
         with self._conn() as c:
             for table, columns in _MIGRATIONS.items():
                 existing = {row["name"] for row in c.execute(f"PRAGMA table_info({table})")}
@@ -688,48 +673,56 @@ class Store:
                            est_jobs: int | None, warm_by: float | None,
                            starts: float | None, ends: float | None,
                            created_at: str) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO reservations (id, status, state, task_class, min_ability, "
-                "capability, node, artifact, priority, privacy, load, duration_min, "
-                "est_jobs, warm_by, starts, ends, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (id, status, state, task_class, min_ability, capability, node, artifact,
-                 priority, privacy, load, duration_min, est_jobs, warm_by, starts, ends,
-                 created_at),
+        with self._session() as s:
+            s.add(Reservation(
+                id=id, status=status, state=state, task_class=task_class,
+                min_ability=min_ability, capability=capability, node=node,
+                artifact=artifact, priority=priority, privacy=privacy, load=load,
+                duration_min=duration_min, est_jobs=est_jobs, warm_by=warm_by,
+                starts=starts, ends=ends, created_at=created_at,
+            ))
+            s.commit()
+
+    def get_reservation(self, id: str) -> Reservation | None:
+        with self._session() as s:
+            return s.get(Reservation, id)
+
+    def list_reservations(self, limit: int = 50) -> list[Reservation]:
+        with self._session() as s:
+            stmt = (
+                select(Reservation)
+                .order_by(Reservation.created_at.desc())
+                .limit(limit)
             )
+            return list(s.exec(stmt))
 
-    def get_reservation(self, id: str) -> sqlite3.Row | None:
-        with self._conn() as c:
-            return c.execute("SELECT * FROM reservations WHERE id = ?", (id,)).fetchone()
-
-    def list_reservations(self, limit: int = 50) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT * FROM reservations ORDER BY created_at DESC LIMIT ?", (limit,)
-            ).fetchall()
-
-    def active_reservations(self) -> list[sqlite3.Row]:
+    def active_reservations(self) -> list[Reservation]:
         """Confirmed reservations still in a live lifecycle state (for the reconciler)."""
-        with self._conn() as c:
-            return c.execute(
-                "SELECT * FROM reservations WHERE status = 'confirmed' "
-                "AND state IN ('scheduled', 'warming', 'open', 'draining')"
-            ).fetchall()
+        with self._session() as s:
+            stmt = select(Reservation).where(
+                Reservation.status == "confirmed",
+                Reservation.state.in_(["scheduled", "warming", "open", "draining"]),
+            )
+            return list(s.exec(stmt))
 
     def set_reservation_state(self, id: str, state: str) -> None:
-        with self._conn() as c:
-            c.execute("UPDATE reservations SET state = ? WHERE id = ?", (state, id))
+        with self._session() as s:
+            r = s.get(Reservation, id)
+            if r is not None:
+                r.state = state
+                s.add(r)
+                s.commit()
 
     def cancel_reservation(self, id: str) -> bool:
         """Flip to cancelled unless already terminal. Returns True if it changed."""
-        with self._conn() as c:
-            cur = c.execute(
-                "UPDATE reservations SET state = 'cancelled' "
-                "WHERE id = ? AND state NOT IN ('closed', 'cancelled')",
-                (id,),
-            )
-            return cur.rowcount > 0
+        with self._session() as s:
+            r = s.get(Reservation, id)
+            if r is None or r.state in ("closed", "cancelled"):
+                return False
+            r.state = "cancelled"
+            s.add(r)
+            s.commit()
+            return True
 
     # --- usage metering (M3a) ---
 

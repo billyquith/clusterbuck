@@ -25,6 +25,7 @@ from sqlmodel import SQLModel
 from clusterbuck import migrate
 from clusterbuck.db import make_engine
 from clusterbuck.orm.job import Job
+from clusterbuck.orm.reservation import Reservation
 from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
 
 
@@ -82,7 +83,7 @@ def _build_legacy_database(db_path) -> None:
         conn.commit()
     finally:
         conn.close()
-    SQLModel.metadata.create_all(engine, tables=[Job.__table__])
+    SQLModel.metadata.create_all(engine, tables=[Job.__table__, Reservation.__table__])
     conn = sqlite3.connect(str(db_path), timeout=5.0)
     conn.row_factory = sqlite3.Row
     try:
