@@ -98,6 +98,18 @@ SEED_SUITE: list[EvalItem] = [
     EvalItem("extract", 'Output the JSON object {"ok": true}.', check_json_valid),
     EvalItem("summarize", "Summarize: the quick brown fox jumps.", check_contains("fox")),
     EvalItem("code", "Reply with the word PASS.", check_contains("pass")),
+    EvalItem(
+        "reason",
+        "A bus has 34 passengers. At the next stop, 9 get off and 5 get on. How many "
+        "passengers are on the bus now? Reply with just the number.",
+        check_contains("30"),
+    ),
+    EvalItem(
+        "reason",
+        "Dana is older than Ellen. Ellen is older than Frank. Who is the youngest? "
+        "Reply with just the name.",
+        check_contains("frank"),
+    ),
 ]
 
 
