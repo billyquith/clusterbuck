@@ -296,6 +296,17 @@ def create_app(
         return {"scale_version": SCALE_VERSION, "task_classes": TASK_CLASSES,
                 "matrix": matrix, "headline": headline}
 
+    @app.post("/ability/clear")
+    async def clear_ability(artifact: str) -> dict:
+        """Drop an artifact's scores so the eval harness re-measures it (ADR 15).
+
+        Normally only the heartbeat handler calls this, on a *digest* change. An operator
+        needs the same reset when an artifact's behaviour changed without its digest
+        moving — e.g. a model-server config/template edit — so expose it directly.
+        """
+        n = app.state.store.clear_ability(artifact, SCALE_VERSION)
+        return {"artifact": artifact, "cleared": n}
+
     @app.get("/eval")
     async def get_eval() -> dict:
         """Eval-harness state: what's measured, what's in flight, what still needs a score."""

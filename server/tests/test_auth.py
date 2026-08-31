@@ -46,6 +46,7 @@ def open_app(tmp_path):
     ("get", "/jobs/job_x"),
     ("get", "/usage"),
     ("get", "/ability"),
+    ("post", "/ability/clear"),
     ("get", "/eval"),
     ("post", "/eval/run"),
     ("get", "/catalog"),

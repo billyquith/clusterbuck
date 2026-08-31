@@ -109,3 +109,18 @@ def test_ability_endpoint(client):
     assert data["scale_version"] == SCALE_VERSION
     assert len(data["matrix"]) == 15
     assert data["headline"]["llama3.1:70b"] > data["headline"]["llama3.2:3b"]
+
+
+def test_clear_ability_endpoint_drops_only_that_artifact(client):
+    resp = client.post("/ability/clear", params={"artifact": "llama3.2:3b"})
+    assert resp.json() == {"artifact": "llama3.2:3b", "cleared": 5}  # 5 task classes
+
+    data = client.get("/ability").json()
+    artifacts = {row["artifact"] for row in data["matrix"]}
+    assert "llama3.2:3b" not in artifacts
+    assert "llama3.1:70b" in artifacts  # untouched
+
+
+def test_clear_ability_endpoint_unknown_artifact_is_a_noop(client):
+    resp = client.post("/ability/clear", params={"artifact": "no-such-artifact"})
+    assert resp.json() == {"artifact": "no-such-artifact", "cleared": 0}
