@@ -245,6 +245,10 @@ def test_digest_change_actually_drops_the_stale_score(client):
 
     assert store.get_ability("m:7b", "extract", SCALE_VERSION) is None, \
         "a changed digest must not inherit the previous artifact's score"
+    # …nor the measurements that score was computed from: the heartbeat must open a new
+    # measurement generation, or the next batch is averaged with the old artifact's items.
+    assert store.current_eval_generation("m:7b") == 2, \
+        "a changed digest must start a new measurement generation, not extend the old one"
     # And it is genuinely back in the measurement queue.
     from clusterbuck.eval_runner import artifacts_needing_eval
     assert "m:7b" in [a for a, _ in artifacts_needing_eval(store)]

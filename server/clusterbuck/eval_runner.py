@@ -66,13 +66,16 @@ def artifacts_needing_eval(
     for _node_id, artifact, caps in store.installed_artifacts():
         if artifact in busy or artifact in seen or not caps:
             continue
+        generation = store.current_eval_generation(artifact)
         missing = [
             tc for tc in sorted(classes)
             # Unscored, or scored only by a seeded placeholder — a seed is not a measurement.
             if (store.get_ability(artifact, tc, scale_version) is None
                 or store.ability_provenance(artifact, tc, scale_version) == "seed")
             # …but give up on a task class whose runs keep yielding nothing.
-            and store.failed_eval_runs(artifact, tc) < MAX_FAILED_RUNS
+            # Counted within THIS generation: a changed artifact deserves a fresh budget,
+            # and counting every generation meant one bad batch barred it for good.
+            and store.failed_eval_runs(artifact, tc, generation) < MAX_FAILED_RUNS
         ]
         if missing:
             seen[artifact] = caps
@@ -88,6 +91,7 @@ async def dispatch(
     candidates = artifacts_needing_eval(store, suite=suite, scale_version=scale_version)
     for artifact, caps in candidates[:MAX_ARTIFACTS_IN_FLIGHT]:
         capability = caps[0]  # any capability this node serves reaches its model server
+        generation = store.current_eval_generation(artifact)
         for index, item in enumerate(suite):
             measured = (
                 store.get_ability(artifact, item.task_class, scale_version) is not None
@@ -114,7 +118,8 @@ async def dispatch(
             await queue.enqueue(record.to_wire())
             store.add_eval_run(job_id=job_id, artifact=artifact,
                                task_class=item.task_class, item_index=index,
-                               result_key=result_key, created_at=now)
+                               result_key=result_key, created_at=now,
+                               generation=generation)
             enqueued += 1
         if enqueued:
             _log.info("eval dispatched for %s via %s", artifact, capability)
@@ -140,7 +145,9 @@ async def collect(
     Returns the number of runs scored this pass.
     """
     scored = 0
-    touched: set[tuple[str, str]] = set()
+    # A batch is one (artifact, task_class, generation): the generation is what stops a
+    # re-measured artifact being scored on its predecessor's items (ADR 15).
+    touched: set[tuple[str, str, int]] = set()
 
     for run in store.pending_eval_runs():
         result = await queue.read_result(run.result_key)
@@ -148,22 +155,22 @@ async def collect(
             continue  # still queued or running
         if result.get("status") != "done":
             store.fail_eval_run(run.job_id)  # no signal from a failed/expired job
-            touched.add((run.artifact, run.task_class))
+            touched.add((run.artifact, run.task_class, run.generation))
             continue
         text = _completion_text(result)
         index = run.item_index
         if text is None or index >= len(suite):
             store.fail_eval_run(run.job_id)
-            touched.add((run.artifact, run.task_class))
+            touched.add((run.artifact, run.task_class, run.generation))
             continue
         store.score_eval_run(run.job_id, bool(suite[index].check(text)))
         scored += 1
-        touched.add((run.artifact, run.task_class))
+        touched.add((run.artifact, run.task_class, run.generation))
 
     # A batch whose items have all settled yields an ability score — but only if enough of
     # them actually produced signal.
-    for artifact, task_class in touched:
-        pending, done, passed, failed = store.eval_progress(artifact, task_class)
+    for artifact, task_class, generation in touched:
+        pending, done, passed, failed = store.eval_progress(artifact, task_class, generation)
         if pending:
             continue  # still in flight
         total = done + failed

@@ -113,14 +113,25 @@ def test_ability_endpoint(client):
 
 def test_clear_ability_endpoint_drops_only_that_artifact(client):
     resp = client.post("/ability/clear", params={"artifact": "llama3.2:3b"})
-    assert resp.json() == {"artifact": "llama3.2:3b", "cleared": 5}  # 5 task classes
+    # `generation` alongside `cleared`: dropping the score is only half the reset, since
+    # ability is recomputed from the artifact's eval_runs (ADR 15).
+    assert resp.json() == {"artifact": "llama3.2:3b", "cleared": 5, "generation": 2}
 
     data = client.get("/ability").json()
     artifacts = {row["artifact"] for row in data["matrix"]}
     assert "llama3.2:3b" not in artifacts
     assert "llama3.1:70b" in artifacts  # untouched
+    assert client.app.state.store.current_eval_generation("llama3.1:70b") == 1
 
 
 def test_clear_ability_endpoint_unknown_artifact_is_a_noop(client):
     resp = client.post("/ability/clear", params={"artifact": "no-such-artifact"})
-    assert resp.json() == {"artifact": "no-such-artifact", "cleared": 0}
+    assert resp.json() == {"artifact": "no-such-artifact", "cleared": 0, "generation": 2}
+
+
+def test_clearing_twice_keeps_advancing_the_generation(client):
+    """Each reset must be its own round: an operator who clears, sees a bad batch, and
+    clears again must not have the second measurement blended with the first."""
+    for expected in (2, 3, 4):
+        body = client.post("/ability/clear", params={"artifact": "llama3.2:3b"}).json()
+        assert body["generation"] == expected

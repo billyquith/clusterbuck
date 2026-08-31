@@ -303,9 +303,15 @@ def create_app(
         Normally only the heartbeat handler calls this, on a *digest* change. An operator
         needs the same reset when an artifact's behaviour changed without its digest
         moving — e.g. a model-server config/template edit — so expose it directly.
+
+        Dropping the score is only half of it: ability is recomputed from the artifact's
+        eval_runs, so a new measurement generation is opened too. Otherwise "force a
+        re-measurement" produced a score averaged with the measurements the operator was
+        trying to discard, which is the opposite of what they asked for.
         """
-        n = app.state.store.clear_ability(artifact, SCALE_VERSION)
-        return {"artifact": artifact, "cleared": n}
+        n, generation = app.state.store.supersede_artifact(
+            artifact, SCALE_VERSION, now=_now_iso())
+        return {"artifact": artifact, "cleared": n, "generation": generation}
 
     @app.get("/eval")
     async def get_eval() -> dict:
@@ -320,8 +326,8 @@ def create_app(
             "needs_eval": pending,
             "batches": [
                 {"artifact": r["artifact"], "task_class": r["task_class"],
-                 "pending": r["pending"], "scored": r["scored"],
-                 "failed": r["failed"], "passed": r["passed"]}
+                 "generation": r["generation"], "pending": r["pending"],
+                 "scored": r["scored"], "failed": r["failed"], "passed": r["passed"]}
                 for r in store.eval_runs_summary()
             ],
         }
@@ -657,10 +663,12 @@ def create_app(
         observed = {a: (body.digests or {}).get(a) for a in body.installed}
         notes: list[str] = []
         for artifact, old, new in store.observe_node_models(node_id, observed, now):
-            # The artifact changed upstream, so it is a NEW artifact (ADR 15): drop its
-            # scores outright. Merely raising a proposal left the stale score driving routing
-            # forever, because nothing consumed reeval proposals.
-            store.clear_ability(artifact, SCALE_VERSION)
+            # The artifact changed upstream, so it is a NEW artifact (ADR 15): it inherits
+            # neither the stored score nor the measurements behind it. Merely raising a
+            # proposal left the stale score driving routing forever, because nothing consumed
+            # reeval proposals; dropping the score alone still let the next batch average the
+            # new artifact's items with the old one's.
+            store.supersede_artifact(artifact, SCALE_VERSION, now=now)
             if propose_reeval(store, node_id, artifact, old, new, now=now):
                 notes.append(f"{artifact} changed upstream — re-evaluation proposed")
 

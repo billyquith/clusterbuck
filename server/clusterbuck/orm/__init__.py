@@ -9,6 +9,7 @@ from __future__ import annotations
 from .ability import Ability
 from .attention_lease import AttentionLease
 from .catalog_entry import CatalogEntry
+from .eval_generation import EvalGeneration
 from .eval_run import EvalRun
 from .job import Job
 from .join_token import JoinToken
@@ -19,6 +20,7 @@ from .reservation import Reservation
 from .usage import Usage
 
 __all__ = [
-    "Ability", "AttentionLease", "CatalogEntry", "EvalRun", "Job", "JoinToken",
+    "Ability", "AttentionLease", "CatalogEntry", "EvalGeneration", "EvalRun", "Job",
+    "JoinToken",
     "Node", "NodeModel", "Proposal", "Reservation", "Usage",
 ]

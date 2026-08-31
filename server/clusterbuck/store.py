@@ -21,6 +21,7 @@ from .db import make_engine
 from .orm.ability import Ability
 from .orm.attention_lease import AttentionLease
 from .orm.catalog_entry import CatalogEntry
+from .orm.eval_generation import EvalGeneration
 from .orm.eval_run import EvalRun
 from .orm.job import Job
 from .orm.join_token import JoinToken
@@ -53,6 +54,9 @@ _MIGRATIONS = {
     },
     "ability": {
         "provenance": "ALTER TABLE ability ADD COLUMN provenance TEXT NOT NULL DEFAULT 'measured'",
+    },
+    "eval_runs": {
+        "generation": "ALTER TABLE eval_runs ADD COLUMN generation INTEGER NOT NULL DEFAULT 1",
     },
     "nodes": {
         "disk_quota_gb": "ALTER TABLE nodes ADD COLUMN disk_quota_gb REAL",
@@ -106,7 +110,8 @@ class Store:
             Job.__table__, Reservation.__table__, Node.__table__,
             JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
             NodeModel.__table__, Proposal.__table__, Ability.__table__,
-            EvalRun.__table__, Usage.__table__, PerfRun.__table__, PerfSample.__table__,
+            EvalRun.__table__, EvalGeneration.__table__, Usage.__table__,
+            PerfRun.__table__, PerfSample.__table__,
         ])
         with self._conn() as c:
             for table, columns in _MIGRATIONS.items():
@@ -296,25 +301,61 @@ class Store:
             row = s.get(Ability, (artifact, task_class, scale_version))
             return row.provenance if row else None
 
-    def clear_ability(self, artifact: str, scale_version: str) -> int:
-        """Drop an artifact's scores so it must be re-measured (ADR 15: a changed digest is
-        a NEW artifact and inherits nothing). Returns rows removed."""
+    def supersede_artifact(self, artifact: str, scale_version: str, *,
+                           now: str) -> tuple[int, int]:
+        """ADR 15: this is a NEW artifact and inherits NOTHING. Returns (scores dropped,
+        new generation).
+
+        Two effects, and both are needed. Dropping the stored scores alone left the *inputs*
+        to the next score in place: ability is recomputed from every eval_run recorded for
+        the (artifact, task_class), so the re-eval averaged the new artifact's items together
+        with the old artifact's — a model that now passes everything was recorded at 8.0
+        instead of 10.0, carrying the superseded measurement forward. So opening a new
+        generation is part of the same act, not a separate chore for each caller to remember
+        (there are two: the heartbeat's digest change, and the operator's /ability/clear).
+
+        Runs still in flight for the previous generation are retired rather than left
+        pending: their jobs measure the artifact that is no longer here, and leaving them
+        `pending` would also keep the artifact permanently "under eval" and undispatchable.
+        """
         with self._session() as s:
-            stmt = select(Ability).where(
+            rows = list(s.exec(select(Ability).where(
                 Ability.artifact == artifact, Ability.scale_version == scale_version
-            )
-            rows = list(s.exec(stmt))
+            )))
             for row in rows:
                 s.delete(row)
-            s.commit()
-            return len(rows)
 
-    def failed_eval_runs(self, artifact: str, task_class: str) -> int:
+            for run in s.exec(select(EvalRun).where(
+                EvalRun.artifact == artifact, EvalRun.state == "pending"
+            )):
+                run.state = "stale"
+                s.add(run)
+
+            marker = s.get(EvalGeneration, artifact)
+            if marker is None:
+                marker = EvalGeneration(artifact=artifact, generation=2, updated_at=now)
+            else:
+                marker.generation += 1
+                marker.updated_at = now
+            s.add(marker)
+            s.commit()
+            return len(rows), marker.generation
+
+    def current_eval_generation(self, artifact: str) -> int:
+        """The measurement round new runs for this artifact belong to."""
+        with self._session() as s:
+            marker = s.get(EvalGeneration, artifact)
+            return marker.generation if marker else 1
+
+    def failed_eval_runs(self, artifact: str, task_class: str, generation: int = 1) -> int:
+        """No-signal runs in ONE generation. Counting every generation let a batch that
+        once failed its way to the cap block the artifact from ever being re-measured."""
         with self._conn() as c:
             return c.execute(
                 "SELECT COUNT(*) AS n FROM eval_runs "
-                "WHERE artifact = ? AND task_class = ? AND state = 'failed'",
-                (artifact, task_class),
+                "WHERE artifact = ? AND task_class = ? AND state = 'failed' "
+                "AND generation = ?",
+                (artifact, task_class, generation),
             ).fetchone()["n"]
 
     def get_ability(self, artifact: str, task_class: str, scale_version: str) -> float | None:
@@ -487,13 +528,15 @@ class Store:
     # --- eval runs (M7) ---
 
     def add_eval_run(self, *, job_id: str, artifact: str, task_class: str,
-                     item_index: int, result_key: str, created_at: str) -> None:
+                     item_index: int, result_key: str, created_at: str,
+                     generation: int = 1) -> None:
         with self._session() as s:
             if s.get(EvalRun, job_id) is not None:
                 return  # INSERT OR IGNORE equivalent
             s.add(EvalRun(
                 job_id=job_id, artifact=artifact, task_class=task_class,
                 item_index=item_index, result_key=result_key, created_at=created_at,
+                generation=generation,
             ))
             s.commit()
 
@@ -524,12 +567,18 @@ class Store:
                 s.add(row)
                 s.commit()
 
-    def eval_progress(self, artifact: str, task_class: str) -> tuple[int, int, int, int]:
-        """(pending, scored, passed, failed) for one (artifact, task_class) batch.
+    def eval_progress(self, artifact: str, task_class: str,
+                      generation: int = 1) -> tuple[int, int, int, int]:
+        """(pending, scored, passed, failed) for ONE batch — one (artifact, task_class,
+        generation).
 
         `failed` is reported separately and deliberately: a run that produced no signal is
         neither pending nor scored, so omitting it made a partly-broken batch look finished
         and recorded an ability from only the surviving items.
+
+        `generation` is what keeps a batch a batch. Aggregating across generations meant a
+        re-measured artifact was scored on its predecessor's items too (ADR 15); retired
+        (`stale`) runs are excluded for the same reason.
         """
         with self._conn() as c:
             r = c.execute(
@@ -538,8 +587,8 @@ class Store:
                 "SUM(state = 'scored') AS scored, "
                 "SUM(passed = 1) AS passed, "
                 "SUM(state = 'failed') AS failed "
-                "FROM eval_runs WHERE artifact = ? AND task_class = ?",
-                (artifact, task_class),
+                "FROM eval_runs WHERE artifact = ? AND task_class = ? AND generation = ?",
+                (artifact, task_class, generation),
             ).fetchone()
             return (r["pending"] or 0, r["scored"] or 0, r["passed"] or 0, r["failed"] or 0)
 
@@ -551,13 +600,17 @@ class Store:
             return {r["artifact"] for r in rows}
 
     def eval_runs_summary(self, limit: int = 50) -> list[sqlite3.Row]:
+        """One row per batch. Grouped by generation as well as (artifact, task_class), so a
+        re-measured artifact reads as a fresh batch rather than as its predecessor's totals
+        plus its own — the same separation the score itself depends on."""
         with self._conn() as c:
             return c.execute(
-                "SELECT artifact, task_class, "
+                "SELECT artifact, task_class, generation, "
                 "SUM(state = 'pending') AS pending, SUM(state = 'scored') AS scored, "
                 "SUM(state = 'failed') AS failed, SUM(passed = 1) AS passed "
-                "FROM eval_runs GROUP BY artifact, task_class "
-                "ORDER BY artifact, task_class LIMIT ?",
+                "FROM eval_runs WHERE state != 'stale' "
+                "GROUP BY artifact, task_class, generation "
+                "ORDER BY artifact, task_class, generation DESC LIMIT ?",
                 (limit,),
             ).fetchall()
 

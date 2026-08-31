@@ -260,3 +260,75 @@ async def test_seeded_artifacts_are_still_measured(store, queue):
     await collect(store, queue, now="t", suite=SUITE)
     assert store.ability_provenance("llama3.2:3b", "extract", SCALE_VERSION) == "measured"
     assert artifacts_needing_eval(store, suite=SUITE) == []
+
+
+async def test_a_superseded_artifact_is_scored_only_on_its_own_measurements(store, queue):
+    """ADR 15: a changed digest is a NEW artifact and inherits nothing — including the
+    measurements the score is computed from.
+
+    Dropping the ability row was not enough. Ability is recomputed from every eval_run
+    recorded for the (artifact, task_class), so the re-eval averaged the new artifact's
+    items together with the old artifact's: a model that now passed 2 of 2 was recorded at
+    8.0 (3 of 4 across both rounds) rather than 10.0, carrying the superseded measurement
+    forward under a new digest.
+    """
+    _enroll_with(store, [ARTIFACT])
+    single = [SUITE[0], SUITE[0]]  # two items, one task class
+
+    async def run_batch(*answers: str) -> None:
+        await dispatch(store, queue, now="t", suite=single)
+        for run, answer in zip(store.pending_eval_runs(), answers, strict=True):
+            await queue.client.set(run.result_key, json.dumps({
+                "job_id": run.job_id, "status": "done", "worker": "w",
+                "completed_at": "t",
+                "completion": {"choices": [{"message": {"role": "a", "content": answer}}]}}))
+        await collect(store, queue, now="t", suite=single)
+
+    # Round 1: the old artifact gets one of two right.
+    await run_batch('{"n":1}', "not json")
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 5.5
+
+    # The artifact changes upstream.
+    cleared, generation = store.supersede_artifact(ARTIFACT, SCALE_VERSION, now="t2")
+    assert (cleared, generation) == (1, 2)
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None
+
+    # Round 2: the new artifact gets both right, and is scored on those two items ALONE.
+    await run_batch('{"n":1}', '{"n":2}')
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 10.0
+    assert store.eval_progress(ARTIFACT, "extract", generation) == (0, 2, 2, 0)
+
+
+async def test_superseding_frees_an_artifact_that_exhausted_its_failure_budget(store, queue):
+    """The MAX_FAILED_RUNS cap counted failures across all time, so an artifact that once
+    failed its way to the cap could never be measured again — not even as a new artifact
+    with a new digest. The budget is per measurement round."""
+    _enroll_with(store, [ARTIFACT])
+    single = [SUITE[0]]
+
+    for _ in range(10):
+        await dispatch(store, queue, now="t", suite=single)
+        for run in store.pending_eval_runs():
+            await queue.client.set(run.result_key, json.dumps({
+                "job_id": run.job_id, "status": "failed", "worker": "w",
+                "completed_at": "t", "error": "always broken"}))
+        await collect(store, queue, now="t", suite=single)
+    assert artifacts_needing_eval(store, suite=single) == []   # budget exhausted
+
+    store.supersede_artifact(ARTIFACT, SCALE_VERSION, now="t2")
+    assert [a for a, _ in artifacts_needing_eval(store, suite=single)] == [ARTIFACT]
+
+
+async def test_superseding_retires_runs_still_in_flight(store, queue):
+    """An in-flight run measures the artifact that no longer exists here. Left `pending` it
+    would both contaminate the next score and keep the artifact permanently 'under eval',
+    which is a state dispatch refuses to touch."""
+    _enroll_with(store, [ARTIFACT])
+    await dispatch(store, queue, now="t", suite=SUITE)
+    assert len(store.pending_eval_runs()) == 2
+    assert ARTIFACT in store.artifacts_under_eval()
+
+    store.supersede_artifact(ARTIFACT, SCALE_VERSION, now="t2")
+    assert store.pending_eval_runs() == []
+    assert ARTIFACT not in store.artifacts_under_eval()
+    assert await dispatch(store, queue, now="t2", suite=SUITE) == 2

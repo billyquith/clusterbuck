@@ -27,6 +27,7 @@ from clusterbuck.db import make_engine
 from clusterbuck.orm.ability import Ability
 from clusterbuck.orm.attention_lease import AttentionLease
 from clusterbuck.orm.catalog_entry import CatalogEntry
+from clusterbuck.orm.eval_generation import EvalGeneration
 from clusterbuck.orm.eval_run import EvalRun
 from clusterbuck.orm.job import Job
 from clusterbuck.orm.join_token import JoinToken
@@ -98,7 +99,8 @@ def _build_legacy_database(db_path) -> None:
         Job.__table__, Reservation.__table__, Node.__table__,
         JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
         NodeModel.__table__, Proposal.__table__, Ability.__table__,
-        EvalRun.__table__, Usage.__table__, PerfRun.__table__, PerfSample.__table__,
+        EvalRun.__table__, EvalGeneration.__table__, Usage.__table__,
+        PerfRun.__table__, PerfSample.__table__,
     ])
     conn = sqlite3.connect(str(db_path), timeout=5.0)
     conn.row_factory = sqlite3.Row
@@ -123,7 +125,7 @@ def test_fresh_database_matches_alembic_baseline(tmp_path) -> None:
     migrate.upgrade_to_head(str(alembic_db))
 
     assert _schema_signature(store_db) == _schema_signature(alembic_db)
-    assert _alembic_version(store_db) == _alembic_version(alembic_db) == ("0002",)
+    assert _alembic_version(store_db) == _alembic_version(alembic_db) == ("0003",)
 
 
 def test_legacy_database_is_stamped_not_migrated(tmp_path) -> None:
@@ -138,7 +140,7 @@ def test_legacy_database_is_stamped_not_migrated(tmp_path) -> None:
     Store(str(legacy_db))  # must not raise, and must not alter the schema
 
     assert _schema_signature(legacy_db) == before
-    assert _alembic_version(legacy_db) == ("0002",)
+    assert _alembic_version(legacy_db) == ("0003",)
 
     # A second Store() against the now-stamped database takes the "already stamped"
     # branch (plain `alembic upgrade head`, a no-op since it's already at head).

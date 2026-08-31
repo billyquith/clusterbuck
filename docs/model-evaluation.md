@@ -100,6 +100,15 @@ over the years. Ability values are always reported with their scale version.
 - A periodic light regression pass (e.g. quarterly), plus optional **shadow testing** —
   run a candidate silently on a sample of real jobs and compare before promotion.
 
+A re-measurement is a **new generation**, not a continuation. Ability is derived from the
+recorded eval runs for an (artifact, task class), so "this artifact must be re-measured"
+has to invalidate those runs as well as the score itself — otherwise the fresh batch is
+averaged with the superseded artifact's items and the old measurement is carried forward
+under a new digest. Runs still in flight when an artifact is superseded are retired: they
+are measuring something that is no longer installed. The per-batch retry budget resets
+with the generation too, so an artifact whose previous round failed for infrastructure
+reasons is not barred from ever being measured again.
+
 ## How the router uses ability
 
 The client-facing request contract becomes **need-shaped** rather than supply-shaped:
