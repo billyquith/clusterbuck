@@ -12,24 +12,15 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Iterator
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (
-    id           TEXT PRIMARY KEY,
-    result_key   TEXT NOT NULL,
-    capability   TEXT NOT NULL,
-    status       TEXT NOT NULL,
-    created_at   TEXT NOT NULL,
-    urgency      TEXT NOT NULL DEFAULT 'waitable',
-    escalate_at  REAL,            -- epoch seconds; only set for waitable(N)
-    escalated    INTEGER NOT NULL DEFAULT 0,
-    reservation  TEXT,            -- opt-in reservation id this job queues against
-    deadline_epoch REAL,          -- epoch seconds; for expiry sweep
-    client_key   TEXT,            -- optional client identity (for attention scoping)
-    task_class   TEXT,            -- need-shaped task class (for attention scoping)
-    promoted_by  TEXT,            -- null | 'age' | 'attention' (escalation provenance)
-    attempts     INTEGER NOT NULL DEFAULT 0   -- delivery attempts, incremented by the reaper
-);
+from sqlmodel import Session, SQLModel, select
 
+from .db import make_engine
+from .orm.job import Job
+
+# `jobs` moved to orm/job.py (SQLModel) — the first domain off raw sqlite3. See that
+# module's docstring, and store.py's own docstring history in git, for why. Its table is
+# created via `SQLModel.metadata.create_all` in `Store.__init__`, not this DDL string.
+_SCHEMA = """
 -- Model catalog (fleet-management.md → Model catalog): curated known-good artifacts with
 -- the metadata the "fits" gate needs. `expected_ability` is an admin-curated hint used only
 -- to RANK proposals — the real gate is measured ability after install (ADR 15).
@@ -212,8 +203,11 @@ _MIGRATIONS = {
 class Store:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
+        self._engine = make_engine(db_path)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+        SQLModel.metadata.create_all(self._engine, tables=[Job.__table__])
+        with self._conn() as c:
             for table, columns in _MIGRATIONS.items():
                 existing = {row["name"] for row in c.execute(f"PRAGMA table_info({table})")}
                 for col, ddl in columns.items():
@@ -236,6 +230,13 @@ class Store:
         finally:
             conn.close()
 
+    def _session(self) -> Session:
+        # expire_on_commit=False: several methods below return rows after committing a
+        # change to them (e.g. attention_promote), and callers read attributes off those
+        # rows after this session has already closed. Expired attributes on a detached
+        # instance raise DetachedInstanceError instead of lazily refreshing.
+        return Session(self._engine, expire_on_commit=False)
+
     def insert(
         self,
         *,
@@ -250,94 +251,100 @@ class Store:
         client_key: str | None = None,
         task_class: str | None = None,
     ) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO jobs "
-                "(id, result_key, capability, status, created_at, urgency, escalate_at, "
-                "reservation, deadline_epoch, client_key, task_class) "
-                "VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
-                (id, result_key, capability, created_at, urgency, escalate_at,
-                 reservation, deadline_epoch, client_key, task_class),
-            )
+        with self._session() as s:
+            s.add(Job(
+                id=id, result_key=result_key, capability=capability, status="queued",
+                created_at=created_at, urgency=urgency, escalate_at=escalate_at,
+                reservation=reservation, deadline_epoch=deadline_epoch,
+                client_key=client_key, task_class=task_class,
+            ))
+            s.commit()
 
-    def get(self, id: str) -> sqlite3.Row | None:
-        with self._conn() as c:
-            cur = c.execute("SELECT * FROM jobs WHERE id = ?", (id,))
-            return cur.fetchone()
+    def get(self, id: str) -> Job | None:
+        with self._session() as s:
+            return s.get(Job, id)
 
     def set_status(self, id: str, status: str) -> None:
-        with self._conn() as c:
-            c.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, id))
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is not None:
+                job.status = status
+                s.add(job)
+                s.commit()
 
     def set_attempts(self, id: str, attempts: int) -> None:
         """Record a delivery attempt (the reaper's requeue count) so it is observable."""
-        with self._conn() as c:
-            c.execute("UPDATE jobs SET attempts = ? WHERE id = ?", (attempts, id))
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is not None:
+                job.attempts = attempts
+                s.add(job)
+                s.commit()
 
-    def due_for_escalation(self, now: float) -> list[sqlite3.Row]:
+    def due_for_escalation(self, now: float) -> list[Job]:
         """waitable jobs whose patience bound has expired and haven't escalated yet.
 
         Doneness is NOT judged here (SQLite status is updated lazily on poll); the caller
         must confirm against the Redis result blob before treating a row as unserved.
         """
-        with self._conn() as c:
-            cur = c.execute(
-                "SELECT id, result_key, capability, escalate_at FROM jobs "
-                "WHERE urgency = 'waitable' AND escalated = 0 "
-                "AND escalate_at IS NOT NULL AND escalate_at <= ?",
-                (now,),
+        with self._session() as s:
+            stmt = select(Job).where(
+                Job.urgency == "waitable",
+                Job.escalated == 0,
+                Job.escalate_at.is_not(None),
+                Job.escalate_at <= now,
             )
-            return cur.fetchall()
+            return list(s.exec(stmt))
 
     def mark_escalated(self, id: str) -> None:
         """Promote waitable → necessary on age (records the trajectory + provenance)."""
-        with self._conn() as c:
-            c.execute(
-                "UPDATE jobs SET urgency = 'necessary', escalated = 1, promoted_by = 'age' "
-                "WHERE id = ?",
-                (id,),
-            )
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is not None:
+                job.urgency = "necessary"
+                job.escalated = 1
+                job.promoted_by = "age"
+                s.add(job)
+                s.commit()
 
     # --- client attention (M4a) ---
 
-    def attention_promote(self, client_key: str, scope: list[str] | None) -> list[sqlite3.Row]:
+    def attention_promote(self, client_key: str, scope: list[str] | None) -> list[Job]:
         """Promote a client's waitable backlog to necessary. Returns the affected rows."""
-        params: list = [client_key]
-        scope_sql = ""
-        if scope:
-            scope_sql = f" AND task_class IN ({','.join('?' * len(scope))})"
-            params += scope
-        with self._conn() as c:
-            rows = c.execute(
-                "SELECT id, capability FROM jobs WHERE client_key = ? "
-                "AND urgency = 'waitable' AND escalated = 0" + scope_sql,
-                params,
-            ).fetchall()
-            ids = [r["id"] for r in rows]
-            if ids:
-                c.execute(
-                    f"UPDATE jobs SET urgency = 'necessary', escalated = 1, "
-                    f"promoted_by = 'attention' WHERE id IN ({','.join('?' * len(ids))})",
-                    ids,
-                )
+        with self._session() as s:
+            stmt = select(Job).where(
+                Job.client_key == client_key,
+                Job.urgency == "waitable",
+                Job.escalated == 0,
+            )
+            if scope:
+                stmt = stmt.where(Job.task_class.in_(scope))
+            rows = list(s.exec(stmt))
+            for job in rows:
+                job.urgency = "necessary"
+                job.escalated = 1
+                job.promoted_by = "attention"
+                s.add(job)
+            s.commit()
             return rows
 
-    def attention_promoted_jobs(self, client_key: str) -> list[sqlite3.Row]:
-        with self._conn() as c:
-            return c.execute(
-                "SELECT id, result_key FROM jobs "
-                "WHERE client_key = ? AND promoted_by = 'attention'",
-                (client_key,),
-            ).fetchall()
+    def attention_promoted_jobs(self, client_key: str) -> list[Job]:
+        with self._session() as s:
+            stmt = select(Job).where(
+                Job.client_key == client_key, Job.promoted_by == "attention"
+            )
+            return list(s.exec(stmt))
 
     def demote_job(self, id: str) -> None:
         """Return an attention-promoted job to waitable (lease lapsed, still unstarted)."""
-        with self._conn() as c:
-            c.execute(
-                "UPDATE jobs SET urgency = 'waitable', escalated = 0, promoted_by = NULL "
-                "WHERE id = ?",
-                (id,),
-            )
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is not None:
+                job.urgency = "waitable"
+                job.escalated = 0
+                job.promoted_by = None
+                s.add(job)
+                s.commit()
 
     def upsert_attention_lease(self, client_key: str, scope: str | None, expires_at: float) -> None:
         with self._conn() as c:
