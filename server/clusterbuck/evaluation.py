@@ -14,6 +14,7 @@ cost-quality arbitrage. Those sit behind this seam; faking them would only pass 
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable
@@ -54,9 +55,19 @@ def seed_ability(store: Store, *, now: str, scale_version: str = SCALE_VERSION) 
 
 # --- tier-1 programmatic checks (deterministic, unarguable) ---
 
+# Chat models routinely wrap a JSON answer in a markdown fence (```json ... ```) even when
+# told not to — reasoning models especially. Strip one before parsing so that formatting
+# habit doesn't fail an otherwise-correct answer.
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL)
+
+
 def check_json_valid(output: str) -> bool:
+    text = (output or "").strip()
+    fence = _JSON_FENCE_RE.search(text)
+    if fence:
+        text = fence.group(1).strip()
     try:
-        json.loads(output)
+        json.loads(text)
         return True
     except (ValueError, TypeError):
         return False
