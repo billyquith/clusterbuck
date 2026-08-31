@@ -39,6 +39,19 @@ def resolve_capability(
     scale_version: str = SCALE_VERSION,
 ) -> str:
     if capability is not None:
+        if fleet is None:
+            raise NoCapableArtifact(
+                f"capability {capability!r} requested but no fleet registry is configured"
+            )
+        if capability not in fleet.capabilities:
+            detail = f"unknown capability {capability!r}"
+            available = sorted(fleet.capabilities)
+            detail += (
+                f" (available: {', '.join(available)})"
+                if available
+                else " (fleet registry has no capabilities registered)"
+            )
+            raise NoCapableArtifact(detail)
         return capability
 
     if fleet is None or task_class is None or min_ability is None:
