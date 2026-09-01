@@ -143,6 +143,19 @@ def test_summary_unenforced_when_no_cap_configured(store):
     assert s["budget"]["enforced"] is False
 
 
+def test_recent_usage_orders_newest_first_and_respects_limit(store):
+    """Drives the dashboard timeline — a coarse by_day rollup is useless at fleet-sized
+    (tens of jobs) volumes, so the raw rows are exposed directly, newest first."""
+    for i, ts in enumerate(["2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z",
+                            "2026-01-01T00:10:00Z"]):
+        store.record_usage(job_id=f"j{i}", ts=ts, capability=CAP, model="m", node="n",
+                           venue="local", tokens_in=1, tokens_out=1, outcome="done",
+                           cost=0.0, day="2026-01-01")
+
+    rows = store.recent_usage(limit=2)
+    assert [r.job_id for r in rows] == ["j2", "j1"]
+
+
 def test_usage_endpoint_shape(client):
     # Endpoint wiring; real capture through the running coordinator is proven by
     # deploy/e2e/usage.sh.

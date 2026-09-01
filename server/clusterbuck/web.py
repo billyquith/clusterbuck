@@ -49,6 +49,39 @@ async def ui_headline(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "partials/headline.html", {"u": u})
 
 
+@web_routes.get("/ui/connections", response_class=HTMLResponse)
+async def ui_connections(request: Request) -> HTMLResponse:
+    """Coordinator <-> worker/cloud topology: every enrolled node and every registered
+    cloud provider account, each with how many jobs it has actually served (usage_rollup's
+    "node" column carries a worker's node_id, or "cloud:<provider>" — cloud_executor.py)."""
+    from .cloud_executor import cloud_capabilities, provider_of
+
+    store = request.app.state.store
+    fleet = request.app.state.fleet
+    jobs_by_key = {r["key"]: r["jobs"] for r in store.usage_rollup("node")}
+
+    workers = [
+        {"node_id": n.node_id, "mode": n.mode or "unknown",
+         "jobs": jobs_by_key.get(n.node_id, 0)}
+        for n in store.list_nodes()
+    ]
+    providers = sorted({provider_of(fleet.capabilities[cap].model)
+                        for cap in cloud_capabilities(fleet)}) if fleet else []
+    cloud = [{"provider": p, "jobs": jobs_by_key.get(f"cloud:{p}", 0)} for p in providers]
+
+    return templates.TemplateResponse(
+        request, "partials/connections.html", {"workers": workers, "cloud": cloud}
+    )
+
+
+@web_routes.get("/ui/timeline", response_class=HTMLResponse)
+async def ui_timeline(request: Request) -> HTMLResponse:
+    """Most recent metered jobs, newest first (Store.recent_usage) — the raw events behind
+    the by_day rollup, fine-grained enough to matter at fleet-sized job volumes."""
+    rows = request.app.state.store.recent_usage(limit=30)
+    return templates.TemplateResponse(request, "partials/timeline.html", {"rows": rows})
+
+
 @web_routes.get("/ui/queues", response_class=HTMLResponse)
 async def ui_queues(request: Request) -> HTMLResponse:
     fleet = request.app.state.fleet

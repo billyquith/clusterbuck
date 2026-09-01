@@ -1,0 +1,35 @@
+<h2>Coordinator connections</h2>
+<div class="hub-diagram">
+  <div class="hub">coordinator</div>
+  <div class="spokes">
+    <div class="branch workers">
+      <div class="branch-label">local workers</div>
+      {% if workers %}
+        {% for w in workers %}
+        <div class="spoke{{ ' idle' if w.jobs == 0 else '' }}">
+          <span class="spoke-line"></span>
+          <span class="spoke-name">{{ w.node_id }}</span>
+          <span class="pill">{{ w.mode }}</span>
+          <span class="spoke-jobs">{{ w.jobs }} job{{ 's' if w.jobs != 1 else '' }}</span>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="empty">no workers enrolled</p>
+      {% endif %}
+    </div>
+    <div class="branch cloud">
+      <div class="branch-label">cloud</div>
+      {% if cloud %}
+        {% for c in cloud %}
+        <div class="spoke{{ ' idle' if c.jobs == 0 else '' }}">
+          <span class="spoke-line"></span>
+          <span class="spoke-name">{{ c.provider }}</span>
+          <span class="spoke-jobs">{{ c.jobs }} job{{ 's' if c.jobs != 1 else '' }}</span>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="empty">no cloud providers configured</p>
+      {% endif %}
+    </div>
+  </div>
+</div>

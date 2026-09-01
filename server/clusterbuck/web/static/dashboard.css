@@ -66,3 +66,51 @@ form.run-form .cats { display: flex; flex-direction: column; gap: .2rem; font-si
   color: var(--ink); text-transform: none; letter-spacing: normal; max-height: 5.6rem;
   overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: .4rem .6rem; }
 form.run-form .cats span { display: flex; gap: .4rem; align-items: center; }
+
+/* Coordinator connections diagram: a hub box with two spoked branches (workers, cloud). */
+.hub-diagram { display: flex; align-items: flex-start; gap: 1rem; }
+.hub {
+  flex: 0 0 auto; align-self: center; background: #1f2530; border: 1px solid var(--line);
+  border-radius: 8px; padding: .7rem 1rem; font-size: .82rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--ink);
+}
+.spokes { flex: 1; display: flex; flex-direction: column; gap: .9rem; min-width: 0; }
+.branch-label {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); margin-bottom: .35rem;
+}
+.spoke {
+  display: flex; align-items: center; gap: .5rem; padding: .3rem 0;
+  border-bottom: 1px dashed var(--line); font-size: .82rem;
+}
+.spoke:last-child { border-bottom: none; }
+.spoke.idle { opacity: .55; }
+.spoke-line { flex: 0 0 1.2rem; height: 1px; background: var(--accent); }
+.branch.cloud .spoke-line { background: var(--warn); }
+.spoke-name { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.spoke-jobs { margin-left: auto; color: var(--muted); white-space: nowrap; }
+
+/* Recent-activity timeline: a vertical rail with one dot per metered job, newest first. */
+.timeline {
+  display: flex; flex-direction: column; border-left: 2px solid var(--line);
+  margin-left: .3rem; max-height: 20rem; overflow-y: auto; overflow-x: auto;
+}
+.tl-item {
+  display: flex; align-items: baseline; gap: .5rem; padding: .3rem .7rem;
+  font-size: .78rem; min-width: max-content;
+}
+.tl-dot {
+  flex: 0 0 auto; width: .5rem; height: .5rem; border-radius: 50%;
+  margin-left: -.95rem; background: var(--accent);
+}
+.tl-dot.cloud { background: var(--warn); }
+.tl-time { flex: 0 0 auto; white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tl-node {
+  flex: 0 1 6rem; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-weight: 500;
+}
+.tl-cap {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--muted);
+}
+.tl-outcome { flex: 0 0 auto; margin-left: auto; color: var(--muted); }

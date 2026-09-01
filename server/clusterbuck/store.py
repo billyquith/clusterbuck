@@ -744,6 +744,13 @@ class Store:
                 f"FROM usage GROUP BY {group} ORDER BY cost DESC"
             ).fetchall()
 
+    def recent_usage(self, limit: int = 40) -> list[Usage]:
+        """Most recent usage rows, newest first — drives the dashboard timeline. `ts` is
+        ISO-8601 with a 'Z' suffix (usage_scan), so ordering it as text sorts chronologically."""
+        with self._session() as s:
+            stmt = select(Usage).order_by(Usage.ts.desc()).limit(limit)
+            return list(s.exec(stmt))
+
     def cloud_spend_in_month(self, month_prefix: str) -> float:
         """Actual cloud spend for a 'YYYY-MM' prefix (budget burn)."""
         with self._conn() as c:

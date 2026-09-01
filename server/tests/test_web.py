@@ -33,6 +33,40 @@ def test_queues_fragment(client):
     assert client.get("/ui/queues").status_code == 200
 
 
+def test_connections_fragment_empty(client):
+    r = client.get("/ui/connections")
+    assert r.status_code == 200
+    assert "no workers enrolled" in r.text
+
+
+def test_connections_fragment_shows_enrolled_worker(client):
+    token = client.post("/nodes/tokens").json()["join_token"]
+    client.post("/nodes/enroll", json={
+        "join_token": token, "hostname": "node-x", "os": "darwin", "arch": "arm64",
+        "hw": {"ram_gb": 64, "accelerator": "metal", "vram_gb": 32, "disk_free_gb": 512},
+        "profile": "shared",
+    })
+    r = client.get("/ui/connections")
+    assert r.status_code == 200
+    assert "node-" in r.text  # enrolled node id
+    assert "0 jobs" in r.text
+
+
+def test_connections_fragment_lists_cloud_providers(client):
+    # The conftest client runs from server/, so it loads the seed fleet.yaml, which
+    # registers anthropic (claude-sonnet) and openai (gpt-4o-mini) provider accounts.
+    r = client.get("/ui/connections")
+    assert r.status_code == 200
+    assert "anthropic" in r.text
+    assert "openai" in r.text
+
+
+def test_timeline_fragment_empty(client):
+    r = client.get("/ui/timeline")
+    assert r.status_code == 200
+    assert "no jobs metered yet" in r.text
+
+
 def test_fleet_fragment_renders_capabilities(client):
     # The conftest client runs from server/, so it loads the seed fleet.yaml.
     r = client.get("/ui/fleet")
