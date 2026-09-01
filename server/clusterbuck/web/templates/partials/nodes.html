@@ -1,5 +1,6 @@
 <h2>Enrolled nodes</h2>
 {% if nodes %}
+<div class="table-scroll">
 <table>
   <tr><th>node / hardware</th><th>version</th><th>mode</th><th>models (installed / warm)</th><th>capabilities</th></tr>
   {% for n in nodes %}
@@ -33,6 +34,7 @@
   </tr>
   {% endfor %}
 </table>
+</div>
 {% else %}
 <p class="empty">no enrolled nodes yet — the fleet.yaml seed still applies</p>
 {% endif %}

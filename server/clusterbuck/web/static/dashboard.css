@@ -28,6 +28,10 @@ section.panel h2 { font-size: .75rem; text-transform: uppercase; letter-spacing:
 }
 .summary-num { font-size: 1.3rem; font-weight: 650; color: var(--accent); }
 .summary-sub { color: var(--muted); font-size: .82rem; }
+/* A table whose cells hold unpredictably long content (model/capability lists) gets its
+   own horizontal scrollbar instead of bleeding past the panel's edge. */
+.table-scroll { overflow-x: auto; }
+.table-scroll table { width: max-content; min-width: 100%; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 th { color: var(--muted); font-weight: 500; font-size: .78rem; }
