@@ -20,7 +20,6 @@
     </nav>
   </header>
   <main>
-    <div id="headline" hx-get="/ui/headline" hx-trigger="load, every 4s">…</div>
     <div class="grid">
       <section class="panel" hx-get="/ui/connections" hx-trigger="load, every 2s">…</section>
       <section class="panel" hx-get="/ui/timeline" hx-trigger="load, every 2s">…</section>
@@ -29,6 +28,7 @@
       <section class="panel" hx-get="/ui/queues" hx-trigger="load, every 3s">…</section>
       <section class="panel" hx-get="/ui/reservations" hx-trigger="load, every 5s">…</section>
     </div>
+    <div id="headline" hx-get="/ui/headline" hx-trigger="load, every 4s">…</div>
   </main>
 </body>
 </html>

@@ -1,11 +1,14 @@
-<section class="panel hero">
-  <div class="num">${{ "%.4f"|format(u.headline.avoided_cloud_spend) }}</div>
-  <div class="sub">
-    avoided cloud spend &middot; {{ u.totals.jobs }} jobs &middot;
-    {{ u.totals.tokens_in + u.totals.tokens_out }} tokens metered
+<section class="panel summary">
+  <div class="summary-row">
+    <span class="summary-label">result</span>
+    <span class="summary-num">${{ "%.4f"|format(u.headline.avoided_cloud_spend) }}</span>
+    <span class="summary-sub">
+      avoided cloud spend &middot; {{ u.totals.jobs }} jobs &middot;
+      {{ u.totals.tokens_in + u.totals.tokens_out }} tokens metered
+    </span>
   </div>
   {% if u.budget.monthly_cap is not none %}
-  <div class="sub">
+  <div class="summary-sub">
     cloud this month ${{ "%.2f"|format(u.budget.cloud_spent_this_month) }}
     / ${{ "%.2f"|format(u.budget.monthly_cap) }} cap
     {% if u.budget.over %}<span class="pill warn">over</span>{% endif %}
