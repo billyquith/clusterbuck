@@ -1,16 +1,25 @@
 <h2>Queues</h2>
 {% if rows %}
 <table>
-  <tr><th>capability</th><th class="n">depth</th><th class="n">pending</th><th class="n">consumers</th></tr>
+  <tr>
+    <th>capability</th>
+    <th class="n" title="claimed by a worker but not yet acked — the real backlog">pending</th>
+    <th class="n">consumers</th>
+    <th class="n" title="total stream entries retained (acked + unacked), not backlog">depth</th>
+  </tr>
   {% for r in rows %}
   <tr>
     <td>{{ r.capability }}</td>
-    <td class="n">{{ r.depth }}</td>
-    <td class="n">{{ r.pending }}</td>
+    <td class="n">
+      {% if r.pending == 0 %}<span class="pill ok">0</span>
+      {% elif r.pending < 5 %}<span class="pill warn">{{ r.pending }}</span>
+      {% else %}<span class="pill bad">{{ r.pending }}</span>{% endif %}
+    </td>
     <td class="n">
       {% if r.consumers %}<span class="pill ok">{{ r.consumers }} live</span>
       {% else %}<span class="pill warn">asleep</span>{% endif %}
     </td>
+    <td class="n muted">{{ r.depth }}</td>
   </tr>
   {% endfor %}
 </table>
