@@ -74,6 +74,17 @@ async def ui_connections(request: Request) -> HTMLResponse:
     )
 
 
+@web_routes.get("/ui/activity-series")
+async def ui_activity_series(request: Request) -> dict:
+    """JSON (not HTML — the chart fetches and redraws itself; see dashboard.js) feeding the
+    usage page's full-width activity-over-time chart: trailing 30 days, local vs cloud."""
+    from .usage import build_activity_series
+
+    days = 30
+    rows = request.app.state.store.usage_daily_by_venue(days=days)
+    return build_activity_series(rows, days=days)
+
+
 @web_routes.get("/ui/timeline", response_class=HTMLResponse)
 async def ui_timeline(request: Request) -> HTMLResponse:
     """Most recent metered jobs, newest first (Store.recent_usage) — the raw events behind

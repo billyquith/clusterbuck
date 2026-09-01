@@ -24,6 +24,14 @@ section.panel h2 { font-size: .75rem; text-transform: uppercase; letter-spacing:
 /* Roughly double a single .grid column (2 * 320px min + the grid gap) — for a panel whose
    content (long model/capability lists) wants more room than its siblings, on its own row. */
 section.panel.wide { max-width: 656px; margin-top: 1rem; }
+/* The usage page's activity-over-time chart (uPlot) — deliberately full page width, not a
+   grid column, so daily local-vs-cloud trends have room to actually read. */
+.chart-panel { margin-bottom: 1rem; overflow-x: auto; }
+.chart-panel #activity-chart { width: 100%; }
+.chart-panel .uplot { width: 100% !important; }
+.chart-panel .u-legend { font-size: .78rem; color: var(--muted); }
+.chart-panel .u-legend .u-marker { border-radius: 2px; }
+.chart-panel .u-select { background: rgba(255, 255, 255, 0.08); }
 .summary { margin-top: 1rem; padding: .7rem 1.1rem; }
 .summary-row { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
 .summary-label {

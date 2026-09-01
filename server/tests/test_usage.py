@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from clusterbuck.fleet import CapabilitySpec, Fleet
 from clusterbuck.queue import Queue
 from clusterbuck.store import Store
-from clusterbuck.usage import build_usage_summary, usage_scan
+from clusterbuck.usage import build_activity_series, build_usage_summary, usage_scan
 
 CAP = "8b-extract"
 FLEET = Fleet(capabilities={CAP: CapabilitySpec(
@@ -154,6 +154,52 @@ def test_recent_usage_orders_newest_first_and_respects_limit(store):
 
     rows = store.recent_usage(limit=2)
     assert [r.job_id for r in rows] == ["j2", "j1"]
+
+
+def test_usage_daily_by_venue_groups_and_filters_by_cutoff(store):
+    old_day = (datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%d")
+    recent_day = datetime.now(UTC).strftime("%Y-%m-%d")
+    store.record_usage(job_id="old", ts=f"{old_day}T00:00:00Z", capability=CAP, model="m",
+                       node="n", venue="local", tokens_in=1, tokens_out=1, outcome="done",
+                       cost=0.01, day=old_day)
+    store.record_usage(job_id="new-local", ts=f"{recent_day}T00:00:00Z", capability=CAP,
+                       model="m", node="n", venue="local", tokens_in=1, tokens_out=1,
+                       outcome="done", cost=0.02, day=recent_day)
+    store.record_usage(job_id="new-cloud", ts=f"{recent_day}T00:00:01Z", capability=CAP,
+                       model="m", node="cloud:x", venue="cloud", tokens_in=1, tokens_out=1,
+                       outcome="done", cost=0.03, day=recent_day)
+
+    rows = store.usage_daily_by_venue(days=30)
+    keys = {(r["day"], r["venue"]) for r in rows}
+    assert (old_day, "local") not in keys  # outside the trailing window
+    assert (recent_day, "local") in keys
+    assert (recent_day, "cloud") in keys
+
+
+def test_build_activity_series_zero_fills_and_splits_by_venue(store):
+    """Drives the usage page's full-width activity-over-time chart — every day in the
+    window must be present (zero-filled), not just days that actually saw traffic, or the
+    x-axis would compress irregularly as jobs come and go."""
+    now = time.time()
+    today = datetime.fromtimestamp(now, tz=UTC).strftime("%Y-%m-%d")
+    store.record_usage(job_id="j1", ts=f"{today}T00:00:00Z", capability=CAP, model="m",
+                       node="n", venue="local", tokens_in=1, tokens_out=1, outcome="done",
+                       cost=0.05, day=today)
+    store.record_usage(job_id="j2", ts=f"{today}T00:00:01Z", capability=CAP, model="m",
+                       node="cloud:x", venue="cloud", tokens_in=1, tokens_out=1,
+                       outcome="done", cost=0.1, day=today)
+
+    rows = store.usage_daily_by_venue(days=5)
+    series = build_activity_series(rows, days=5, now=now)
+
+    assert len(series["days"]) == 5
+    assert series["days"][-1] == today
+    assert series["local_jobs"][-1] == 1
+    assert series["cloud_jobs"][-1] == 1
+    assert series["avoided_spend"][-1] == 0.05
+    assert series["cloud_spend"][-1] == 0.1
+    assert series["local_jobs"][:-1] == [0, 0, 0, 0]  # zero-filled, not merely absent
+    assert series["cloud_spend"][:-1] == [0.0, 0.0, 0.0, 0.0]
 
 
 def test_usage_endpoint_shape(client):

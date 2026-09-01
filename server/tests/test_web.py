@@ -90,6 +90,24 @@ def test_timeline_fragment_carries_full_utc_timestamp_for_client_side_local_conv
     assert 'data-utc="2026-01-01T00:00:00.123456Z"' in r.text
 
 
+def test_activity_series_endpoint_is_zero_filled_json(client):
+    r = client.get("/ui/activity-series")
+    assert r.status_code == 200
+    data = r.json()
+    assert set(data) == {"days", "local_jobs", "cloud_jobs", "avoided_spend", "cloud_spend"}
+    assert len(data["days"]) == 30
+    assert len(data["local_jobs"]) == 30
+    assert sum(data["local_jobs"]) == 0  # no usage recorded in this test's fresh db
+
+
+def test_dashboard_page_vendors_the_chart_library(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "/static/uPlot.iife.min.js" in r.text  # vendored, not a CDN URL
+    assert "activity-chart" in r.text
+    assert client.get("/static/uPlot.iife.min.js").status_code == 200
+
+
 def test_fleet_fragment_renders_capabilities(client):
     # The conftest client runs from server/, so it loads the seed fleet.yaml.
     r = client.get("/ui/fleet")

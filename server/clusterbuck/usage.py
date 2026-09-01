@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .fleet import Fleet
 from .queue import Queue
@@ -118,4 +118,41 @@ def build_usage_summary(
         "by_model": [dict(r) for r in store.usage_rollup("model")],
         "by_node": [dict(r) for r in store.usage_rollup("node")],
         "by_day": [dict(r) for r in store.usage_rollup("day")],
+    }
+
+
+def build_activity_series(rows, *, days: int, now: float | None = None) -> dict:
+    """Zero-filled daily series, local vs cloud, for the usage page's activity-over-time
+    chart — `rows` is Store.usage_daily_by_venue's (day, venue, jobs, tokens_in, tokens_out,
+    cost) output. Zero-filling (rather than only emitting days with rows) keeps the x-axis a
+    continuous trailing window regardless of which days actually saw traffic."""
+    now = time.time() if now is None else now
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+    day_list = [(today - timedelta(days=days - 1 - i)).isoformat() for i in range(days)]
+    idx = {d: i for i, d in enumerate(day_list)}
+
+    local_jobs = [0] * days
+    cloud_jobs = [0] * days
+    # local's cost is the avoided-cloud-spend rate (usage._job_cost's docstring); cloud's is
+    # the real provider spend — the same pairing usage_headline already reports.
+    avoided_spend = [0.0] * days
+    cloud_spend = [0.0] * days
+
+    for r in rows:
+        i = idx.get(r["day"])
+        if i is None:
+            continue
+        if r["venue"] == "cloud":
+            cloud_jobs[i] += r["jobs"]
+            cloud_spend[i] += r["cost"]
+        else:
+            local_jobs[i] += r["jobs"]
+            avoided_spend[i] += r["cost"]
+
+    return {
+        "days": day_list,
+        "local_jobs": local_jobs,
+        "cloud_jobs": cloud_jobs,
+        "avoided_spend": [round(x, 6) for x in avoided_spend],
+        "cloud_spend": [round(x, 6) for x in cloud_spend],
     }

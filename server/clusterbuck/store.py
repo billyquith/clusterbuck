@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 from sqlmodel import Session, SQLModel, select
@@ -750,6 +751,21 @@ class Store:
         with self._session() as s:
             stmt = select(Usage).order_by(Usage.ts.desc()).limit(limit)
             return list(s.exec(stmt))
+
+    def usage_daily_by_venue(self, days: int = 30) -> list[sqlite3.Row]:
+        """Jobs/tokens/cost per (day, venue) over the trailing `days` — drives the usage
+        page's activity-over-time chart. `day` is 'YYYY-MM-DD' (usage_scan), so lexicographic
+        comparison sorts and filters chronologically without parsing."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._conn() as c:
+            return c.execute(
+                "SELECT day, venue, COUNT(*) AS jobs, "
+                "COALESCE(SUM(tokens_in), 0) AS tokens_in, "
+                "COALESCE(SUM(tokens_out), 0) AS tokens_out, "
+                "COALESCE(SUM(cost), 0) AS cost "
+                "FROM usage WHERE day >= ? GROUP BY day, venue ORDER BY day",
+                (cutoff,),
+            ).fetchall()
 
     def cloud_spend_in_month(self, month_prefix: str) -> float:
         """Actual cloud spend for a 'YYYY-MM' prefix (budget burn)."""

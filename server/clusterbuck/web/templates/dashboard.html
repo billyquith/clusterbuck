@@ -7,7 +7,9 @@
   <link rel="icon" href="/static/favicon.ico">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/uPlot.min.css">
   <script src="/static/htmx.min.js"></script>
+  <script src="/static/uPlot.iife.min.js"></script>
   <script src="/static/dashboard.js"></script>
 </head>
 <body>
@@ -21,6 +23,10 @@
     </nav>
   </header>
   <main>
+    <section class="panel chart-panel">
+      <h2>Activity over time</h2>
+      <div id="activity-chart"></div>
+    </section>
     <div class="grid">
       <section class="panel" hx-get="/ui/connections" hx-trigger="load, every 2s">…</section>
       <section class="panel" hx-get="/ui/timeline" hx-trigger="load, every 2s">…</section>
