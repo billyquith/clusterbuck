@@ -245,6 +245,9 @@ def test_dashboard_fragments_render(app_client, redis_url):
     listing = client.get("/ui/perf/runs")
     assert listing.status_code == 200
     assert "frag-test" in listing.text
+    # started_at is UTC (contract); dashboard.js converts it to the viewer's local time
+    # client-side, so the fragment must carry the full value for it to read.
+    assert 'data-utc="' in listing.text
 
     detail = client.get(f"/ui/perf/runs/{run_id}")
     assert detail.status_code == 200

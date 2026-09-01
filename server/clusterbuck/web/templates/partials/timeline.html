@@ -4,7 +4,7 @@
   {% for r in rows %}
   <div class="tl-item">
     <span class="tl-dot {{ 'cloud' if r.venue == 'cloud' else 'local' }}"></span>
-    <span class="tl-time">{{ r.ts[:16] | replace("T", " ") }}</span>
+    <span class="tl-time ts" data-utc="{{ r.ts }}">{{ r.ts[:16] | replace("T", " ") }}</span>
     <span class="tl-node">{{ r.node or "—" }}</span>
     <span class="pill {{ 'warn' if r.venue == 'cloud' else 'ok' }}">{{ r.venue }}</span>
     <span class="tl-cap">{{ r.capability or "—" }}{% if r.model %} &middot; {{ r.model }}{% endif %}</span>

@@ -23,6 +23,16 @@ def test_vendored_htmx_served(client):
     assert "htmx" in r.text.lower()
 
 
+def test_vendored_dashboard_js_served(client):
+    # Converts stored-UTC timestamps to the viewer's local time client-side (no server-side
+    # timezone to be right or wrong about) — every page includes it alongside htmx.
+    r = client.get("/static/dashboard.js")
+    assert r.status_code == 200
+    assert "data-utc" in r.text
+    for page in ("/", "/models", "/performance"):
+        assert "/static/dashboard.js" in client.get(page).text
+
+
 def test_headline_fragment(client):
     r = client.get("/ui/headline")
     assert r.status_code == 200
@@ -65,6 +75,19 @@ def test_timeline_fragment_empty(client):
     r = client.get("/ui/timeline")
     assert r.status_code == 200
     assert "no jobs metered yet" in r.text
+
+
+def test_timeline_fragment_carries_full_utc_timestamp_for_client_side_local_conversion(client):
+    # The server has no reliable notion of the viewer's timezone, so it renders a UTC
+    # fallback and leaves the actual local-time conversion to dashboard.js in the browser
+    # (data-utc carries the full, unsliced value that fallback is truncated from).
+    client.app.state.store.record_usage(
+        job_id="j1", ts="2026-01-01T00:00:00.123456Z", capability="8b-extract", model="m",
+        node="n", venue="local", tokens_in=1, tokens_out=1, outcome="done", cost=0.0,
+        day="2026-01-01")
+    r = client.get("/ui/timeline")
+    assert r.status_code == 200
+    assert 'data-utc="2026-01-01T00:00:00.123456Z"' in r.text
 
 
 def test_fleet_fragment_renders_capabilities(client):

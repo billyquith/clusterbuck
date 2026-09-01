@@ -10,7 +10,8 @@
   <tr>
     <td>
       {{ r.label }}<br>
-      <span style="color:var(--muted);font-size:.72rem">{{ r.started_at }}</span>
+      <span class="ts" data-utc="{{ r.started_at }}"
+            style="color:var(--muted);font-size:.72rem">{{ r.started_at[:16] | replace("T", " ") }}</span>
     </td>
     <td>
       {% if r.status == "running" %}<span class="pill ok">running</span>
