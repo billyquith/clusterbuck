@@ -58,7 +58,7 @@ def test_connections_fragment_shows_enrolled_worker(client):
     })
     r = client.get("/ui/connections")
     assert r.status_code == 200
-    assert "node-" in r.text  # enrolled node id
+    assert "node-x" in r.text  # the hostname people actually know it by on the LAN
     assert "0 jobs" in r.text
 
 

@@ -6,9 +6,9 @@
   {% for n in nodes %}
   <tr>
     <td>
-      {{ n.id }}<br>
+      {{ n.host or n.id }}<br>
       <span style="color:var(--muted);font-size:.75rem">
-        {{ n.host or "—" }} &middot; {{ n.os_arch }}
+        {{ n.id }} &middot; {{ n.os_arch }}
         {% if n.ram_gb %}<br>{{ "%g"|format(n.ram_gb) }} GB RAM &middot; {{ n.accelerator }}{% if n.vram_gb %} ({{ "%g"|format(n.vram_gb) }} GB VRAM){% endif %}
           {% if n.disk_free_gb %}&middot; {{ "%g"|format(n.disk_free_gb) }} GB free{% endif %}
           {% if n.profile %}&middot; {{ n.profile }}{% endif %}

@@ -61,7 +61,7 @@ async def ui_connections(request: Request) -> HTMLResponse:
     jobs_by_key = {r["key"]: r["jobs"] for r in store.usage_rollup("node")}
 
     workers = [
-        {"node_id": n.node_id, "mode": n.mode or "unknown",
+        {"name": n.hostname or n.node_id, "mode": n.mode or "unknown",
          "jobs": jobs_by_key.get(n.node_id, 0)}
         for n in store.list_nodes()
     ]
@@ -119,9 +119,14 @@ async def ui_reservations(request: Request) -> HTMLResponse:
 
 @web_routes.get("/ui/proposals", response_class=HTMLResponse)
 async def ui_proposals(request: Request) -> HTMLResponse:
-    rows = request.app.state.store.list_proposals("pending")
+    store = request.app.state.store
+    rows = store.list_proposals("pending")
+    # Proposals are keyed by node_id (the stable identity proposals/actions reference),
+    # but on the LAN people know machines by hostname — show that instead where known.
+    hostnames = {n.node_id: n.hostname for n in store.list_nodes()}
     props = [{"id": r.id, "kind": r.kind, "artifact": r.artifact,
-              "node": r.node_id, "rationale": r.rationale} for r in rows]
+              "node": hostnames.get(r.node_id) or r.node_id, "rationale": r.rationale}
+             for r in rows]
     return templates.TemplateResponse(request, "partials/proposals.html", {"props": props})
 
 
