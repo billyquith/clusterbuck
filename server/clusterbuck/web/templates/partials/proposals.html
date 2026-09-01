@@ -1,9 +1,10 @@
 <h2>Planner proposals</h2>
 {% if props %}
 <table>
-  <tr><th>what</th><th>node</th><th></th></tr>
+  <tr><th>node</th><th>reasoning</th><th>action</th><th></th></tr>
   {% for p in props %}
   <tr>
+    <td>{{ p.node }}</td>
     <td>
       {% if p.kind == "upgrade" %}<span class="pill ok">upgrade</span>
       {% elif p.kind == "reeval" %}<span class="pill warn">re-eval</span>
@@ -11,7 +12,11 @@
       <strong>{{ p.artifact }}</strong>
       <br><span style="color:var(--muted);font-size:.78rem">{{ p.rationale }}</span>
     </td>
-    <td>{{ p.node }}</td>
+    <td style="color:var(--muted);font-size:.85rem">
+      {% if p.kind == "upgrade" %}accept: install {{ p.artifact }} on {{ p.node }} (next time it's away)<br>deny: leave {{ p.node }}'s models unchanged
+      {% elif p.kind == "reeval" %}accept: run the eval harness against {{ p.artifact }} to (re-)measure its ability<br>deny: leave {{ p.artifact }}'s ability score as is
+      {% else %}accept: remove {{ p.artifact }} from {{ p.node }}, freeing its disk<br>deny: keep {{ p.artifact }} installed{% endif %}
+    </td>
     <td style="white-space:nowrap">
       <button hx-post="/ui/proposals/{{ p.id }}/approve" hx-target="closest section"
               hx-swap="innerHTML">approve</button>
