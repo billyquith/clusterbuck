@@ -21,6 +21,9 @@ main { padding: 1.4rem; max-width: 1100px; margin: 0 auto; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
 section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; }
 section.panel h2 { font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 .8rem; }
+/* Roughly double a single .grid column (2 * 320px min + the grid gap) — for a panel whose
+   content (long model/capability lists) wants more room than its siblings, on its own row. */
+section.panel.wide { max-width: 656px; margin-top: 1rem; }
 .summary { margin-top: 1rem; padding: .7rem 1.1rem; }
 .summary-row { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
 .summary-label {
