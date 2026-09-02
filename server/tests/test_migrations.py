@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from alembic import command
 from sqlmodel import SQLModel
 
@@ -44,7 +45,7 @@ from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
 # The current Alembic head. Pinned deliberately rather than derived from the migration
 # scripts: deriving it from the machinery under test would let "nobody thought about the
 # legacy path" pass silently. Bump this in the same commit as a new migration.
-_HEAD = "0005"
+_HEAD = "0006"
 
 
 def _affinity(decl_type: str) -> str:
@@ -78,6 +79,32 @@ def _schema_signature(db_path) -> dict[str, set[tuple]]:
                 for _cid, name, coltype, notnull, dflt, pk in cols
             }
         return sig
+    finally:
+        conn.close()
+
+
+def _index_signature(db_path) -> set[tuple[str, str, bool]]:
+    """{(table, index_name, is_unique) ...} — indexes, which the column signature misses.
+
+    Needed because `_schema_signature` compares columns only, so an index that exists on
+    one bootstrap path and not the other would pass silently. That is exactly the failure
+    mode for a UNIQUE index: `ALTER TABLE ADD COLUMN` cannot carry a constraint, and
+    `create_all` skips a table that already exists, so the legacy path has to create it
+    explicitly or the constraint quietly does not exist on an upgraded database.
+
+    Auto-indexes SQLite creates for PRIMARY KEY / UNIQUE columns are excluded: they are
+    named `sqlite_autoindex_*` and are an artefact of how the table was declared, not
+    schema we author.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT tbl_name, name, sql FROM sqlite_master "
+            "WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        return {
+            (tbl, name, "UNIQUE" in (sql or "").upper()) for tbl, name, sql in rows
+        }
     finally:
         conn.close()
 
@@ -131,6 +158,9 @@ def test_fresh_database_matches_alembic_baseline(tmp_path) -> None:
     migrate.upgrade_to_head(str(alembic_db))
 
     assert _schema_signature(store_db) == _schema_signature(alembic_db)
+    assert _index_signature(store_db) == _index_signature(alembic_db)
+    assert ("jobs", "ix_jobs_idempotency_key", True) in _index_signature(store_db), \
+        "the unique index must exist, not merely match a peer that also lacks it"
     assert _alembic_version(store_db) == _alembic_version(alembic_db) == (_HEAD,)
 
 
@@ -246,5 +276,60 @@ def test_0005_adds_timing_to_a_populated_jobs_table(tmp_path) -> None:
         for row in rows:
             for column in ("started_at", "finished_at", "claimed_by", "entry_id", "stream"):
                 assert row[column] is None
+    finally:
+        conn.close()
+
+
+def test_a_preexisting_jobs_table_still_gets_the_unique_index(tmp_path) -> None:
+    """The legacy path's sharp edge, and the reason `_INDEXES` exists.
+
+    `_build_legacy_database` above starts from `create_all`, which creates the `jobs`
+    table *including* its index — so it cannot see this failure. A real pre-Alembic
+    deployment has a `jobs` table that already existed, and `create_all` skips an existing
+    table wholesale, indexes included. `ALTER TABLE ADD COLUMN` cannot carry a constraint
+    either. So without an explicit `CREATE UNIQUE INDEX`, such a database would be stamped
+    at head with the idempotency constraint simply absent — and idempotent submit would
+    silently degrade to "mint a new job every time", which is the bug it exists to prevent.
+    """
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        # The shape the table had before any of this existed.
+        conn.execute(
+            "CREATE TABLE jobs ("
+            " id TEXT PRIMARY KEY,"
+            " result_key TEXT NOT NULL,"
+            " capability TEXT NOT NULL,"
+            " status TEXT NOT NULL,"
+            " created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO jobs (id, result_key, capability, status, created_at) "
+            "VALUES ('job_ancient', 'res_ancient', '8b-extract', 'done', 't')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    Store(str(db))  # legacy branch: bring up to date the old way, then stamp
+
+    assert _alembic_version(db) == (_HEAD,)
+    assert ("jobs", "ix_jobs_idempotency_key", True) in _index_signature(db)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        assert {"idempotency_key", "cancel_requested", "started_at",
+                "entry_id"} <= columns, "the columns must be added, not just stamped"
+        assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+        # And the constraint must actually bite.
+        conn.execute("UPDATE jobs SET idempotency_key = 'k' WHERE id = 'job_ancient'")
+        conn.execute(
+            "INSERT INTO jobs (id, result_key, capability, status, created_at, "
+            "idempotency_key) VALUES ('job_new', 'res_new', 'c', 'queued', 't', 'other')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE jobs SET idempotency_key = 'k' WHERE id = 'job_new'")
     finally:
         conn.close()

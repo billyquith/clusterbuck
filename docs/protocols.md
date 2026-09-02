@@ -91,7 +91,7 @@ Poll for the result:
 
 ```
 GET /jobs/{id}
-→ { "id","status":"queued|running|done|failed|expired",
+→ { "id","status":"queued|running|done|failed|expired|cancelled",
     "urgency","capability",
     "created_at":  "…",          // server receipt time — authoritative
     "started_at":  "…" | null,   // a claim was OBSERVED at this time (see below)
@@ -141,6 +141,78 @@ to set `deadline` and/or `escalate_after_min` on anything a human is waiting for
 A `deadline` that is not an RFC 3339 timestamp is rejected with `422`. It used to be
 dropped silently to "no expiry", which handed back the opposite of what was asked for with
 nothing to notice.
+
+**Retrying a submit safely: `Idempotency-Key`.** `POST /jobs` mints a new job per call,
+so a client that loses the response (a killed request, a dropped connection) cannot tell
+"submitted" from "not submitted" and has no safe retry. Send an opt-in header:
+
+```
+POST /jobs
+Idempotency-Key: <opaque, unique per logical call>
+→ 202 { "id","result_key","status":"queued" }        // first time
+→ 200 { "id","result_key","status":"<current>" }     // a repeat
+  Idempotency-Replayed: true
+```
+
+A repeat returns the **existing** job and enqueues nothing. `200` rather than `202`
+(nothing was accepted for processing this time) and rather than `409` (the client asked
+for at-most-once and got exactly that — this is success); the body carries the same three
+keys either way, so a client that checks neither the status code nor the header still
+parses the reply and polls the right job. `status` is the job's *current* status, so a
+client retrying long after the original may be told `done`.
+
+Details worth knowing:
+
+- **A rejected submit does not burn the key.** A `400`/`422` means no job exists, so the
+  same key remains usable — otherwise a client that submitted before any artifact cleared
+  its ability bar could never retry.
+- **No request fingerprint.** A key reused with a *different* payload returns the first
+  job; the key is the client's promise that two requests are the same call. A
+  canonicalised-body hash is a deliberate deferral, not an oversight.
+- **No TTL.** The key lives on the job row, so its retention is the job row's. Keys must
+  be unique per logical call — a UUID or a content hash, never a recycled counter.
+- Keys are at most 255 printable ASCII characters, trimmed of surrounding whitespace.
+- This is **not** `submitter.request_id`, which is identification only and never enforced
+  (a reused one there *describes* a retry). Enforcement is opt-in and separate. Like
+  `observed_ip`, the key is coordinator-side and is not in `contract/job.schema.json` — a
+  worker has no use for it.
+
+**Withdrawing a job: `DELETE /jobs/{id}`.** Best-effort, and explicit about which:
+
+```
+DELETE /jobs/{id}
+→ 200 { …the same body GET /jobs/{id} returns, with status: … }
+```
+
+- **`cancelled`** — the work **provably** never ran and never will: the queued entry was
+  removed and no consumer held it.
+- **`cancelling`** — a worker already has it. A model call in flight cannot be
+  interrupted, so that run finishes and its result is discarded. The job is still
+  terminalised, so the client stops waiting either way.
+- Already-finished jobs are returned unchanged; the result is checked before the stream,
+  because `XACK` leaves an entry in place and a job that already ran is otherwise
+  indistinguishable from one never delivered.
+
+`cancelled` is a **coordinator** status: no worker can produce one, so it is deliberately
+absent from `contract/result.schema.json`'s enum and appears only in the assembled client
+view above. Any holder of the operator secret can cancel any job — `client_key` is
+attention scoping, not an authenticated identity, and ADR 26 declined per-client keys for
+LAN-only single-operator infrastructure. Accepted limitation, stated rather than hidden.
+
+**Terminating backstops.** Two coordinator sweeps, because only one of them can be policy:
+
+- **Orphan sweep** (`CBK_ORPHAN_GRACE_S`, default 900s, always on) — a job whose row was
+  committed but whose queue write never happened, because the coordinator died in between.
+  Nothing will ever deliver it. It is answered `failed`, not resubmitted: the payload is
+  not stored in columns and cannot be rebuilt, and inventing one would run something the
+  client never asked for. A client retrying under an idempotency key should use a fresh key.
+- **Maximum queue age** (`CBK_MAX_QUEUE_AGE_S`, **unset ⇒ disabled**) — a properly-queued
+  job nobody ever claimed, answered `expired`. Off by default deliberately: on a fleet
+  whose machines sleep for days, a patient `waitable` job outliving a fixed cutoff is
+  *correct*, and clusterbuck will not impose a timeout on someone else's backlog.
+
+So with the default configuration **the only bounds on a job are the ones its client
+sets** — which is exactly what `expires_at: null` reports.
 
 **Collecting a result later.** A completed result lives in the result store for
 `CBK_RESULT_TTL_S` (default 24h). After that, `GET /jobs/{id}` still answers with the

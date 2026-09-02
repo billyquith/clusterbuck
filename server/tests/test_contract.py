@@ -175,3 +175,34 @@ def test_pydantic_heartbeat_matches_schema(contract_dir):
         stats={"jobs_done": 1, "tps": 10.0}, protocol_version=1,
     )
     v.validate(hb.model_dump(mode="json", exclude_none=True))
+
+
+def test_coordinator_written_result_conforms_without_inference_timestamps(contract_dir):
+    """Not every terminal result comes from an executor.
+
+    The reaper's dead-letter, the expiry sweep and a cancellation are all written by the
+    coordinator for a job that never reached a model server — so `started_at`/
+    `finished_at` have no honest value and must stay optional. Pinned because making them
+    required (an easy, plausible tightening) silently invalidates every one of those
+    paths, and nothing else in the suite writes such a blob.
+    """
+    v = _validator(contract_dir, "result.schema.json")
+    v.validate({
+        "job_id": "job_1", "status": "failed", "worker": "cbk-reaper",
+        "completed_at": "2026-09-02T00:00:00Z",
+        "error": "abandoned by its worker and retried 3 times (max_attempts=3)",
+    })
+
+
+def test_an_executor_result_carries_both_inference_timestamps(contract_dir):
+    """The other half: when an executor does measure, both ends must be there — one
+    without the other cannot express a duration."""
+    v = _validator(contract_dir, "result.schema.json")
+    v.validate({
+        "job_id": "job_1", "status": "done", "worker": "node-a",
+        "started_at": "2026-09-02T00:00:00Z",
+        "finished_at": "2026-09-02T00:00:07Z",
+        "completed_at": "2026-09-02T00:00:00Z",
+        "completion": {"choices": [
+            {"index": 0, "message": {"role": "assistant", "content": "hi"}}]},
+    })

@@ -28,7 +28,12 @@ from .store import Store
 _log = logging.getLogger("clusterbuck.usage")
 
 
-def _venue(fleet: Fleet | None, capability: str | None) -> str:
+def venue_of(fleet: Fleet | None, capability: str | None) -> str:
+    """Where a capability's work runs — "local" or "cloud".
+
+    Public because the cancel route records a usage row too, and a cancelled job must be
+    attributed to the same venue the metering scan would have given it.
+    """
     spec = fleet.capabilities.get(capability) if fleet and capability else None
     return "cloud" if spec is not None and spec.cloud else "local"
 
@@ -57,11 +62,16 @@ async def usage_scan(
             # TTL'd away before we saw it). Jobs without a deadline are left as-is.
             dl = row.deadline_epoch
             if dl is not None and now > dl:
-                store.set_status(row.id, "expired")
+                # A cancellation we could not prove lands here rather than as an
+                # expiry: DELETE /jobs/{id} floors the deadline precisely so this sweep
+                # picks it up (see store.request_cancel). Reporting it as `expired`
+                # would attribute it to a deadline the client may never have set.
+                outcome = "cancelled" if row.cancel_requested else "expired"
+                store.set_status(row.id, outcome)
                 store.record_usage(
                     job_id=row.id, ts=ts, capability=row.capability, model=None,
-                    node=None, venue=_venue(fleet, row.capability), tokens_in=0, tokens_out=0,
-                    outcome="expired", cost=0.0, day=day,
+                    node=None, venue=venue_of(fleet, row.capability), tokens_in=0, tokens_out=0,
+                    outcome=outcome, cost=0.0, day=day,
                 )
                 captured += 1
             continue
@@ -75,7 +85,7 @@ async def usage_scan(
 
         store.record_usage(
             job_id=row.id, ts=ts, capability=row.capability, model=model,
-            node=result.get("worker"), venue=_venue(fleet, row.capability),
+            node=result.get("worker"), venue=venue_of(fleet, row.capability),
             tokens_in=tin, tokens_out=tout,
             outcome=status, cost=_job_cost(fleet, row.capability, tin, tout), day=day,
         )

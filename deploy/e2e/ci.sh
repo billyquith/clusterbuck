@@ -11,7 +11,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Order matters only in that the cheap async proofs come first, so a fundamental break is
 # reported before the slower fleet-management scripts run.
 SHARED=(
-  run queue-and-wait waiting sync escalation reservation usage
+  run queue-and-wait waiting idempotency cancel sync escalation reservation usage
   enroll ability discovery install eval perf auth version
 )
 

@@ -53,7 +53,8 @@ def test_contract_directory_is_where_we_think_it_is():
 
 def test_done_result_conforms():
     r = Result(job_id="job_1", status="done", worker="node-a",
-               completed_at="2026-07-28T10:00:00Z",
+               started_at="2026-07-28T10:00:00Z",
+               finished_at="2026-07-28T10:00:07Z",
                completion={"id": "c1", "choices": [
                    {"index": 0, "message": {"role": "assistant", "content": "hi"}}]},
                usage={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4})
@@ -64,9 +65,26 @@ def test_done_result_conforms():
     assert "error" not in wire
 
 
+def test_result_timestamps_bracket_the_model_call():
+    """The bug this replaced: one timestamp, taken BEFORE inference and written as
+    `completed_at`, so the only "completion" time in the system was a start time wrong by
+    a full inference duration."""
+    wire = Result(job_id="job_1", status="done", worker="node-a",
+                  started_at="2026-07-28T10:00:00Z",
+                  finished_at="2026-07-28T10:00:07Z",
+                  completion={"id": "c1", "choices": [
+                      {"index": 0, "message": {"role": "assistant", "content": "hi"}}]},
+                  ).to_wire()
+    assert wire["started_at"] < wire["finished_at"]
+    # The deprecated alias must keep meaning exactly what it always did — a start time —
+    # so a reader that has not migrated sees no change in its numbers.
+    assert wire["completed_at"] == wire["started_at"]
+
+
 def test_failed_result_conforms_and_carries_no_completion():
     wire = Result(job_id="job_1", status="failed", worker="node-a",
-                  completed_at="2026-07-28T10:00:00Z",
+                  started_at="2026-07-28T10:00:00Z",
+                  finished_at="2026-07-28T10:00:01Z",
                   error="model server refused connection").to_wire()
     _assert_valid("result", wire)
     assert "completion" not in wire and "usage" not in wire

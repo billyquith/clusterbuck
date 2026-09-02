@@ -2,6 +2,8 @@
   "job_id": "job_01HZX9K2QJ8P4V7M3N6T5R0abc",
   "status": "done",
   "worker": "node-a7f3",
+  "started_at": "2026-07-24T18:30:04Z",
+  "finished_at": "2026-07-24T18:30:11Z",
   "completed_at": "2026-07-24T18:30:04Z",
   "completion": {
     "id": "chatcmpl-abc123",

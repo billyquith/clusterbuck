@@ -175,6 +175,35 @@ class Queue:
         raw = await self._r.get(result_key)
         return json.loads(raw) if raw is not None else None
 
+    async def withdraw(self, stream: str, entry_id: str, *, group: str) -> str:
+        """Try to take a queued entry back off a stream. Never lies about the outcome.
+
+        Returns:
+          * `"deleted"` — the entry was removed and no consumer holds it, so it is
+            **provably** never going to run.
+          * `"claimed"` — a consumer already has it; it will finish whatever we do.
+          * `"gone"`    — no such entry (already trimmed by `MAXLEN ~`, or never there).
+
+        XDEL first, then probe the pending list, and that order matters: deleting first
+        makes any *future* delivery impossible, so the probe afterwards cannot be beaten
+        by a worker reading the entry in the gap.
+
+        The distinction cannot be made from XDEL alone. `XACK` does not remove an entry
+        from a stream, so a job that already ran and was acked looks exactly like one
+        never delivered — which is why callers must check the result blob before trusting
+        `"deleted"`.
+        """
+        removed = await self._r.xdel(stream, entry_id)
+        try:
+            held = await self._r.xpending_range(
+                stream, group, min=entry_id, max=entry_id, count=1
+            )
+        except redis.ResponseError:
+            held = []  # no group ⇒ nobody can be holding it
+        if held:
+            return "claimed"
+        return "deleted" if int(removed or 0) else "gone"
+
     async def claims(
         self, capability: str, group: str, *, count: int = 200
     ) -> list[dict[str, Any]]:

@@ -143,7 +143,14 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
                               #   /?key=… once and stores a cookie. Exempt: /healthz,
                               #   /static/*, /nodes/enroll (join token), heartbeat (node key).
                               #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
-                              #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY)
+                              #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY,
+                              #    CBK_ORPHAN_GRACE_S, CBK_MAX_QUEUE_AGE_S — the two
+                              #    terminating backstops: the orphan sweep is always on,
+                              #    max-queue-age is UNSET ⇒ disabled, deliberately, so a
+                              #    patient job on a sleeping fleet is never timed out
+                              #    for it. With it unset the only bounds on a job are
+                              #    the ones its client sets, which is what the job
+                              #    body's `expires_at: null` reports.)
 
 # --- worker (one py3-none-any zipapp, ADR 29) ---
 cd worker
@@ -170,6 +177,9 @@ bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not conf
 bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval
 bash deploy/e2e/eval.sh           # M7: unmeasured model → eval jobs → scored → routable
 bash deploy/e2e/perf.sh           # Performance page: randomized load run, served vs unassigned
+bash deploy/e2e/waiting.sh        # a polling client's honest wait: backlog, position, limits
+bash deploy/e2e/idempotency.sh    # Idempotency-Key makes a lost submit response retryable (ADR 31)
+bash deploy/e2e/cancel.sh         # DELETE /jobs withdraws unclaimed work (ADR 32)
 bash deploy/e2e/auth.sh           # shared secret closes the escalation chain (ADR 26)
 bash deploy/e2e/version.sh        # coordinator quarantines an unfit worker build (ADR 27)
 bash deploy/e2e/selfupdate-py.sh  # signed self-update, REAL zipapp (fast)

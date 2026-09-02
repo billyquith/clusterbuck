@@ -109,18 +109,24 @@ class WorkLoop:
             return
 
         job = Job.from_wire(json.loads(raw))
-        now = _now_iso()
+        # Stamped around the model call, not once before it. The single timestamp this
+        # replaced was taken here and written as `completed_at`, so it was really a
+        # processing-START time — wrong by a whole inference, and the only completion
+        # time the system had.
+        started_at = _now_iso()
         try:
             completion, usage = await self._model.complete(job)
             result = Result(job_id=job.id, status="done", worker=self._cfg.worker_id,
-                            completed_at=now, completion=completion, usage=usage)
+                            started_at=started_at, finished_at=_now_iso(),
+                            completion=completion, usage=usage)
             self.jobs_done += 1
             self._log(f"done  {job.id} [{capability}]")
         # Any failure becomes a terminal `failed` result rather than an exception that kills
         # the loop: the caller is waiting on a result key and deserves an answer either way.
         except Exception as e:
             result = Result(job_id=job.id, status="failed", worker=self._cfg.worker_id,
-                            completed_at=now, error=str(e) or e.__class__.__name__)
+                            started_at=started_at, finished_at=_now_iso(),
+                            error=str(e) or e.__class__.__name__)
             self._log(f"fail  {job.id} [{capability}]: {e}")
 
         # Result first, ack second. Acking first would let a crash in between drop the job

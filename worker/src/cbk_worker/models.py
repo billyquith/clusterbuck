@@ -67,7 +67,10 @@ class Result:
     job_id: str
     status: str
     worker: str
-    completed_at: str
+    # Measured around the model call: `started_at` immediately before it, `finished_at`
+    # immediately after. The pair is the real inference duration, taken where it happens.
+    started_at: str
+    finished_at: str
     completion: dict[str, Any] | None = None
     error: str | None = None
     usage: dict[str, Any] | None = None
@@ -77,7 +80,13 @@ class Result:
             "job_id": self.job_id,
             "status": self.status,
             "worker": self.worker,
-            "completed_at": self.completed_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            # DEPRECATED alias, kept for one release. It was always stamped BEFORE
+            # inference, so it is a start time despite the name — emitting `started_at`
+            # here means no existing reader's numbers silently change while readers move
+            # to the two honest fields.
+            "completed_at": self.started_at,
             "completion": self.completion,
             "error": self.error,
             "usage": self.usage,

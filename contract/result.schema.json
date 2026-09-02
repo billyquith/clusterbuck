@@ -22,10 +22,20 @@
       "minLength": 1,
       "description": "Opaque node id of the worker that ran the job (diagnostics only; the client never learns the physical machine)."
     },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp immediately BEFORE the executor called the model server. With `finished_at` this is the actual inference duration, measured where it happens. OPTIONAL because not every terminal result comes from an executor: the coordinator writes its own for a dead-lettered, expired or cancelled job, and those never called a model, so there is no honest value to supply."
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp immediately AFTER the model server returned (or failed). Optional for the same reason as `started_at`; an executor that reports one reports both."
+    },
     "completed_at": {
       "type": "string",
       "format": "date-time",
-      "description": "RFC 3339 timestamp the result was written."
+      "description": "DEPRECATED, and never meant what its name says: it was stamped BEFORE inference, so it is a processing-START time, wrong by a full inference duration. Retained for one release equal to `started_at` so no existing reader silently changes meaning; read `started_at`/`finished_at` instead."
     },
     "completion": {
       "type": ["object", "null"],

@@ -10,11 +10,26 @@ that's intentional, not drift to fix as part of this migration.
 
 from __future__ import annotations
 
+from sqlalchemy import Index
 from sqlmodel import Field, SQLModel
 
 
 class Job(SQLModel, table=True):
     __tablename__ = "jobs"
+
+    # Declared as a separate Index rather than Field(unique=True) deliberately. A
+    # column-level unique renders INSIDE `CREATE TABLE`, which the legacy pre-Alembic
+    # bootstrap cannot reproduce with `ALTER TABLE ADD COLUMN` — so the two schema paths
+    # would silently diverge and the constraint would simply not exist on an upgraded
+    # database. As its own index it renders as `CREATE UNIQUE INDEX`, identical on both.
+    #
+    # A plain (not partial) unique index is correct because SQLite treats NULLs as
+    # DISTINCT: every pre-existing row and every submit without a key coexists freely,
+    # and only two submits sharing a real key collide. Do not "fix" this into a partial
+    # index — that is what would diverge the two DDL paths.
+    __table_args__ = (
+        Index("ix_jobs_idempotency_key", "idempotency_key", unique=True),
+    )
 
     # nullable=True on a PK looks wrong but is deliberate: this table has always been
     # `id TEXT PRIMARY KEY` with no explicit NOT NULL, and SQLite (unlike most engines)
@@ -80,3 +95,16 @@ class Job(SQLModel, table=True):
     # entry can sit on a stream that no longer matches its current urgency.
     entry_id: str | None = None
     stream: str | None = None
+
+    # --- idempotency + cancellation (protocols.md §1b) -------------------------------
+    # A client-supplied key making POST /jobs safe to retry: the unique index above is
+    # the arbiter, so a lost submit response can be retried without risking a duplicate
+    # job. Distinct from `submitter_request_id`, which is identification only and is
+    # deliberately never enforced.
+    idempotency_key: str | None = None
+    # Set when a cancel could not be proven (a worker already holds the entry, or the
+    # entry is gone). It exists because Redis 7's XAUTOCLAIM DROPS pending entries whose
+    # stream entry no longer exists: withdrawing a claimed entry and then losing the
+    # worker would leave the job with no blob, no terminal status, and nothing to recover
+    # it. Paired with a floored `deadline_epoch`, the expiry sweep terminalises it.
+    cancel_requested: int = Field(default=0, sa_column_kwargs={"server_default": "0"})

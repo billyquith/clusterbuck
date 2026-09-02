@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from .attention import attention_tick
 from .catalog import scan_all
 from .config import settings
+from .backstop import backstop_scan
 from .escalation import escalation_scan
 from .observe import observe_tick
 from .eval_runner import eval_tick
@@ -61,6 +62,15 @@ async def coordinator_loop(
                 await reaper_scan(
                     store, queue, group=settings.consumer_group,
                     min_idle_ms=settings.reaper_min_idle_ms,
+                )
+                # Same slow cadence as the reaper, and for the same reason: both enforce
+                # thresholds measured in minutes. This is the half the reaper cannot do,
+                # because a job nobody ever claimed is not in the pending list.
+                await backstop_scan(
+                    store, queue, fleet,
+                    orphan_grace_s=settings.orphan_grace_s,
+                    max_queue_age_s=settings.max_queue_age_s,
+                    group=settings.consumer_group,
                 )
             # Measuring an unmeasured artifact is background work: collect finished eval
             # jobs and dispatch new ones on a slower cadence than the live ticks.

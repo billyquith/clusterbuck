@@ -12,15 +12,16 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Iterator
 
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
 
 from . import migrate
 from .db import make_engine
-from .models import RESULT_STATUSES, now_iso
+from .models import TERMINAL_STATUSES, now_iso
 from .orm.ability import Ability
 from .orm.attention_lease import AttentionLease
 from .orm.catalog_entry import CatalogEntry
@@ -68,6 +69,11 @@ _MIGRATIONS = {
         "claimed_by": "ALTER TABLE jobs ADD COLUMN claimed_by TEXT",
         "entry_id": "ALTER TABLE jobs ADD COLUMN entry_id TEXT",
         "stream": "ALTER TABLE jobs ADD COLUMN stream TEXT",
+        # Idempotency + cancellation (protocols.md §1b). The UNIQUE index that makes the
+        # key binding is in _INDEXES below — `ADD COLUMN` cannot carry one.
+        "idempotency_key": "ALTER TABLE jobs ADD COLUMN idempotency_key TEXT",
+        "cancel_requested":
+            "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
     },
     "ability": {
         "provenance": "ALTER TABLE ability ADD COLUMN provenance TEXT NOT NULL DEFAULT 'measured'",
@@ -84,6 +90,20 @@ _MIGRATIONS = {
         "fitness": "ALTER TABLE nodes ADD COLUMN fitness TEXT",
         "fitness_reason": "ALTER TABLE nodes ADD COLUMN fitness_reason TEXT",
         "auto_update": "ALTER TABLE nodes ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0",
+    },
+}
+
+
+# Indexes the legacy (pre-Alembic) bootstrap must create for itself. `create_all` skips a
+# table that already exists — indexes included — and `ALTER TABLE ADD COLUMN` cannot carry
+# a constraint, so without this an upgraded database would be stamped at head with the
+# unique index simply absent. `IF NOT EXISTS` keeps it idempotent, matching _MIGRATIONS'
+# only-if-missing character.
+_INDEXES: dict[str, dict[str, str]] = {
+    "jobs": {
+        "ix_jobs_idempotency_key":
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_jobs_idempotency_key "
+            "ON jobs(idempotency_key)",
     },
 }
 
@@ -136,6 +156,11 @@ class Store:
                 for col, ddl in columns.items():
                     if col not in existing:
                         c.execute(ddl)
+            # After the columns exist, not before: an index cannot be created on a column
+            # this loop is about to add.
+            for indexes in _INDEXES.values():
+                for ddl in indexes.values():
+                    c.execute(ddl)
         migrate.stamp_head(self._db_path)
 
     @contextmanager
@@ -179,18 +204,53 @@ class Store:
         submitter_request_id: str | None = None,
         submitted_at: str | None = None,
         observed_ip: str | None = None,
-    ) -> None:
+        idempotency_key: str | None = None,
+    ) -> Job | None:
+        """Insert a queued job. Returns None normally — or, when `idempotency_key` is
+        already taken, the job that took it, having written nothing.
+
+        The insert IS the idempotency claim: the unique index on `idempotency_key`
+        arbitrates, so two concurrent submits under one key cannot both win. The repo's
+        other "idempotent" helpers (`record_usage`, `claim_token`) are check-then-write
+        and safe only because a single tick writes them; a client-driven endpoint has as
+        many concurrent writers as the retry storm it is there to absorb.
+
+        The conflict lookup lives here so SQLAlchemy's exception type stays out of the
+        API layer.
+        """
+        row = Job(
+            id=id, result_key=result_key, capability=capability, status="queued",
+            created_at=created_at, urgency=urgency, escalate_at=escalate_at,
+            reservation=reservation, deadline_epoch=deadline_epoch,
+            client_key=client_key, task_class=task_class,
+            submitter_app=submitter_app, submitter_instance=submitter_instance,
+            submitter_request_id=submitter_request_id, submitted_at=submitted_at,
+            observed_ip=observed_ip, idempotency_key=idempotency_key,
+        )
+        try:
+            with self._session() as s:
+                s.add(row)
+                s.commit()
+        except IntegrityError as e:
+            # Matched narrowly rather than catching IntegrityError wholesale: any future
+            # constraint on this table would otherwise be converted into a silent
+            # "here's your existing job" for a request that actually failed.
+            #
+            # SQLite names the offending *column*, not the index — the message reads
+            # `UNIQUE constraint failed: jobs.idempotency_key` — so that is what to look
+            # for. Matching the index name silently never fires.
+            if "jobs.idempotency_key" not in str(getattr(e, "orig", e)):
+                raise
+            return self.job_by_idempotency_key(idempotency_key)
+        return None
+
+    def job_by_idempotency_key(self, key: str | None) -> Job | None:
+        """The job holding this key, if any. Safe as a follow-up to a failed insert:
+        SQLite raises the uniqueness violation only against committed data."""
+        if key is None:
+            return None
         with self._session() as s:
-            s.add(Job(
-                id=id, result_key=result_key, capability=capability, status="queued",
-                created_at=created_at, urgency=urgency, escalate_at=escalate_at,
-                reservation=reservation, deadline_epoch=deadline_epoch,
-                client_key=client_key, task_class=task_class,
-                submitter_app=submitter_app, submitter_instance=submitter_instance,
-                submitter_request_id=submitter_request_id, submitted_at=submitted_at,
-                observed_ip=observed_ip,
-            ))
-            s.commit()
+            return s.exec(select(Job).where(Job.idempotency_key == key)).first()
 
     def get(self, id: str) -> Job | None:
         with self._session() as s:
@@ -215,13 +275,39 @@ class Store:
                 return
             job.status = status
             s.add(job)
-            if status in RESULT_STATUSES or status == "cancelled":
+            if status in TERMINAL_STATUSES:
                 s.exec(
                     update(Job)
                     .where(Job.id == id, Job.finished_at.is_(None))
                     .values(finished_at=now_iso())
                 )
             s.commit()
+
+    def orphaned_jobs(self, before_iso: str) -> list[Job]:
+        """Non-terminal jobs older than `before_iso` that were never enqueued.
+
+        `entry_id IS NULL` is the whole signal: the row was committed and the XADD never
+        happened, so no stream entry exists and nothing will ever deliver it. Compared as
+        text because `created_at` is ISO-8601 with a `Z`, whose lexical order is
+        chronological — the same assumption `recent_usage` already relies on.
+        """
+        with self._session() as s:
+            stmt = select(Job).where(
+                Job.status.not_in(TERMINAL_STATUSES),
+                Job.entry_id.is_(None),
+                Job.created_at < before_iso,
+            )
+            return list(s.exec(stmt))
+
+    def stale_queued_jobs(self, before_iso: str) -> list[Job]:
+        """Non-terminal jobs older than `before_iso`, enqueued or not — the opt-in
+        maximum-queue-age backstop's population."""
+        with self._session() as s:
+            stmt = select(Job).where(
+                Job.status.not_in(TERMINAL_STATUSES),
+                Job.created_at < before_iso,
+            )
+            return list(s.exec(stmt))
 
     def jobs_by_entry_ids(self, entry_ids: list[str]) -> dict[str, Job]:
         """entry_id → job, for the ids currently held in a stream's pending list.
@@ -261,6 +347,29 @@ class Store:
             s.commit()
             return changed
 
+    def request_cancel(self, id: str) -> bool:
+        """Mark a cancellation we could not prove, and floor the job's deadline to now.
+
+        The floor is the load-bearing half. Since Redis 7, `XAUTOCLAIM` *drops* pending
+        entries whose stream entry no longer exists — so withdrawing an entry a worker
+        already holds and then losing that worker leaves the job with no result blob, no
+        terminal status, and nothing able to recover it: the reaper cannot see it, and
+        `jobs_awaiting_usage` would re-select it on every tick forever. Flooring the
+        deadline hands it to the expiry sweep, which already writes both halves.
+
+        Returns False if the job is already over, in which case there is nothing to do.
+        """
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is None or job.status in TERMINAL_STATUSES:
+                return False
+            job.cancel_requested = 1
+            now = datetime.now(UTC).timestamp()
+            job.deadline_epoch = min(job.deadline_epoch or now, now)
+            s.add(job)
+            s.commit()
+            return True
+
     def record_delivery(self, id: str, *, stream: str, entry_id: str) -> None:
         """Remember the stream entry now representing this job.
 
@@ -298,6 +407,10 @@ class Store:
                 Job.escalated == 0,
                 Job.escalate_at.is_not(None),
                 Job.escalate_at <= now,
+                # Filtered on status as well as urgency: without this a cancelled job
+                # with a due escalation still promotes and may WAKE A MACHINE, which is
+                # the worst outcome available in a cold-by-default fleet.
+                Job.status.not_in(TERMINAL_STATUSES),
             )
             return list(s.exec(stmt))
 
@@ -321,6 +434,9 @@ class Store:
                 Job.client_key == client_key,
                 Job.urgency == "waitable",
                 Job.escalated == 0,
+                # Same guard as due_for_escalation, and more exposed: this promotes in
+                # bulk with no per-row result check at all.
+                Job.status.not_in(TERMINAL_STATUSES),
             )
             if scope:
                 stmt = stmt.where(Job.task_class.in_(scope))

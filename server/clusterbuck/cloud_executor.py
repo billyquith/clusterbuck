@@ -118,7 +118,8 @@ class CloudExecutor:
         spec = self._fleet.capabilities[capability]
         model = (job.params or {}).get("model") or spec.model
         provider = provider_of(model)
-        now = _now_iso()
+        # Around the call, not before it — same correction as the worker's loop.
+        started_at = _now_iso()
 
         try:
             api_key = resolve_api_key(spec)
@@ -145,12 +146,16 @@ class CloudExecutor:
             body = resp.model_dump()
             result = {
                 "job_id": job.id, "status": "done", "worker": f"cloud:{provider}",
-                "completed_at": now, "completion": body, "usage": body.get("usage"),
+                "started_at": started_at, "finished_at": _now_iso(),
+                "completed_at": started_at,  # deprecated alias, see result.schema.json
+                "completion": body, "usage": body.get("usage"),
             }
         except Exception as e:  # a terminal `failed` result beats killing this loop
             result = {
                 "job_id": job.id, "status": "failed", "worker": f"cloud:{provider}",
-                "completed_at": now, "error": str(e) or e.__class__.__name__,
+                "started_at": started_at, "finished_at": _now_iso(),
+                "completed_at": started_at,  # deprecated alias, see result.schema.json
+                "error": str(e) or e.__class__.__name__,
             }
             self._log(f"cloud fail {job.id} [{capability}]: {e}")
 

@@ -16,6 +16,22 @@ class Settings:
     # Shared consumer group name; workers for a capability share it so each job
     # is delivered to exactly one worker.
     consumer_group: str = os.environ.get("CBK_CONSUMER_GROUP", "cbk-workers")
+    # Orphan sweep: a job whose SQLite row exists but which was never enqueued (the
+    # coordinator died between the insert and the XADD) is invisible to everything —
+    # no worker will see it, and the reaper only walks the pending list. Always on,
+    # because that is a crash artifact rather than a policy choice. Must exceed
+    # reaper_min_idle_ms so the two recovery paths cannot race the same job.
+    orphan_grace_s: int = int(os.environ.get("CBK_ORPHAN_GRACE_S", "900"))
+    # Backstop for a properly-enqueued job nobody ever claims. UNSET means disabled, and
+    # that is deliberate: on a fleet whose nodes sleep for days a patient `waitable` job
+    # outliving any fixed cutoff is correct, so clusterbuck must not impose one. When
+    # unset, the only bounds on a job are the ones its client set (`deadline`,
+    # `escalate_after_min`) — which is what `expires_at: null` reports (protocols.md §1b).
+    max_queue_age_s: int | None = (
+        int(os.environ["CBK_MAX_QUEUE_AGE_S"])
+        if os.environ.get("CBK_MAX_QUEUE_AGE_S")
+        else None
+    )
     # Reaper (ADR 20): a claimed entry idle longer than this is treated as abandoned and
     # requeued. MUST exceed the longest plausible inference, or a merely-busy worker's job
     # would be stolen and re-run. Default 10 min.

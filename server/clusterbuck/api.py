@@ -36,6 +36,7 @@ from .fleet import load_fleet
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
 from .models import (
     RESULT_STATUSES,
+    TERMINAL_STATUSES,
     AttentionRequest,
     EnrollRequest,
     HeartbeatRequest,
@@ -53,7 +54,7 @@ from .routing import NoCapableArtifact, resolve_capability
 from .signing import build_manifest, load_private_pem
 from .store import Store
 from .sync import build_router, sync_routes
-from .usage import build_usage_summary
+from .usage import build_usage_summary, venue_of
 from .versions import assess, policy_from_settings
 from .wake import WakeCoordinator
 from .web import WEB_DIR, web_routes
@@ -64,6 +65,34 @@ from .web import WEB_DIR, web_routes
 _WAKE_RIGHTS = {Urgency.urgent, Urgency.necessary}
 
 _log = logging.getLogger("clusterbuck")
+
+
+_IDEMPOTENCY_KEY_MAX = 255
+
+
+def _validated_idempotency_key(raw: str | None) -> str | None:
+    """Normalise and check an `Idempotency-Key` header, or None if absent.
+
+    Kept strict and small: the key is only ever compared for equality, so anything
+    unprintable or unbounded is a client bug worth reporting rather than storing. An
+    absent header leaves every pre-existing submit behaviour bit-for-bit unchanged.
+    """
+    if raw is None:
+        return None
+    key = raw.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Idempotency-Key must not be empty")
+    if len(key) > _IDEMPOTENCY_KEY_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Idempotency-Key must be at most {_IDEMPOTENCY_KEY_MAX} characters",
+        )
+    if not key.isascii() or not key.isprintable():
+        raise HTTPException(
+            status_code=400,
+            detail="Idempotency-Key must be printable ASCII",
+        )
+    return key
 
 
 def _now_iso() -> str:
@@ -434,7 +463,13 @@ def create_app(
         }
 
     @app.post("/jobs", status_code=202)
-    async def submit_job(body: JobSubmit, request: Request) -> JSONResponse:
+    async def submit_job(
+        body: JobSubmit,
+        request: Request,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> JSONResponse:
+        key = _validated_idempotency_key(idempotency_key)
+
         # A reservation, if named, must exist and be confirmed. It does NOT override
         # addressing (the job addresses normally); it's recorded as the linkage (§8).
         if body.reservation is not None:
@@ -500,7 +535,10 @@ def create_app(
                 ) from e
 
         sub = body.submitter
-        app.state.store.insert(
+        # Deliberately after the 400/422 checks above: a rejected request must not burn
+        # the key. A client whose submit failed because no artifact cleared the ability
+        # bar has to be able to retry the same key once the fleet gains one.
+        existing = app.state.store.insert(
             id=job_id,
             result_key=result_key,
             capability=capability,
@@ -519,7 +557,25 @@ def create_app(
             # name but not the address it dialled from. This is what attributes a flood
             # from a client that sends no provenance at all.
             observed_ip=request.client.host if request.client else None,
+            idempotency_key=key,
         )
+        if existing is not None:
+            # Somebody already submitted this logical call. Nothing was written, and
+            # nothing is enqueued: hand back the job that did win.
+            #
+            # 200 rather than 202 (nothing was accepted for processing this time) and
+            # rather than 409 (the client asked for at-most-once and got exactly that —
+            # this is success). Same keys as the 202, so a client that checks neither the
+            # status code nor the header still parses the reply and polls the right job.
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "id": existing.id,
+                    "result_key": existing.result_key,
+                    "status": existing.status,
+                },
+                headers={"Idempotency-Replayed": "true"},
+            )
         entry_id = await app.state.queue.enqueue(record.to_wire())
         # The row was inserted before the XADD, so the delivery is recorded here. This is
         # what makes queue position exact rather than a stream scan.
@@ -552,19 +608,26 @@ def create_app(
         }
         return view if any(v is not None for v in view.values()) else None
 
-    def _timing_view(row) -> dict:
-        """When this job was received, observed to start, and seen to finish.
+    def _timing_view(row, result: dict | None = None) -> dict:
+        """When this job was received, started, and finished.
 
-        `created_at` is server-stamped at receipt and authoritative. `started_at` and
-        `finished_at` are coordinator *observations* (observe.py), so `started_at` can be
-        null on a job that certainly ran — one claimed and acked between two ticks is
-        never seen in the pending list. Null therefore means "no claim observed", never
-        "not started"; a client's wait state keys on `status` and `queue_position`.
+        `created_at` is server-stamped at receipt and authoritative.
+
+        For `started_at`/`finished_at` the executor's own measurements win when present:
+        it brackets the model call itself, so its numbers are exact, whereas the
+        coordinator's are observations made on a tick and can miss a job entirely (one
+        claimed and acked between two ticks never appears in the pending list). Falling
+        back to the observed values is what keeps a *running* job's start visible, since
+        no result exists yet.
+
+        A null `started_at` therefore means "not measured and no claim observed" — never
+        "not started". A client's wait state keys on `status` and `queue_position`.
         """
+        result = result or {}
         return {
             "created_at": row.created_at,
-            "started_at": row.started_at,
-            "finished_at": row.finished_at,
+            "started_at": result.get("started_at") or row.started_at,
+            "finished_at": result.get("finished_at") or row.finished_at,
         }
 
     def _limits_view(row) -> dict:
@@ -637,7 +700,7 @@ def create_app(
             "status": status,
             "urgency": row.urgency,
             "capability": row.capability,
-            **_timing_view(row),
+            **_timing_view(row, result),
             **_limits_view(row),
             "queue_position": None,  # terminal: nothing is ahead of it any more
             "result": result.get("completion"),
@@ -647,6 +710,62 @@ def create_app(
             "worker": result.get("worker") or row.claimed_by,
             "submitter": _submitter_view(row),
         }
+
+    @app.delete("/jobs/{job_id}")
+    async def cancel_job(job_id: str) -> dict:
+        """Withdraw a job. Best-effort by construction, and honest about which.
+
+        `cancelled` is reported ONLY when the work provably never ran and never will.
+        Otherwise the verdict is `cancelling`: a worker already holds the entry and no
+        amount of coordinator-side bookkeeping can interrupt a model call, so claiming
+        otherwise would be a lie. (`/perf/runs/{id}/cancel` already sets that precedent.)
+        Either way the client stops waiting, which is the half we can always deliver.
+
+        Any holder of the operator secret can cancel any job: `client_key` is attention
+        scoping, not an authenticated identity, and ADR 26 deliberately declined
+        per-client keys for LAN-only single-operator infrastructure. Accepted limitation,
+        not an oversight.
+        """
+        row = app.state.store.get(job_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown job id")
+
+        # The result blob is the first gate, not the stream. XACK leaves an entry in
+        # place, so a job that already ran is indistinguishable from one never delivered
+        # by looking at the stream alone.
+        result = await app.state.queue.read_result(row.result_key)
+        if result is not None or row.status in TERMINAL_STATUSES:
+            return await get_job(job_id)  # already over; nothing to withdraw
+
+        verdict = "cancelling"
+        if row.entry_id and row.stream:
+            outcome = await app.state.queue.withdraw(
+                row.stream, row.entry_id, group=settings.consumer_group
+            )
+            if outcome == "deleted":
+                verdict = "cancelled"
+        # else: a row from before deliveries were recorded, or the window between the
+        # insert and the XADD — nothing provable either way.
+
+        if verdict == "cancelled":
+            # Both halves, mirroring the expiry sweep: without the usage row,
+            # `jobs_awaiting_usage` re-selects this job on every coordinator tick forever.
+            app.state.store.set_status(job_id, "cancelled")
+            app.state.store.record_usage(
+                job_id=job_id, ts=_now_iso(), capability=row.capability, model=None,
+                node=None, venue=venue_of(app.state.fleet, row.capability),
+                tokens_in=0, tokens_out=0, outcome="cancelled", cost=0.0,
+                day=datetime.now(UTC).strftime("%Y-%m-%d"),
+            )
+        else:
+            # Flag it and floor the deadline so the expiry sweep terminalises it even if
+            # the worker holding it never comes back (Redis drops the pending entry for a
+            # deleted stream entry, so the reaper cannot).
+            app.state.store.request_cancel(job_id)
+
+        view = await get_job(job_id)
+        view["status"] = verdict if verdict == "cancelling" else view["status"]
+        return view
 
     def _reservation_view(row) -> dict:
         plan = None

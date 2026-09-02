@@ -601,3 +601,88 @@ answered this shape of problem twice:
   `CBK_MODEL_SERVER_URL` — **not** a channel for provider keys, which never reach a worker
   under this decision. `api_key`/`api_base` join `_PARAMS_NOT_FORWARDED` so a job can never
   supply or override either.
+
+## 31. Idempotent submit is a separate opt-in header, never `submitter.request_id`
+**Decision:** `POST /jobs` accepts an optional `Idempotency-Key` HTTP header, enforced by
+a UNIQUE index on `jobs.idempotency_key`; a repeat returns the existing job with `200` and
+`Idempotency-Replayed: true`. `submitter.request_id` (ADR-less, shipped with caller
+provenance) keeps its documented meaning: identification only, never enforced.
+**Why:** a client that loses the response to a submit cannot distinguish "submitted" from
+"not submitted", so it must either risk a duplicate job or risk losing the work — the one
+gap that stopped a real client retrying submits at all. Enforcement needs a constraint,
+and a constraint needs a field whose contract *is* enforcement. `request_id` is explicitly
+the opposite: a client reusing one is **describing** a retry, which is the signal that
+makes a burst of identical jobs diagnosable. Overloading it would destroy that signal and
+silently change behaviour for anyone already sending it.
+**Consequences:** the repo's first UNIQUE index, which must be declared as a separate
+`Index` (not `Field(unique=True)`) so the legacy pre-Alembic bootstrap can create it with
+`CREATE UNIQUE INDEX` — a column-level unique renders inside `CREATE TABLE`, which
+`ALTER TABLE ADD COLUMN` cannot reproduce, so the two schema paths would diverge and the
+constraint would simply not exist on an upgraded database. NULLs are distinct in SQLite,
+so unkeyed submits never collide and every existing client is unaffected. The claim is the
+SQLite insert, deliberately after the `400`/`422` checks so a rejected request does not
+burn a key. `IntegrityError` is matched on the offending column (`jobs.idempotency_key` —
+SQLite names the column, not the index) rather than caught wholesale, so a future
+constraint cannot be silently converted into a `200`.
+**Considered:** overloading `request_id` (destroys the retry signal; reverses a documented
+contract); a body field (`JobSubmit` is `extra: "forbid"`, so it is a client-seam schema
+change, and the worker has no use for it — the `observed_ip` precedent applies); `409` on
+replay (the client asked for at-most-once and got it: that is success); check-then-insert
+like `record_usage` (racy by construction, and a retry storm is precisely N concurrent
+writers); a request fingerprint (deferred, and named as deferred); a timed key window
+(cannot be expressed as a UNIQUE index, so it would force the racy idiom back).
+
+## 32. Cancel is coordinator-side and best-effort; `cancelled` is not a result status
+**Decision:** `DELETE /jobs/{id}` withdraws the queued entry and terminalises the job. It
+reports `cancelled` **only** when the work provably never ran (the entry was deleted and
+no consumer held it) and `cancelling` otherwise. `cancelled` lives in SQLite and in the
+assembled `GET /jobs/{id}` view, **not** in `contract/result.schema.json`.
+**Why:** abandoned work really does run — an observed job completed nearly two hours after
+its client stopped polling, and nobody ever collected the result. But a model call in
+flight cannot be interrupted: the worker's run loop makes no coordinator round trip between
+claiming and running, does not poll mid-inference, and does not read the result key before
+running, so "write a cancelled blob and the worker will skip it" is a no-op dressed as a
+mechanism. Reporting `cancelled` for work still executing would be a lie; `/perf/runs/{id}/cancel`
+already set the honest precedent with `cancelling`. `cancelled` stays out of the result
+schema because no worker can ever emit one, and putting a status a worker cannot produce
+into the cross-language seam is drift.
+**Consequences:** `XACK` does not remove a stream entry, so XDEL-plus-empty-PEL cannot by
+itself distinguish "never delivered" from "already ran" — the result blob must be the first
+gate. Withdrawal needs the stream entry id, so every enqueue records its delivery. Since
+Redis 7, `XAUTOCLAIM` *drops* pending entries whose stream entry is gone, so withdrawing a
+claimed entry and then losing that worker would leave a job the reaper cannot see; a
+`cancel_requested` flag plus a floored `deadline_epoch` hands it to the expiry sweep
+instead. Every terminal path writes a usage row as well as a status, or
+`jobs_awaiting_usage` re-selects the job on every tick forever. `TERMINAL_STATUSES` also
+had to be added to the escalation and attention queries, which filtered on urgency alone —
+without it a cancelled job could still promote and **wake a physical machine**.
+**Considered:** a worker-side pre-run check of the result key (a new worker capability, and
+still no help for a job already inside the model call); mid-run abort (touches the inference
+path for a case a small fleet can absorb); `XAUTOCLAIM`-then-ack (the reaper can only ack
+what it claimed, which a cancel handler cannot do for an unclaimed entry); scanning the
+stream for the job id instead of recording the entry id (O(depth) per call, and still cannot
+tell claimed from unclaimed).
+
+## 33. The executor measures inference; `completed_at` was a start time
+**Decision:** an executor stamps `started_at` immediately before the model call and
+`finished_at` immediately after. `completed_at` is retained for one release, equal to
+`started_at`, and documented as deprecated. Both new fields are **optional** in
+`contract/result.schema.json`.
+**Why:** `completed_at` was taken *before* inference in both the worker and the cloud
+executor, so the only completion timestamp in the system was really a processing-start
+time, wrong by a whole inference duration — and it was therefore unusable as the
+`finished_at` a polling client needs. Correcting the field in place would silently change
+every existing reader's numbers with nothing to signal it; emitting the deprecated alias as
+`started_at` keeps them exactly as they were while readers migrate.
+**Consequences:** they must stay optional because not every terminal result comes from an
+executor — the reaper's dead-letter, the expiry sweep and a cancellation are written by the
+coordinator for jobs that never reached a model server, and there is no honest value to
+supply. A conformance test pins both halves, because making them required is an easy and
+plausible tightening that would silently invalidate all three coordinator paths. The
+coordinator prefers the executor's measurements over its own tick-based observations when
+both exist.
+**Considered:** fixing `completed_at` in place (silent meaning change for existing
+readers); adding `finished_at` alone and documenting `completed_at` as a quirk (leaves a
+field whose name permanently lies); requiring the new fields (breaks every
+coordinator-written result).
+

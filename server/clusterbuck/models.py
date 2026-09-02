@@ -20,6 +20,12 @@ from pydantic import BaseModel, Field, model_validator
 # produce one.
 RESULT_STATUSES = frozenset({"done", "failed", "expired"})
 
+# Every status a job's LIFECYCLE can end in. Strictly a superset of RESULT_STATUSES:
+# `cancelled` is coordinator-side, because no worker can produce it — a worker writes a
+# result blob, and the blob's status enum is RESULT_STATUSES. Keeping the two named apart
+# is what stops "terminal" meaning two different things in two places.
+TERMINAL_STATUSES = RESULT_STATUSES | {"cancelled"}
+
 
 def now_iso() -> str:
     """UTC now, RFC 3339 with a `Z` suffix — the timestamp format on every seam."""
