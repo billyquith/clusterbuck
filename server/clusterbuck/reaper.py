@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from .queue import REAPER_CONSUMER, Queue, stream_key
+from .queue import REAPER_CONSUMER, TIER_ORDER, Queue, stream_key
 from .store import Store
 
 _log = logging.getLogger("clusterbuck.reaper")
@@ -47,16 +47,19 @@ async def reaper_scan(
     requeued = dead = 0
     caps = capabilities if capabilities is not None else await queue.known_capabilities()
 
-    for capability in caps:
+    # Both urgency tiers (ADR 34). An abandoned job on the urgent stream is exactly the
+    # one whose recovery matters most, so covering only the base stream would strand it.
+    for capability, tier in ((c, t) for c in caps for t in TIER_ORDER):
         stale = await queue.reclaim_stale(
-            capability, group, min_idle_ms=min_idle_ms, consumer=REAPER_CONSUMER
+            capability, group, min_idle_ms=min_idle_ms, consumer=REAPER_CONSUMER,
+            tier=tier,
         )
         for entry_id, job in stale:
             # A job whose result already exists finished just as we reclaimed it: the worker
             # wrote the result but died before acking. Nothing to re-run.
             result_key = job.get("result_key")
             if result_key and await queue.read_result(result_key) is not None:
-                await queue.ack(capability, group, entry_id)
+                await queue.ack(capability, group, entry_id, tier=tier)
                 continue
 
             attempts = int(job.get("attempts", 0)) + 1
@@ -77,24 +80,29 @@ async def reaper_scan(
                     })
                 store.set_status(job_id, "failed")
                 store.set_attempts(job_id, attempts)
-                await queue.ack(capability, group, entry_id)
+                await queue.ack(capability, group, entry_id, tier=tier)
                 dead += 1
                 _log.warning("dead-letter %s [%s] after %d attempts",
                              job_id, capability, attempts)
                 continue
 
-            # Requeue for another go, then retire the stale delivery.
-            new_entry_id = await queue.enqueue({**job, "attempts": attempts})
+            # Requeue onto the SAME tier it was reclaimed from, deliberately: this keeps
+            # the reaper free of the rollout gate (it cannot know whether tiering is safe
+            # for this fleet) and preserves the placement the enqueue path chose. A
+            # promotion that happened while the job was claimed is not re-applied here —
+            # the promotion path moves unclaimed entries only — so such a job finishes its
+            # retries on the base stream. Bounded and documented rather than papered over.
+            new_entry_id = await queue.enqueue({**job, "attempts": attempts}, tier=tier)
             store.set_attempts(job_id, attempts)
             # The requeue is a NEW stream entry, so the recorded delivery must follow it
             # or queue position and withdrawal keep pointing at an entry that is about to
             # be acked away. Back to `queued` too: it is at the back of the line again.
             # `started_at` is deliberately left set — started-then-queued is a meaningful
             # combination meaning "a worker had this and died".
-            store.record_delivery(job_id, stream=stream_key(capability),
+            store.record_delivery(job_id, stream=stream_key(capability, tier),
                                   entry_id=new_entry_id)
             store.set_status(job_id, "queued")
-            await queue.ack(capability, group, entry_id)
+            await queue.ack(capability, group, entry_id, tier=tier)
             requeued += 1
             _log.info("requeued %s [%s] (attempt %d/%d)",
                       job_id, capability, attempts, max_attempts)

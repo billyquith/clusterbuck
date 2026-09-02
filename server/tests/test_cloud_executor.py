@@ -8,7 +8,12 @@ import json
 
 import pytest
 
-from clusterbuck.cloud_executor import CONSUMER_ID, CloudExecutor, cloud_capabilities, provider_of
+from clusterbuck.cloud_executor import (
+    CONSUMER_ID,
+    CloudExecutor,
+    cloud_capabilities,
+    provider_of,
+)
 from clusterbuck.fleet import CapabilitySpec, Fleet
 from clusterbuck.ids import new_ids
 from clusterbuck.models import JobRecord, Message, Privacy, Urgency

@@ -231,13 +231,25 @@ Implemented on **Redis Streams + consumer groups** (ADR 20), *not* plain lists: 
 pending-entries list and `XAUTOCLAIM` provide the visibility-timeout / at-least-once
 semantics natively.
 
-- **Stream per capability:** `q:<capability>` (e.g. `q:8b-extract`). The job JSON is the
-  single field **`job`** of each entry. The server appends with
-  `XADD q:<capability> MAXLEN ~ <cap> * job <json>`.
+- **Two streams per capability (ADR 34):** `q:<capability>:urgent` and
+  `q:<capability>`. The job JSON is the single field **`job`** of each entry; the server
+  appends with `XADD <stream> MAXLEN ~ <cap> * job <json>`. Tier is a pure function of
+  urgency — `urgent` and `necessary` take the urgent stream, `waitable` the base one — and
+  a consumer **reads the urgent stream first, the base stream only if it was empty**. That
+  read order is the whole mechanism: it is what makes urgency order work rather than only
+  decide whether a machine gets woken.
+  A worker must still take at most one job per capability per pass, so a busy urgent
+  stream cannot starve another capability the same node serves.
+  The base stream keeps its historical name, so a coordinator that does not tier and a
+  worker that does interoperate in both directions. The coordinator only writes to the
+  urgent tier once every node enrolled for that capability reports an urgent stream among
+  the `queues` on its heartbeat (`CBK_URGENT_STREAMS=auto|on|off`) — a worker built before
+  tiering reads only the base stream, and an urgent-tier write would strand the job.
 - **Consumer group:** one shared group named **`cbk-workers`** (`CBK_CONSUMER_GROUP`) per
   stream, created with `XGROUP CREATE … $ MKSTREAM` (tolerate `BUSYGROUP`). Every worker
   joins the *same* group, so each job is delivered to exactly one of them.
-- **Claiming:** `XREADGROUP GROUP cbk-workers <worker-id> COUNT n STREAMS q:<capability> >`.
+- **Claiming:** `XREADGROUP GROUP cbk-workers <worker-id> COUNT n STREAMS <stream> >`,
+  urgent tier first (above).
   Note the reference worker polls rather than blocking, because StackExchange.Redis exposes
   no blocking read; a blocking `BLOCK` argument is equally valid for the contract.
 - **Job payload** (authoritative schema: [`contract/job.schema.json`](../contract/job.schema.json)) —

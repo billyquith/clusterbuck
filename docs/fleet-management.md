@@ -174,23 +174,26 @@ which is what keeps the fleet cold-by-default even with busy background pipeline
 | Urgency | Meaning | Wake rights |
 |---|---|---|
 | `urgent` | Client is blocked / a user is waiting | Sync plane; may wake a machine immediately; cloud (if `cloud_ok`, within budget) when local can't serve in time |
-| `necessary` | Must run promptly; blocks nobody | May trigger an on-demand wake |
+| `necessary` | Must run promptly; blocks nobody | Head of the async queues; may trigger an on-demand wake |
 | `waitable(N)` | Backlog work — eager but non-demanding | **Never wakes a machine**, but runs **as soon as** existing warmth has spare cycles; N bounds the patience, then it escalates |
 
 **`waitable` is eager, not deferred.** N is a **patience bound, not a delay**: a
 waitable job runs the moment any capable node is awake with spare cycles — "if the
 system is awake, do it as soon as possible" — it just never *creates* capacity for
-itself (no wake, no cloud, no demand). Only if it is still unserved when N expires — the
-fleet stayed asleep, or a queue ahead of it stayed busy — does it promote to `necessary`
-and gain the right to demand capacity.
+itself (no wake, no cloud, no demand), and it yields to `urgent`/`necessary` work when the
+fleet is busy. Only if it is still unserved when N expires — the fleet stayed asleep, or
+busier work kept pre-empting it — does it promote to `necessary` and gain the right to
+demand capacity.
 
-> **Urgency does not reorder a queue (ADR 24).** Everything above is about *whether
-> capacity gets created* — whether a sleeping machine is woken, whether cloud is allowed.
-> Within one capability's stream work is served strictly first-in-first-out regardless of
-> urgency, because intra-queue priority was deliberately deferred. So on a worker that is
-> already awake an `urgent` job does **not** overtake a `waitable` backlog, and a small
-> "urgent" probe submitted to test liveness simply queues behind whatever is already
-> there. Escalating a job buys it wake rights, not a better place in line.
+> **Urgency now orders the queue as well (ADR 34).** Each capability has two streams —
+> `q:<cap>:urgent` and `q:<cap>` — and a worker drains the urgent one first, so `urgent`
+> and `necessary` work is served ahead of a `waitable` backlog on a node that is already
+> awake. This is what ADR 24 deferred and ADR 34 implements; escalation and client
+> attention move a promoted job's queued entry across, not just its urgency.
+>
+> Two limits worth knowing. Ordering is **between** tiers, not within one: two urgent jobs
+> are still served in submission order. And a job a worker has already claimed cannot be
+> moved, so a promotion that arrives mid-run takes effect only for work still queued.
 
 **Escalation triggers** (waitable → necessary):
 
@@ -212,8 +215,7 @@ the lease lapses, unstarted work demotes back to waitable and the system returns
 lazy. Note the symmetry: **workers have presence** (owner active → small model, ADR 10)
 and **clients have attention** (user active → hot work) — the fabric mediates both
 sides. Reservation `priority` orders work *within* warmth; urgency governs whether
-warmth gets created at all. `urgent` preempting everything is the *intent*, not yet the
-built behaviour — see the ADR 24 note above.
+warmth gets created at all **and**, since ADR 34, which tier a job queues on.
 
 ### Worked pattern: a background feed monitor
 

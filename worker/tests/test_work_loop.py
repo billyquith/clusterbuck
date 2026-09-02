@@ -15,7 +15,13 @@ import pytest
 
 from cbk_worker.config import WorkerConfig
 from cbk_worker.model_client import ModelClient
-from cbk_worker.work_loop import WorkLoop, stream_key
+from cbk_worker.work_loop import (
+    TIER_ORDER,
+    URGENT_TIER,
+    WorkLoop,
+    queue_names,
+    stream_key,
+)
 
 _OK = {
     "id": "c1",
@@ -191,4 +197,128 @@ async def test_run_exits_promptly_when_asked_to_stop(redis_client):
     await asyncio.sleep(0.05)
     stop.set()
     await asyncio.wait_for(task, timeout=2.0)
+    await http.aclose()
+
+
+# --- urgency tiers (ADR 34) ---------------------------------------------------------
+
+
+def test_queue_names_reports_both_tiers():
+    """This list is the coordinator's rollout evidence: it starts tiering a capability
+    only once every node serving it reports that it reads the urgent stream. A worker that
+    did not list it would (correctly) never be tiered."""
+    names = queue_names(("8b-extract",))
+    assert stream_key("8b-extract", URGENT_TIER) in names
+    assert stream_key("8b-extract") in names
+
+
+def test_the_base_stream_name_is_unchanged():
+    """Load-bearing in both directions: a coordinator that does not tier writes to
+    `q:<cap>`, and renaming it would strand every job already queued."""
+    assert stream_key("8b-extract") == "q:8b-extract"
+    assert stream_key("8b-extract", None) == "q:8b-extract"
+    assert stream_key("8b-extract", URGENT_TIER) == "q:8b-extract:urgent"
+    assert TIER_ORDER == (URGENT_TIER, None), "urgent is read first"
+
+
+async def test_groups_are_created_on_both_tiers(redis_client):
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    for tier in TIER_ORDER:
+        groups = await redis_client.xinfo_groups(stream_key("8b-extract", tier))
+        assert [g["name"] for g in groups] == ["cbk-workers"]
+    await http.aclose()
+
+
+async def test_urgent_work_is_served_before_a_patient_backlog(redis_client):
+    """The whole point of the tier, and what ADR 24 deferred: on a worker that is already
+    awake, urgency now decides order rather than only whether a machine gets woken."""
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("patient")})
+    await redis_client.xadd(stream_key("8b-extract", URGENT_TIER),
+                            {"job": _job_wire("now", urgency="urgent")})
+
+    await loop.poll_once()
+
+    assert await redis_client.get("res:now") is not None, "urgent tier read first"
+    assert await redis_client.get("res:patient") is None, "backlog waits its turn"
+
+    await loop.poll_once()
+    assert await redis_client.get("res:patient") is not None
+    await http.aclose()
+
+
+async def test_the_base_stream_is_read_when_the_urgent_tier_is_empty(redis_client):
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("only")})
+
+    assert await loop.poll_once() is True
+    assert await redis_client.get("res:only") is not None
+    await http.aclose()
+
+
+async def test_a_busy_urgent_tier_still_cannot_starve_another_capability(redis_client):
+    """The fairness property from above, re-asserted across tiers.
+
+    Reading urgent-then-base happens INSIDE the one-job-per-capability discipline, so a
+    flooded urgent stream on one capability must not monopolise a node that also serves
+    another. Tiering changing that would be a regression, not a feature.
+    """
+    cfg = _cfg(capabilities=("8b-extract", "32b-reason"))
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    for i in range(3):
+        await redis_client.xadd(stream_key("8b-extract", URGENT_TIER),
+                                {"job": _job_wire(f"rush_{i}", urgency="urgent")})
+    await redis_client.xadd(stream_key("32b-reason"),
+                            {"job": _job_wire("big_0", capability="32b-reason")})
+
+    await loop.poll_once()
+
+    assert await redis_client.get("res:rush_0") is not None
+    assert await redis_client.get("res:big_0") is not None, "not starved by the rush"
+    assert await redis_client.get("res:rush_1") is None, "still one per capability"
+    await http.aclose()
+
+
+async def test_a_job_is_acked_on_the_tier_it_came_from(redis_client):
+    """Acking the wrong stream would leave the entry pending forever, and the reaper would
+    then reclaim and re-run work that had already succeeded."""
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract", URGENT_TIER),
+                            {"job": _job_wire("job_ack", urgency="urgent")})
+
+    await loop.poll_once()
+
+    pending = await redis_client.xpending(
+        stream_key("8b-extract", URGENT_TIER), cfg.consumer_group)
+    assert pending["pending"] == 0, "acked on the urgent tier, not the base one"
+    await http.aclose()
+
+
+async def test_a_malformed_urgent_entry_is_acked_on_its_own_tier(redis_client):
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract", URGENT_TIER),
+                            {"not-a-job": "garbage"})
+
+    await loop.poll_once()
+
+    pending = await redis_client.xpending(
+        stream_key("8b-extract", URGENT_TIER), cfg.consumer_group)
+    assert pending["pending"] == 0
     await http.aclose()

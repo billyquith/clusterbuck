@@ -144,6 +144,11 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
                               #   /static/*, /nodes/enroll (join token), heartbeat (node key).
                               #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
                               #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY,
+                              #    CBK_URGENT_STREAMS (auto|on|off — auto tiers a
+                              #    capability only once every node enrolled for it
+                              #    reports an urgent stream on its heartbeat, so a
+                              #    pre-0.8.0 worker cannot be handed a job it will
+                              #    never read),
                               #    CBK_ORPHAN_GRACE_S, CBK_MAX_QUEUE_AGE_S — the two
                               #    terminating backstops: the orphan sweep is always on,
                               #    max-queue-age is UNSET ⇒ disabled, deliberately, so a
@@ -180,6 +185,7 @@ bash deploy/e2e/perf.sh           # Performance page: randomized load run, serve
 bash deploy/e2e/waiting.sh        # a polling client's honest wait: backlog, position, limits
 bash deploy/e2e/idempotency.sh    # Idempotency-Key makes a lost submit response retryable (ADR 31)
 bash deploy/e2e/cancel.sh         # DELETE /jobs withdraws unclaimed work (ADR 32)
+bash deploy/e2e/urgency.sh        # urgency ORDERS the queue; rollout strands nothing (ADR 34)
 bash deploy/e2e/auth.sh           # shared secret closes the escalation chain (ADR 26)
 bash deploy/e2e/version.sh        # coordinator quarantines an unfit worker build (ADR 27)
 bash deploy/e2e/selfupdate-py.sh  # signed self-update, REAL zipapp (fast)

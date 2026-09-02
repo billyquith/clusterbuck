@@ -28,7 +28,7 @@ import litellm
 
 from .fleet import Fleet, resolve_api_key
 from .models import JobRecord
-from .queue import Queue
+from .queue import TIER_ORDER, Queue
 
 _log = logging.getLogger("clusterbuck.cloud")
 
@@ -87,18 +87,25 @@ class CloudExecutor:
 
     async def ensure_groups(self) -> None:
         for cap in self.capabilities:
-            await self._queue.ensure_group(cap)
+            for tier in TIER_ORDER:
+                await self._queue.ensure_group(cap, tier)
 
     async def poll_once(self) -> bool:
         """Read at most one job per cloud capability and process it. True if it did work."""
         did_work = False
         for cap in self.capabilities:
-            entry = await self._queue.read_one(cap, self._group, CONSUMER_ID)
-            if entry is None:
-                continue
-            did_work = True
-            entry_id, raw = entry
-            await self._process(cap, entry_id, raw)
+            # Urgent tier ahead of the base one, the same order the worker reads in
+            # (ADR 34) — this executor is the only consumer a cloud-only capability has,
+            # so if it ignored the tier, tiering would simply not apply to cloud work.
+            for tier in TIER_ORDER:
+                entry = await self._queue.read_one(
+                    cap, self._group, CONSUMER_ID, tier=tier)
+                if entry is None:
+                    continue
+                did_work = True
+                entry_id, raw = entry
+                await self._process(cap, entry_id, raw, tier=tier)
+                break
         return did_work
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -113,7 +120,8 @@ class CloudExecutor:
             except asyncio.TimeoutError:
                 pass
 
-    async def _process(self, capability: str, entry_id: str, raw: dict) -> None:
+    async def _process(self, capability: str, entry_id: str, raw: dict, *,
+                       tier: str | None = None) -> None:
         job = JobRecord.from_wire(raw)
         spec = self._fleet.capabilities[capability]
         model = (job.params or {}).get("model") or spec.model
@@ -163,4 +171,4 @@ class CloudExecutor:
         # reason: acking first would let a crash in between drop the job from the pending
         # list with a result nowhere, invisible to the reaper.
         await self._queue.write_result(job.result_key, result)
-        await self._queue.ack(capability, self._group, entry_id)
+        await self._queue.ack(capability, self._group, entry_id, tier=tier)

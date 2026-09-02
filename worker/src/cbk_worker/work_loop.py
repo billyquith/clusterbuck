@@ -22,9 +22,16 @@ from .config import WorkerConfig
 from .model_client import ModelClient
 from .models import Job, Result
 
+# Urgency tiers, mirroring the coordinator's queue.py (ADR 34). The urgent stream is read
+# ahead of the base one, so demanding work no longer waits behind a patient backlog on a
+# worker that is already awake. `tier=None` is the historical name, so a coordinator that
+# does not tier keeps addressing exactly the stream it always did.
+URGENT_TIER = "urgent"
+TIER_ORDER: tuple[str | None, ...] = (URGENT_TIER, None)
 
-def stream_key(capability: str) -> str:
-    return f"q:{capability}"
+
+def stream_key(capability: str, tier: str | None = None) -> str:
+    return f"q:{capability}:{URGENT_TIER}" if tier == URGENT_TIER else f"q:{capability}"
 
 
 def _now_iso() -> str:
@@ -60,13 +67,14 @@ class WorkLoop:
             await self._ensure_group(cap)
 
     async def _ensure_group(self, cap: str) -> None:
-        """Create the consumer group (and stream) for a capability. Idempotent."""
-        try:
-            await self._redis.xgroup_create(
-                stream_key(cap), self._cfg.consumer_group, id="$", mkstream=True)
-        except ResponseError as e:
-            if "BUSYGROUP" not in str(e):
-                raise
+        """Create the consumer group (and stream) for a capability, both tiers. Idempotent."""
+        for tier in TIER_ORDER:
+            try:
+                await self._redis.xgroup_create(
+                    stream_key(cap, tier), self._cfg.consumer_group, id="$", mkstream=True)
+            except ResponseError as e:
+                if "BUSYGROUP" not in str(e):
+                    raise
 
     async def poll_once(self) -> bool:
         """Read at most one job per capability and process it. True if it did work."""
@@ -77,13 +85,21 @@ class WorkLoop:
         # the next: that ordering is what keeps a busy small-model queue from starving the
         # big-model queue this node also serves.
         for cap in self._capabilities:
-            entries = await self._redis.xreadgroup(
-                self._cfg.consumer_group, self._cfg.worker_id,
-                {stream_key(cap): ">"}, count=1)
-            for _stream, messages in entries or []:
-                for entry_id, fields in messages:
-                    did_work = True
-                    await self._process(cap, entry_id, fields)
+            # Urgent tier first, base only if it had nothing. Note this stays INSIDE the
+            # one-job-per-capability discipline: the tier loop breaks as soon as it takes
+            # a job, so a busy urgent stream cannot drain to empty while another
+            # capability this node serves waits.
+            for tier in TIER_ORDER:
+                entries = await self._redis.xreadgroup(
+                    self._cfg.consumer_group, self._cfg.worker_id,
+                    {stream_key(cap, tier): ">"}, count=1)
+                took = False
+                for _stream, messages in entries or []:
+                    for entry_id, fields in messages:
+                        did_work = took = True
+                        await self._process(cap, entry_id, fields, tier=tier)
+                if took:
+                    break
         return did_work
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -102,10 +118,11 @@ class WorkLoop:
                 pass
 
     async def _process(self, capability: str, entry_id: str,
-                       fields: dict[str, str]) -> None:
+                       fields: dict[str, str], *, tier: str | None = None) -> None:
         raw = fields.get("job")
         if raw is None:
-            await self._redis.xack(stream_key(capability), self._cfg.consumer_group, entry_id)
+            await self._redis.xack(
+                stream_key(capability, tier), self._cfg.consumer_group, entry_id)
             return
 
         job = Job.from_wire(json.loads(raw))
@@ -133,8 +150,15 @@ class WorkLoop:
         # from the pending list with no result anywhere — invisible to the reaper.
         await self._redis.set(job.result_key, json.dumps(result.to_wire()),
                               ex=self._cfg.result_ttl_s)
-        await self._redis.xack(stream_key(capability), self._cfg.consumer_group, entry_id)
+        await self._redis.xack(
+            stream_key(capability, tier), self._cfg.consumer_group, entry_id)
 
 
 def queue_names(capabilities: Sequence[str]) -> list[str]:
-    return [stream_key(c) for c in capabilities]
+    """Every stream this worker reads, both tiers.
+
+    Reported on the heartbeat, where it doubles as the coordinator's rollout evidence: a
+    node listing a `:urgent` stream is demonstrably able to serve one, which is what lets
+    the coordinator start tiering without stranding an older worker's jobs.
+    """
+    return [stream_key(c, t) for c in capabilities for t in TIER_ORDER]

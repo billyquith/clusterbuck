@@ -276,6 +276,11 @@ plane (viable later; unneeded while fallback defaults off); mirroring async's de
 `local_only` per request (impossible without a field in the request shape).
 
 ## 24. M2 escalation grants wake rights; intra-queue priority ordering deferred
+> **Superseded by ADR 34.** Its own revisit condition — "a single warm node routinely has
+> mixed-urgency backlog contending" — was met: a client's urgent probe waited ~15 minutes
+> behind a `waitable` backlog on one warm worker, and the fleet docs had meanwhile been
+> promising the priority this ADR deferred.
+
 **Decision:** in M2, a job's urgency governs its **wake rights and escalation trajectory**
 (ADR 18) — `urgent`/`necessary` may wake a node; `waitable(N)` promotes to `necessary`
 on age — but does **not** reorder jobs *within* a capability's Redis stream. A running
@@ -685,4 +690,47 @@ both exist.
 readers); adding `finished_at` alone and documenting `completed_at` as a quirk (leaves a
 field whose name permanently lies); requiring the new fields (breaks every
 coordinator-written result).
+
+## 34. Urgency-tiered streams per capability (implements ADR 24's deferral)
+**Decision:** each capability gets two streams — `q:<cap>:urgent` and `q:<cap>` — sharing
+the one `cbk-workers` group. Tier is a pure function of urgency (`urgent`/`necessary` →
+urgent tier, `waitable` → base), derived in one place. Every consumer reads the urgent
+stream first and the base stream only if it was empty. Escalation and client attention move
+a promoted job's queued **entry** across, not just its urgency row.
+**Why:** ADR 24 deferred this and named the condition for revisiting it — "a single warm
+node routinely has mixed-urgency backlog contending". That happened: an urgent probe job
+waited ~15 minutes behind a backlog of large `waitable` jobs on one warm worker. Worse,
+`docs/fleet-management.md` had been promising `necessary` "head of the async queues" and
+that `waitable` "yields to urgent/necessary work" the whole time — so a client reporting
+this was not misreading the system, it was reading our documentation. Implementing it makes
+the documentation true; deleting the promise instead would have left the fleet unable to
+express urgency at all once a node is awake.
+**Consequences:** the rollout is the risk, not the topology. A worker built before this
+reads only the base stream, so an urgent-tier write while such a node is enrolled would
+**strand** the job. The gate is therefore evidence-based, not version-based: a node reports
+the streams it reads in its heartbeat `queues`, and a capability is tiered only once every
+node **enrolled** for it lists an urgent stream. Enrolled rather than live, and at least one
+required — "every live node is tier-aware" is vacuously true on a cold fleet, and the asleep
+node is exactly the one that will wake and claim. `CBK_URGENT_STREAMS=auto|on|off` forces it
+either way; `off` restores the previous single-stream behaviour exactly.
+Several things had to learn about tiers or they would corrupt routing silently:
+`known_capabilities` SCANs `q:*` and must strip the suffix, or the reaper reclaims entries
+under a bogus `<cap>:urgent` capability and requeues them onto the **base** stream,
+demoting the escalated work; `depth` sums work across tiers but takes the **max** of
+consumers, since one worker is a consumer on both groups; the reaper covers both tiers;
+`read_one` must tolerate a missing tier, because a capability may legitimately have no
+urgent stream yet. Moving a promoted entry reuses the cancel path's withdraw primitive, so
+it happens only when the entry is provably unclaimed — `claimed`/`gone`/no-delivery all mean
+leave it alone, since a copy on the urgent tier would run the job twice. The payload is read
+off the stream *before* withdrawal, because it is not stored in SQLite.
+**Deliberate limits:** ordering is between tiers, not within one (two urgent jobs still run
+in submission order). The reaper requeues onto the tier it reclaimed from rather than
+re-deriving the tier, which keeps it free of the rollout gate; a job promoted while claimed
+therefore finishes its retries on the base stream. Demotion (an attention lease lapsing) does
+**not** move the entry back — a demoted job running slightly too eagerly is not worth
+doubling the machinery for.
+**Considered:** a Redis sorted-set priority queue (abandons the Streams reliability
+primitives ADR 20 adopted); reordering inside the worker (it cannot see the whole stream
+cheaply); gating the rollout on `agent_version` (weaker than the worker's own declaration of
+what it reads); deferring again (the documentation would have stayed false).
 

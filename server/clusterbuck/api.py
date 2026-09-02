@@ -48,12 +48,13 @@ from .models import (
     Urgency,
 )
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
-from .queue import Queue, stream_key
+from .queue import Queue, stream_key, tier_for
 from .reservations import admit, iso
 from .routing import NoCapableArtifact, resolve_capability
 from .signing import build_manifest, load_private_pem
 from .store import Store
 from .sync import build_router, sync_routes
+from .tiering import move_to_urgent_tier, tiering_ready
 from .usage import build_usage_summary, venue_of
 from .versions import assess, policy_from_settings
 from .wake import WakeCoordinator
@@ -447,8 +448,27 @@ def create_app(
             body.client_key, json.dumps(body.scope) if body.scope else None, expires_at,
         )
 
-        # Promotion grants wake rights; pre-warm the artifacts the backlog needs.
+        # Promotion also has to move each queued entry onto the urgent tier (ADR 34),
+        # or a promoted job gains wake rights while keeping its old place in line on a
+        # worker that is already awake.
+        #
+        # Unlike escalation_scan, this promotes in BULK with no result check of its own,
+        # so each row is checked here: a job that finished since must not be moved (or
+        # counted as promoted work needing warmth).
         fleet = app.state.fleet
+        for row in affected:
+            if await app.state.queue.read_result(row.result_key) is not None:
+                continue
+            if not tiering_ready(store, fleet, row.capability,
+                                 mode=settings.urgent_streams):
+                continue
+            fresh = store.get(row.id)
+            if fresh is not None:
+                await move_to_urgent_tier(
+                    store, app.state.queue, fresh, group=settings.consumer_group
+                )
+
+        # Promotion grants wake rights; pre-warm the artifacts the backlog needs.
         caps = {r.capability for r in affected}
         prewarm = []
         for cap in caps:
@@ -576,11 +596,20 @@ def create_app(
                 },
                 headers={"Idempotency-Replayed": "true"},
             )
-        entry_id = await app.state.queue.enqueue(record.to_wire())
+        # Which stream this job goes on is decided by urgency (ADR 34), but only once
+        # every node serving the capability demonstrably reads the urgent tier — an older
+        # worker reads the base stream only, and an urgent-tier write would strand the
+        # job. The gate is a scan of a table with a handful of rows; if it ever shows up
+        # in a profile, recompute it on heartbeat rather than caching it here.
+        tier = None
+        if tiering_ready(app.state.store, app.state.fleet, capability,
+                         mode=settings.urgent_streams):
+            tier = tier_for(body.urgency.value)
+        entry_id = await app.state.queue.enqueue(record.to_wire(), tier=tier)
         # The row was inserted before the XADD, so the delivery is recorded here. This is
         # what makes queue position exact rather than a stream scan.
         app.state.store.record_delivery(
-            job_id, stream=stream_key(capability), entry_id=entry_id
+            job_id, stream=stream_key(capability, tier), entry_id=entry_id
         )
 
         # Wake rights: urgent/necessary jobs may create capacity on submit.

@@ -21,9 +21,32 @@ import redis.asyncio as redis
 
 from .config import settings
 
+# Urgency tiers (ADR 34, implementing ADR 24's deferral). Two streams per capability:
+# `q:<cap>:urgent` is drained ahead of `q:<cap>`, so once a worker is awake, demanding work
+# no longer waits behind a patient backlog. Read order is exported so the coordinator, the
+# worker and the cloud executor cannot disagree about it.
+URGENT_TIER = "urgent"
+TIER_ORDER: tuple[str | None, ...] = (URGENT_TIER, None)
+_TIER_SUFFIX = f":{URGENT_TIER}"
 
-def stream_key(capability: str) -> str:
-    return f"q:{capability}"
+
+def stream_key(capability: str, tier: str | None = None) -> str:
+    """The stream a capability's work of a given tier lives on.
+
+    `tier=None` is the base stream and the historical name, so every existing caller and
+    every deployed worker keeps addressing exactly the stream it always did.
+    """
+    return f"q:{capability}{_TIER_SUFFIX}" if tier == URGENT_TIER else f"q:{capability}"
+
+
+def tier_for(urgency: str | None) -> str | None:
+    """Which tier a job belongs on, from its urgency alone.
+
+    `urgent` and `necessary` both demand capacity (ADR 18), so both go to the urgent tier;
+    `waitable` — and anything unrecognised — takes the base stream. Keeping this a pure
+    function of urgency means every enqueue path agrees without duplicating the rule.
+    """
+    return URGENT_TIER if urgency in ("urgent", "necessary") else None
 
 
 # Consumers the COORDINATOR registers on the shared group. They appear in
@@ -82,9 +105,9 @@ class Queue:
         """The underlying Redis client (for coordinator reads like XINFO)."""
         return self._r
 
-    async def ensure_group(self, capability: str) -> None:
+    async def ensure_group(self, capability: str, tier: str | None = None) -> None:
         """Create the consumer group (and stream) if absent. Idempotent."""
-        key = stream_key(capability)
+        key = stream_key(capability, tier)
         try:
             await self._r.xgroup_create(
                 name=key, groupname=settings.consumer_group, id="$", mkstream=True
@@ -93,22 +116,27 @@ class Queue:
             if "BUSYGROUP" not in str(e):
                 raise
 
-    async def enqueue(self, job: dict[str, Any]) -> str:
+    async def enqueue(self, job: dict[str, Any], *, tier: str | None = None) -> str:
         """Ensure the group exists, then XADD the job. Returns the stream entry id.
 
         Trimmed with an approximate MAXLEN so the broker cannot grow without bound; the cap
         is far above any sane in-flight depth, so it only ever discards long-acked history.
+
+        `tier` defaults to None — the base stream — rather than being derived from the
+        job's urgency here, because whether tiering is safe depends on the *fleet*: a
+        worker that predates it reads only the base stream, so an urgent-tier write during
+        a rollout would strand the job. The caller consults that gate and passes the answer.
         """
         capability = job["capability"]
-        await self.ensure_group(capability)
+        await self.ensure_group(capability, tier)
         return await self._r.xadd(
-            stream_key(capability), {"job": json.dumps(job)},
+            stream_key(capability, tier), {"job": json.dumps(job)},
             maxlen=settings.stream_maxlen, approximate=True,
         )
 
     async def reclaim_stale(
         self, capability: str, group: str, *, min_idle_ms: int, consumer: str = "cbk-reaper",
-        count: int = 50,
+        count: int = 50, tier: str | None = None,
     ) -> list[tuple[str, dict[str, Any]]]:
         """XAUTOCLAIM entries whose claiming worker has gone quiet.
 
@@ -116,7 +144,7 @@ class Queue:
         exceed the longest plausible inference, or a worker that is simply busy would have
         its job stolen and re-run.
         """
-        key = stream_key(capability)
+        key = stream_key(capability, tier)
         try:
             _next, entries, _deleted = await self._r.xautoclaim(
                 name=key, groupname=group, consumername=consumer,
@@ -137,11 +165,13 @@ class Queue:
                 await self._r.xack(key, group, entry_id)
         return out
 
-    async def ack(self, capability: str, group: str, entry_id: str) -> None:
-        await self._r.xack(stream_key(capability), group, entry_id)
+    async def ack(
+        self, capability: str, group: str, entry_id: str, *, tier: str | None = None
+    ) -> None:
+        await self._r.xack(stream_key(capability, tier), group, entry_id)
 
     async def read_one(
-        self, capability: str, group: str, consumer: str
+        self, capability: str, group: str, consumer: str, *, tier: str | None = None
     ) -> tuple[str, dict[str, Any]] | None:
         """XREADGROUP one new entry for `capability`, or None if there isn't one.
 
@@ -149,12 +179,20 @@ class Queue:
         primitive a worker uses over the wire (worker/src/cbk_worker/work_loop.py), just
         called in-process because that executor lives in this Python process too.
         """
-        entries = await self._r.xreadgroup(group, consumer, {stream_key(capability): ">"}, count=1)
+        key = stream_key(capability, tier)
+        try:
+            entries = await self._r.xreadgroup(group, consumer, {key: ">"}, count=1)
+        except redis.ResponseError:
+            # No such stream or group. Normal rather than exceptional now that there are
+            # two tiers: a capability may have a base stream and no urgent one (nothing
+            # urgent has ever been submitted), and reading the absent tier must simply
+            # find nothing — the same tolerance `reclaim_stale` has.
+            return None
         for _stream, messages in entries or []:
             for entry_id, fields in messages:
                 raw = fields.get("job")
                 if raw is None:
-                    await self._r.xack(stream_key(capability), group, entry_id)
+                    await self._r.xack(key, group, entry_id)
                     continue
                 return entry_id, json.loads(raw)
         return None
@@ -167,13 +205,42 @@ class Queue:
 
         The reaper must cover streams that exist because a client submitted to them, not
         only those named in fleet.yaml.
+
+        Tier suffixes are stripped and the result deduped. Untaught, this would return
+        `8b-extract:urgent` as if it were a capability of its own — and the reaper, which
+        iterates what this returns, would then reclaim those entries under a bogus
+        capability name and requeue them onto the *base* stream, silently demoting the
+        escalated work the tier exists to prioritise.
         """
         keys = [k async for k in self._r.scan_iter(match="q:*", count=100)]
-        return sorted(k[2:] for k in keys)
+        names = set()
+        for key in keys:
+            name = key[2:]
+            name = name.removesuffix(_TIER_SUFFIX)
+            names.add(name)
+        return sorted(names)
 
     async def read_result(self, result_key: str) -> dict[str, Any] | None:
         raw = await self._r.get(result_key)
         return json.loads(raw) if raw is not None else None
+
+    async def read_entry(self, stream: str, entry_id: str) -> dict[str, Any] | None:
+        """The job payload of one specific stream entry, or None if it is not there.
+
+        Needed to MOVE an entry between tiers: the payload is not stored in SQLite
+        (`messages`/`prompt`/`params` are not columns), so it has to be read off the
+        stream before the entry is withdrawn.
+        """
+        entries = await self._r.xrange(stream, min=entry_id, max=entry_id, count=1)
+        for _id, fields in entries or []:
+            raw = (fields or {}).get("job")
+            if raw is None:
+                return None
+            try:
+                return json.loads(raw)
+            except ValueError:
+                return None
+        return None
 
     async def withdraw(self, stream: str, entry_id: str, *, group: str) -> str:
         """Try to take a queued entry back off a stream. Never lies about the outcome.
@@ -205,7 +272,7 @@ class Queue:
         return "deleted" if int(removed or 0) else "gone"
 
     async def claims(
-        self, capability: str, group: str, *, count: int = 200
+        self, capability: str, group: str, *, count: int = 200, tier: str | None = None
     ) -> list[dict[str, Any]]:
         """Who is holding what, from the pending-entries list.
 
@@ -219,7 +286,7 @@ class Queue:
         """
         try:
             rows = await self._r.xpending_range(
-                stream_key(capability), group, min="-", max="+", count=count
+                stream_key(capability, tier), group, min="-", max="+", count=count
             )
         except redis.ResponseError:
             return []  # no group yet
@@ -233,10 +300,12 @@ class Queue:
             for r in rows or []
         ]
 
-    async def group_info(self, capability: str, group: str) -> dict[str, Any] | None:
+    async def group_info(
+        self, capability: str, group: str, *, tier: str | None = None
+    ) -> dict[str, Any] | None:
         """This capability's consumer-group record, or None if the group doesn't exist."""
         try:
-            groups = await self._r.xinfo_groups(stream_key(capability))
+            groups = await self._r.xinfo_groups(stream_key(capability, tier))
         except redis.ResponseError:
             return None
         for g in groups or []:
@@ -251,6 +320,7 @@ class Queue:
         *,
         before_entry_id: str | None = None,
         count: int = POSITION_SCAN_CAP,
+        tier: str | None = None,
     ) -> tuple[int, bool]:
         """Count entries no consumer has ever been handed — the real backlog.
 
@@ -264,7 +334,7 @@ class Queue:
         `before_entry_id` bounds the count at the caller's own entry, giving its position.
         Returns `(count, capped)`; when `capped` the true figure is "at least count".
         """
-        info = await self.group_info(capability, group)
+        info = await self.group_info(capability, group, tier=tier)
         if info is None:
             return (0, False)
         last = info.get("last-delivered-id") or "0-0"
@@ -278,7 +348,7 @@ class Queue:
 
         upper = f"({before_entry_id}" if before_entry_id is not None else "+"
         entries = await self._r.xrange(
-            stream_key(capability), min=f"({last}", max=upper, count=count + 1
+            stream_key(capability, tier), min=f"({last}", max=upper, count=count + 1
         )
         found = len(entries or [])
         return (min(found, count), found > count)
@@ -297,30 +367,45 @@ class Queue:
         The distinction is not academic: never-delivered work appears in neither `pending`
         nor (usefully) `depth`, so a queue full of permanently stuck jobs reads as healthy
         on those two alone.
+
+        Aggregation across the urgency tiers is per field, not uniform: work counts
+        **sum**, but `consumers` takes the **max**. One worker is a consumer on both
+        groups, so summing would double-count the fleet and re-create the inflated count
+        this reporting exists to fix.
         """
-        key = stream_key(capability)
-        entries = await self._r.xlen(key)
-        pending = 0
-        consumers: list[dict[str, Any]] = []
-        try:
-            summary = await self._r.xpending(key, group)
-            pending = int(summary["pending"]) if summary else 0
-            consumers = await self._r.xinfo_consumers(key, group)
-        except redis.ResponseError:
-            pass  # no group yet
-        backlog, _capped = await self.undelivered(capability, group)
-        live = live_worker_consumers(consumers, dead_ms=settings.worker_dead_ms)
-        executors = live_worker_consumers(
-            consumers, dead_ms=settings.worker_dead_ms,
-            include=(CLOUD_EXECUTOR_CONSUMER,),
-        )
+        totals = {"depth": 0, "pending": 0, "backlog": 0}
+        live_names: set[str] = set()
+        executor_names: set[str] = set()
+
+        for tier in TIER_ORDER:
+            key = stream_key(capability, tier)
+            totals["depth"] += await self._r.xlen(key)
+            consumers: list[dict[str, Any]] = []
+            try:
+                summary = await self._r.xpending(key, group)
+                totals["pending"] += int(summary["pending"]) if summary else 0
+                consumers = await self._r.xinfo_consumers(key, group)
+            except redis.ResponseError:
+                pass  # no group on this tier yet
+            backlog, _capped = await self.undelivered(capability, group, tier=tier)
+            totals["backlog"] += backlog
+            # Counted by NAME across tiers, which is what makes this a max rather than a
+            # sum: the same worker appears on both groups under the same id.
+            live_names |= {
+                c["name"] for c in
+                live_worker_consumers(consumers, dead_ms=settings.worker_dead_ms)
+            }
+            executor_names |= {
+                c["name"] for c in live_worker_consumers(
+                    consumers, dead_ms=settings.worker_dead_ms,
+                    include=(CLOUD_EXECUTOR_CONSUMER,))
+                if c.get("name") == CLOUD_EXECUTOR_CONSUMER
+            }
+
         return {
-            "depth": entries,
-            "pending": pending,
-            "backlog": backlog,
-            "consumers": len(live),
-            "executors": len([c for c in executors
-                              if c.get("name") == CLOUD_EXECUTOR_CONSUMER]),
+            **totals,
+            "consumers": len(live_names),
+            "executors": len(executor_names),
         }
 
     async def aclose(self) -> None:

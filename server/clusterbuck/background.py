@@ -51,7 +51,7 @@ async def coordinator_loop(
     ticks = 0
     while not stop.is_set():
         try:
-            await escalation_scan(store, queue, wake)
+            await escalation_scan(store, queue, wake, fleet=fleet)
             await reservation_tick(store, wake)
             await attention_tick(store, queue)
             await usage_scan(store, queue, fleet)
