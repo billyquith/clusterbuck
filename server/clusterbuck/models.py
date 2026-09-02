@@ -7,10 +7,23 @@ request shape (protocols.md §1b) and is server-only, so it is not part of `cont
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+# The statuses a WORKER can write into a result blob (contract/result.schema.json).
+# Lives here rather than in api.py because `Store.set_status` needs it too, and importing
+# it from the API layer would invert the dependency. A coordinator-only lifecycle status
+# (e.g. a cancellation) does NOT belong in this set — that would imply a worker could
+# produce one.
+RESULT_STATUSES = frozenset({"done", "failed", "expired"})
+
+
+def now_iso() -> str:
+    """UTC now, RFC 3339 with a `Z` suffix — the timestamp format on every seam."""
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class Urgency(str, Enum):

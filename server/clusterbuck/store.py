@@ -15,10 +15,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
+from sqlalchemy import update
 from sqlmodel import Session, SQLModel, select
 
 from . import migrate
 from .db import make_engine
+from .models import RESULT_STATUSES, now_iso
 from .orm.ability import Ability
 from .orm.attention_lease import AttentionLease
 from .orm.catalog_entry import CatalogEntry
@@ -59,6 +61,13 @@ _MIGRATIONS = {
         "submitter_request_id": "ALTER TABLE jobs ADD COLUMN submitter_request_id TEXT",
         "submitted_at": "ALTER TABLE jobs ADD COLUMN submitted_at TEXT",
         "observed_ip": "ALTER TABLE jobs ADD COLUMN observed_ip TEXT",
+        # Lifecycle timing + delivery (protocols.md §1b). Nullable, no default: rows
+        # written before this existed carry no observation, and NULL says so.
+        "started_at": "ALTER TABLE jobs ADD COLUMN started_at TEXT",
+        "finished_at": "ALTER TABLE jobs ADD COLUMN finished_at TEXT",
+        "claimed_by": "ALTER TABLE jobs ADD COLUMN claimed_by TEXT",
+        "entry_id": "ALTER TABLE jobs ADD COLUMN entry_id TEXT",
+        "stream": "ALTER TABLE jobs ADD COLUMN stream TEXT",
     },
     "ability": {
         "provenance": "ALTER TABLE ability ADD COLUMN provenance TEXT NOT NULL DEFAULT 'measured'",
@@ -188,10 +197,83 @@ class Store:
             return s.get(Job, id)
 
     def set_status(self, id: str, status: str) -> None:
+        """Set a job's status, stamping `finished_at` the first time it goes terminal.
+
+        The stamp lives here rather than at the call sites because there are four places
+        the coordinator first writes a terminal status — the lazy write-back on poll, the
+        usage tick's capture and its deadline-expiry branch, and the reaper's dead-letter
+        — and hooking only one of them would leave a `done` job with no `finished_at`,
+        which is precisely the ambiguity the column exists to remove.
+
+        The stamp is a guarded UPDATE (`WHERE finished_at IS NULL`) rather than
+        read-then-write, so two ticks racing the same job cannot overwrite an earlier,
+        more accurate observation with a later one.
+        """
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is None:
+                return
+            job.status = status
+            s.add(job)
+            if status in RESULT_STATUSES or status == "cancelled":
+                s.exec(
+                    update(Job)
+                    .where(Job.id == id, Job.finished_at.is_(None))
+                    .values(finished_at=now_iso())
+                )
+            s.commit()
+
+    def jobs_by_entry_ids(self, entry_ids: list[str]) -> dict[str, Job]:
+        """entry_id → job, for the ids currently held in a stream's pending list.
+
+        One query per tick rather than one per claimed entry. Only rows whose recorded
+        delivery still matches are returned, so a stale entry id (the reaper requeued the
+        job under a new one) simply does not match and is skipped.
+        """
+        if not entry_ids:
+            return {}
+        with self._session() as s:
+            rows = s.exec(select(Job).where(Job.entry_id.in_(entry_ids))).all()
+            return {r.entry_id: r for r in rows if r.entry_id is not None}
+
+    def mark_started(self, id: str, *, at: str, claimed_by: str) -> bool:
+        """Record an observed claim: `started_at` + `claimed_by`, and queued → running.
+
+        Guarded twice, because this runs from a periodic tick against jobs a client may
+        be polling concurrently: `started_at IS NULL` keeps the first (true) observation,
+        and the status only advances from `queued`, so it can never clobber a terminal
+        status written by a poll or the usage tick in between.
+
+        Returns True if this call was the one that recorded the claim.
+        """
+        with self._session() as s:
+            result = s.exec(
+                update(Job)
+                .where(Job.id == id, Job.started_at.is_(None))
+                .values(started_at=at, claimed_by=claimed_by)
+            )
+            changed = bool(result.rowcount)
+            s.exec(
+                update(Job)
+                .where(Job.id == id, Job.status == "queued")
+                .values(status="running")
+            )
+            s.commit()
+            return changed
+
+    def record_delivery(self, id: str, *, stream: str, entry_id: str) -> None:
+        """Remember the stream entry now representing this job.
+
+        Cannot ride `insert`: the row is written before the XADD, so the entry id does
+        not exist yet. Every enqueue must call this — including the reaper's requeue,
+        which mints a *new* entry id, and would otherwise leave queue position and
+        withdrawal pointing at an entry that no longer exists.
+        """
         with self._session() as s:
             job = s.get(Job, id)
             if job is not None:
-                job.status = status
+                job.entry_id = entry_id
+                job.stream = stream
                 s.add(job)
                 s.commit()
 

@@ -35,11 +35,12 @@ async def queue(redis_url):
 async def _submit(queue: Queue, store: Store, job_id: str, *, attempts: int = 0,
                   max_attempts: int = 3) -> None:
     store.insert(id=job_id, result_key=f"res_{job_id}", capability=CAP, created_at="t")
-    await queue.enqueue({
+    entry_id = await queue.enqueue({
         "id": job_id, "created_at": "t", "capability": CAP,
         "prompt": "work", "params": {}, "urgency": "waitable", "privacy": "local_only",
         "result_key": f"res_{job_id}", "attempts": attempts, "max_attempts": max_attempts,
     })
+    store.record_delivery(job_id, stream=stream_key(CAP), entry_id=entry_id)
 
 
 async def _claim_and_die(queue: Queue, consumer: str = "dead-laptop") -> None:
@@ -152,3 +153,41 @@ async def test_streams_are_trimmed(store, queue, monkeypatch):
 
     length = await queue.client.xlen(stream_key(CAP))
     assert length < 50, f"stream grew unbounded ({length} entries after 300 writes)"
+
+
+async def test_requeue_rewrites_the_recorded_delivery(store, queue):
+    """A requeue is a NEW stream entry, so the recorded delivery has to follow it.
+
+    Left stale, the job row would point at the entry the reaper is about to ack away —
+    and queue position, withdrawal and claim observation would all silently target an
+    entry that no longer exists, for precisely the jobs that have already gone wrong once.
+    """
+    await _submit(queue, store, "job_rq")
+    original = store.get("job_rq").entry_id
+    assert original is not None, "the submit path records its delivery"
+
+    await _claim_and_die(queue)
+    await reaper_scan(store, queue, group=GROUP, min_idle_ms=0, capabilities=[CAP])
+
+    row = store.get("job_rq")
+    assert row.entry_id is not None and row.entry_id != original
+    assert row.stream == stream_key(CAP)
+
+
+async def test_requeue_returns_the_job_to_queued_but_keeps_the_observed_start(
+    store, queue
+):
+    """`started_at` set with status `queued` is a meaningful combination, not a
+    contradiction: a worker did have this job, and then died. Clearing the start would
+    erase the only evidence that anything ever picked it up."""
+    await _submit(queue, store, "job_back")
+    await _claim_and_die(queue)
+    store.mark_started("job_back", at="2026-09-02T00:00:00Z", claimed_by="dead-laptop")
+    assert store.get("job_back").status == "running"
+
+    await reaper_scan(store, queue, group=GROUP, min_idle_ms=0, capabilities=[CAP])
+
+    row = store.get("job_back")
+    assert row.status == "queued", "back of the line again"
+    assert row.started_at == "2026-09-02T00:00:00Z"
+    assert row.claimed_by == "dead-laptop"

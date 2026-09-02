@@ -41,7 +41,11 @@ POST /jobs
                                         //   fleet-management.md → urgency & escalation)
   "privacy":     "local_only",          // local_only | cloud_ok (default local_only —
                                         //   local_only NEVER routes to cloud)
-  "deadline":    "2026-01-01T00:00:00Z",// optional hard expiry
+  "deadline":    "2026-01-01T00:00:00Z",// optional expiry; see expires_at below.
+                                        //   Enforced by a coordinator sweep, NOT by
+                                        //   removing the queued entry, and the worker
+                                        //   does not check it — a job already claimed
+                                        //   runs to completion regardless.
   "callback_url":"https://…",           // optional; else poll
   "submitter": {                        // optional caller provenance (all fields optional)
     "app":          "nightly-importer", // which client
@@ -88,13 +92,62 @@ Poll for the result:
 ```
 GET /jobs/{id}
 → { "id","status":"queued|running|done|failed|expired",
+    "urgency","capability",
+    "created_at":  "…",          // server receipt time — authoritative
+    "started_at":  "…" | null,   // a claim was OBSERVED at this time (see below)
+    "finished_at": "…" | null,   // a terminal status was first recorded at this time
+    "deadline":    "…" | null,   // your `deadline`, echoed back
+    "escalates_at":"…" | null,   // when waitable gains the right to demand capacity
+    "expires_at":  "…" | null,   // effective give-up time; NULL = nothing ever gives up
+    "queue_position": 0 | null,  // unclaimed jobs ahead of you; null unless queued
     "result": { … OpenAI-style completion … } | null,
-    "error": null, "attempts": 1, "worker": "<opaque-node-id>",
+    "error": null, "attempts": 0, "worker": "<opaque-node-id>" | null,
     "submitter": { "app","instance","request_id","submitted_at",
                    "observed_ip" } | null }   // provenance as recorded; null if none
 ```
 
 The client never learns which machine ran the job beyond an opaque id (diagnostics only).
+
+**Reading the wait state.** Four fields are easy to misread, so each is stated exactly:
+
+- **`attempts` counts reaper requeues, not deliveries.** It is incremented only when the
+  coordinator concludes a worker abandoned a job and puts it back (`reaper.py`), so a
+  healthy job that runs once reads `0` for its whole life. It is **not** a "has anything
+  picked this up" signal, and never was.
+- **`started_at` and `worker` are coordinator observations, on the tick interval.** They
+  come from the stream's pending-entries list, which knows the claiming consumer before
+  any result exists — so a *running* job now reports both. But pending entries vanish on
+  `XACK`, so a job claimed and finished between two ticks is never seen there and ends up
+  with `finished_at` set and `started_at`/`worker` null. **`started_at == null` means "no
+  claim was observed", never "not started".** A wait state should key on `status` and
+  `queue_position`, which are correct in every case.
+- **`status` reaches `running`** when such a claim is observed. `started_at` set *with*
+  `status: queued` is meaningful rather than contradictory: a worker had the job and died,
+  and the reaper has put it back.
+- **`queue_position` counts unclaimed work ahead of you.** Jobs already claimed are in
+  flight, not ahead in the queue, so a position of `0` is compatible with one job still
+  generating. It is capped, so past the cap it means "at least N", and it is `null` once
+  the job is no longer queued.
+
+**When clusterbuck gives up: `expires_at`, and the honest `null`.** A `waitable` job
+submitted with neither `deadline` nor `escalate_after_min` has **no terminating mechanism
+at all** — it is excluded from escalation (no `escalate_at`), from the deadline sweep (no
+`deadline`), and it is invisible to the reaper, because `XAUTOCLAIM` walks the
+pending-entries list and a never-delivered entry never enters it. Its only exit is being
+trimmed away by `MAXLEN ~` once enough later traffic arrives on the same capability, with
+no result and no status change. `expires_at: null` reports exactly that, and is the reason
+to set `deadline` and/or `escalate_after_min` on anything a human is waiting for.
+
+A `deadline` that is not an RFC 3339 timestamp is rejected with `422`. It used to be
+dropped silently to "no expiry", which handed back the opposite of what was asked for with
+nothing to notice.
+
+**Collecting a result later.** A completed result lives in the result store for
+`CBK_RESULT_TTL_S` (default 24h). After that, `GET /jobs/{id}` still answers with the
+job's terminal status and timing, but `result` is `null` — `finished_at` is what
+distinguishes "it ran and the result expired" from "it never ran". Prompts and completions
+are deliberately not kept in the coordinator's durable store (metering is metadata-only),
+so a client that needs a result beyond the TTL must persist it on first successful poll.
 
 ## 2. clusterbuck server ↔ worker (Redis queue contract)
 
@@ -143,6 +196,14 @@ semantics natively.
   `max_attempts` the coordinator writes a terminal `failed` result instead. This is what makes
   a laptop closing its lid mid-job safe. The threshold necessarily exceeds the longest
   plausible inference, because a worker mid-generation is not reading from Redis.
+  **The reaper only ever sees entries that were delivered**, because `XAUTOCLAIM` walks
+  the pending-entries list — a job no worker ever claimed is not in it, and is therefore
+  invisible to this recovery path at any threshold. That gap is what `expires_at` reports
+  to a client (§1b); closing it is a coordinator-side sweep over queued rows, not
+  something the reaper can be tuned into doing.
+  A requeue is a **new stream entry**, so the coordinator re-records the job's delivery
+  (and returns its status to `queued`) — anything holding the old entry id, such as queue
+  position, would otherwise point at an entry about to be acked away.
 - **Result:** written to a plain Redis key named by `result_key`, with a TTL
   (`CBK_RESULT_TTL_S`). Authoritative schema:
   [`contract/result.schema.json`](../contract/result.schema.json) — it *requires*
@@ -344,7 +405,7 @@ the operator shared secret (ADR 26) except where noted.
 |---|---|
 | `GET /healthz` | Liveness. **Unauthenticated** (probe). |
 | `GET /fleet` | The static registry as loaded from `fleet.yaml` (§5). |
-| `GET /queues` | Per-capability depth, pending (claimed-unacked) count, and live consumers. |
+| `GET /queues` | Per-capability **backlog** (queued, never delivered — the real backlog), `pending` (claimed-unacked, i.e. in flight), `depth` (`XLEN`: retained history incl. acked, bounded by `CBK_STREAM_MAXLEN`), live worker `consumers`, and `executors` (live coordinator-side cloud executors). A client does not need this endpoint to know its own place in line — `queue_position` is on the job body (§1b) — which matters because this one sits behind the operator secret. |
 | `GET /nodes` | Enrolled nodes: profile, mode, probed hardware, installed/loaded models, last heartbeat. Never exposes `node_key`. |
 | `POST /nodes/tokens` | Mint a one-time join token for §6 enrollment. |
 | `POST /nodes/{id}/policy` | The owner's contract for a node — `{disk_quota_gb, auto_approve}` as a **JSON body**. `auto_approve` opts that node out of human approval for installs. |

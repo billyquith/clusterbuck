@@ -17,6 +17,7 @@ from .attention import attention_tick
 from .catalog import scan_all
 from .config import settings
 from .escalation import escalation_scan
+from .observe import observe_tick
 from .eval_runner import eval_tick
 from .fleet import Fleet
 from .queue import Queue
@@ -71,6 +72,14 @@ async def coordinator_loop(
                 scan_all(store, now=_now())
         except Exception:  # a tick failure must not kill the loop
             _log.exception("coordinator tick failed")
+
+        # Deliberately in its own try, and last: this is the only tick that is purely
+        # observational — nothing routes on it — so a Redis hiccup here must not cost the
+        # escalation, reservation and usage ticks above their turn.
+        try:
+            await observe_tick(store, queue, group=settings.consumer_group)
+        except Exception:
+            _log.exception("observe tick failed")
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_s)
         except asyncio.TimeoutError:

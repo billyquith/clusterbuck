@@ -44,7 +44,7 @@ from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
 # The current Alembic head. Pinned deliberately rather than derived from the migration
 # scripts: deriving it from the machinery under test would let "nobody thought about the
 # legacy path" pass silently. Bump this in the same commit as a new migration.
-_HEAD = "0004"
+_HEAD = "0005"
 
 
 def _affinity(decl_type: str) -> str:
@@ -199,5 +199,52 @@ def test_0004_adds_provenance_to_a_populated_jobs_table(tmp_path) -> None:
             assert row["submitter_app"] is None
             assert row["submitter_request_id"] is None
             assert row["observed_ip"] is None
+    finally:
+        conn.close()
+
+
+def test_0005_adds_timing_to_a_populated_jobs_table(tmp_path) -> None:
+    """Like 0004, 0005's DDL runs against a live, populated `jobs` table, so upgrading
+    must add the timing/delivery columns without disturbing the rows already there.
+
+    The NULL assertions are the point: a job that ran before this existed has no observed
+    claim and no recorded delivery, and NULL is the honest value for both — a default
+    would invent a timestamp for work nobody watched.
+    """
+    db = tmp_path / "populated.db"
+
+    with migrate._db_path_env(str(db)) as cfg:
+        command.upgrade(cfg, "0004")
+
+    existing = [
+        ("job_t1", "res_t1", "8b-extract", "done", "2026-08-01T10:00:00Z", "waitable"),
+        ("job_t2", "res_t2", "8b-extract", "queued", "2026-08-02T11:00:00Z", "urgent"),
+    ]
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO jobs (id, result_key, capability, status, created_at, urgency) "
+            "VALUES (?, ?, ?, ?, ?, ?)", existing)
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrate.upgrade_to_head(str(db))
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        assert {"started_at", "finished_at", "claimed_by", "entry_id",
+                "stream"} <= columns
+
+        rows = conn.execute(
+            "SELECT id, result_key, capability, status, created_at, urgency, "
+            "started_at, finished_at, claimed_by, entry_id, stream FROM jobs ORDER BY id"
+        ).fetchall()
+        assert [tuple(r)[:6] for r in rows] == existing, "pre-existing rows must survive"
+        for row in rows:
+            for column in ("started_at", "finished_at", "claimed_by", "entry_id", "stream"):
+                assert row[column] is None
     finally:
         conn.close()

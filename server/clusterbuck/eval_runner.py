@@ -29,7 +29,7 @@ from .evaluation import SCALE_VERSION, SEED_SUITE, EvalItem, score_to_ability
 from .fleet import Fleet, resolve_api_key
 from .ids import new_ids
 from .models import JobRecord, Message, Privacy, Urgency
-from .queue import Queue
+from .queue import Queue, stream_key
 from .store import Store
 
 _log = logging.getLogger("clusterbuck.eval")
@@ -154,7 +154,9 @@ async def dispatch(
                 urgency=Urgency.waitable.value, client_key=EVAL_CLIENT_KEY,
                 task_class=item.task_class,
             )
-            await queue.enqueue(record.to_wire())
+            entry_id = await queue.enqueue(record.to_wire())
+            store.record_delivery(job_id, stream=stream_key(capability),
+                                  entry_id=entry_id)
             store.add_eval_run(job_id=job_id, artifact=artifact,
                                task_class=item.task_class, item_index=index,
                                result_key=result_key, created_at=now,

@@ -23,7 +23,7 @@ from typing import Awaitable, Callable
 import redis.asyncio as redis
 
 from .fleet import Fleet
-from .queue import stream_key
+from .queue import CLOUD_EXECUTOR_CONSUMER, live_worker_consumers, stream_key
 from .wol import send_magic_packet
 
 _log = logging.getLogger("clusterbuck.wake")
@@ -55,14 +55,28 @@ class WakeCoordinator:
         self._last_wake: dict[str, float] = {}
 
     async def has_live_consumer(self, capability: str) -> bool:
-        """True if some consumer on the capability's group polled within dead_ms."""
+        """True if something that can actually serve this capability polled recently.
+
+        Uses the shared `live_worker_consumers` filter so "live" means one thing across
+        the coordinator. The cloud executor counts — on a cloud-only capability it is the
+        only consumer there will ever be, and if it is draining the queue then no machine
+        needs waking.
+
+        The reaper deliberately does NOT count, and that exclusion is the point: its
+        `XAUTOCLAIM` registers `cbk-reaper` on the group and refreshes its idle time on
+        every scan (~60s, i.e. within `dead_ms`), so counting it made the coordinator's
+        own bookkeeping look like a live worker and suppress the wake an urgent job was
+        entitled to.
+        """
         try:
             consumers = await self._r.xinfo_consumers(
                 stream_key(capability), self._group
             )
         except redis.ResponseError:
             return False  # no group/stream ⇒ nobody home
-        return any(c.get("idle", self._dead_ms + 1) < self._dead_ms for c in consumers)
+        return bool(live_worker_consumers(
+            consumers, dead_ms=self._dead_ms, include=(CLOUD_EXECUTOR_CONSUMER,)
+        ))
 
     async def maybe_wake(self, capability: str, *, reason: str) -> list[str]:
         """Wake capable sleeping nodes for a capability. Returns the node ids woken."""

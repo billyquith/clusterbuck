@@ -25,12 +25,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from .queue import Queue
+from .queue import REAPER_CONSUMER, Queue, stream_key
 from .store import Store
 
 _log = logging.getLogger("clusterbuck.reaper")
 
-REAPER_CONSUMER = "cbk-reaper"
 
 
 def _now_iso() -> str:
@@ -85,8 +84,16 @@ async def reaper_scan(
                 continue
 
             # Requeue for another go, then retire the stale delivery.
-            await queue.enqueue({**job, "attempts": attempts})
+            new_entry_id = await queue.enqueue({**job, "attempts": attempts})
             store.set_attempts(job_id, attempts)
+            # The requeue is a NEW stream entry, so the recorded delivery must follow it
+            # or queue position and withdrawal keep pointing at an entry that is about to
+            # be acked away. Back to `queued` too: it is at the back of the line again.
+            # `started_at` is deliberately left set — started-then-queued is a meaningful
+            # combination meaning "a worker had this and died".
+            store.record_delivery(job_id, stream=stream_key(capability),
+                                  entry_id=new_entry_id)
+            store.set_status(job_id, "queued")
             await queue.ack(capability, group, entry_id)
             requeued += 1
             _log.info("requeued %s [%s] (attempt %d/%d)",

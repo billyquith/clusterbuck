@@ -54,3 +54,29 @@ class Job(SQLModel, table=True):
     # exactly the case a runaway submitter presents. Coordinator-side only: it is not in
     # contract/job.schema.json, because the worker has no use for it.
     observed_ip: str | None = None
+
+    # --- lifecycle timing + delivery (protocols.md §1b) -----------------------------
+    # All coordinator-observed, so a polling client can render an honest wait state
+    # without timing jobs locally. Nullable with no default: rows predating this have no
+    # observation, and NULL is the honest value.
+    #
+    # `started_at` is when the coordinator OBSERVED a claim (from the stream's
+    # pending-entries list), stamped as the true delivery instant rather than the tick
+    # clock. A job claimed and acked between two ticks never enters the PEL, so it ends
+    # up with `finished_at` set and this NULL — that is expected, not a bug, and
+    # `started_at IS NULL` must never be read as "not started".
+    started_at: str | None = None
+    # When the coordinator first wrote a terminal status. Stamped inside
+    # `Store.set_status` (not at its call sites) so every terminal path gets it.
+    finished_at: str | None = None
+    # Who CLAIMED the job, from the PEL consumer name. Distinct from `usage.node`, which
+    # records who *completed* it: different writer, different time. This is the only
+    # thing that can answer "has anything picked this up" while a job is still running.
+    claimed_by: str | None = None
+    # The stream entry currently representing this job, and the stream it sits on.
+    # Written after the XADD (the row is inserted before it), and rewritten by the
+    # reaper, which mints a NEW entry id on every requeue. `stream` is stored rather
+    # than derived because escalation changes a job's urgency *after* enqueue, so the
+    # entry can sit on a stream that no longer matches its current urgency.
+    entry_id: str | None = None
+    stream: str | None = None

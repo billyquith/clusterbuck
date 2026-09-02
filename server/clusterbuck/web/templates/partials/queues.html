@@ -3,20 +3,30 @@
 <table>
   <tr>
     <th>capability</th>
-    <th class="n" title="claimed by a worker but not yet acked — the real backlog">pending</th>
-    <th class="n">consumers</th>
-    <th class="n" title="total stream entries retained (acked + unacked), not backlog">depth</th>
+    <th class="n" title="queued and never handed to any worker — the real backlog">backlog</th>
+    <th class="n" title="claimed by a worker but not yet acked — work in flight, not backlog">in flight</th>
+    <th class="n">workers</th>
+    <th class="n" title="total stream entries retained (acked + unacked); bounded by CBK_STREAM_MAXLEN, not a backlog">depth</th>
   </tr>
   {% for r in rows %}
+  {# Nobody home with work waiting is the state the old rendering hid: it led with
+     `pending`, which counts only ALREADY-CLAIMED work, so a queue whose jobs no worker
+     had ever touched showed a green 0 next to a consumer count that included workers
+     dead for hours. That combination is now called out explicitly. #}
+  {% set nobody_home = (r.consumers or 0) + (r.executors or 0) == 0 %}
   <tr>
     <td>{{ r.capability }}</td>
     <td class="n">
-      {% if r.pending == 0 %}<span class="pill ok">0</span>
-      {% elif r.pending < 5 %}<span class="pill warn">{{ r.pending }}</span>
-      {% else %}<span class="pill bad">{{ r.pending }}</span>{% endif %}
+      {% if r.backlog is none %}<span class="pill muted" title="Redis could not compute an exact backlog (entries were deleted or trimmed mid-stream)">unknown</span>
+      {% elif r.backlog and nobody_home %}<span class="pill bad" title="work is queued and nothing is running to take it">{{ r.backlog }} stuck</span>
+      {% elif r.backlog == 0 %}<span class="pill ok">0</span>
+      {% elif r.backlog < 5 %}<span class="pill warn">{{ r.backlog }}</span>
+      {% else %}<span class="pill bad">{{ r.backlog }}</span>{% endif %}
     </td>
+    <td class="n muted">{{ r.pending }}</td>
     <td class="n">
       {% if r.consumers %}<span class="pill ok">{{ r.consumers }} live</span>
+      {% elif r.executors %}<span class="pill ok">cloud</span>
       {% else %}<span class="pill warn">asleep</span>{% endif %}
     </td>
     <td class="n muted">{{ r.depth }}</td>

@@ -2,6 +2,34 @@
 
 from __future__ import annotations
 
+import pytest
+
+
+@pytest.fixture()
+def fleet_client(redis_url, tmp_path):
+    """A dashboard backed by a real capability, so the queues panel has a row to render.
+
+    The default `client` has no fleet, and `/ui/queues` iterates `fleet.capabilities` —
+    so without one the panel renders its empty state and asserts nothing about the
+    numbers.
+    """
+    from fastapi.testclient import TestClient
+
+    from clusterbuck.api import create_app
+
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "capabilities:\n"
+        "  8b-extract:\n"
+        "    queue: 'q:8b-extract'\n"
+        "    model_server: 'http://127.0.0.1:1/v1'\n"
+        "    model: 'm'\n"
+    )
+    app = create_app(redis_url=redis_url, db_path=str(tmp_path / "web.db"),
+                     fleet_path=str(fleet), start_scheduler=False)
+    with TestClient(app) as c:
+        yield c
+
 
 def test_dashboard_page(client):
     r = client.get("/")
@@ -41,6 +69,37 @@ def test_headline_fragment(client):
 
 def test_queues_fragment(client):
     assert client.get("/ui/queues").status_code == 200
+
+
+def test_queues_fragment_leads_with_backlog_not_in_flight_work(fleet_client):
+    """A 200-only assertion is why the wrong number shipped in the first place.
+
+    The panel used to lead with the pending count and label it "the real backlog", but
+    pending counts work a worker has ALREADY claimed. Never-delivered work appears in
+    neither pending nor (usefully) depth, so the panel showed a healthy green zero for
+    exactly the queue it was meant to raise the alarm on.
+    """
+    r = fleet_client.get("/ui/queues")
+    assert r.status_code == 200
+    assert "backlog" in r.text
+    assert "in flight" in r.text, "pending is labelled for what it is"
+    # The specific wrong pairing, not merely the phrase: "the real backlog" is now
+    # attached to the backlog column, which is correct. What must never come back is it
+    # describing the pending count.
+    assert 'not yet acked — the real backlog"' not in r.text
+    backlog_col = r.text.partition(">backlog<")[0]
+    assert "the real backlog" in backlog_col, "the phrase belongs to the backlog column"
+
+
+def test_queues_fragment_flags_a_queue_nobody_is_serving(fleet_client):
+    """Work queued with no live worker is the state that must never render as healthy."""
+    for _ in range(3):
+        fleet_client.post("/jobs", json={
+            "capability": "8b-extract",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+    r = fleet_client.get("/ui/queues")
+    assert "stuck" in r.text, "backlog with nothing serving is called out explicitly"
 
 
 def test_connections_fragment_empty(client):

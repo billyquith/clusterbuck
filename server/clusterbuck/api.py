@@ -35,6 +35,7 @@ from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
 from .fleet import load_fleet
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
 from .models import (
+    RESULT_STATUSES,
     AttentionRequest,
     EnrollRequest,
     HeartbeatRequest,
@@ -46,7 +47,7 @@ from .models import (
     Urgency,
 )
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
-from .queue import Queue
+from .queue import Queue, stream_key
 from .reservations import admit, iso
 from .routing import NoCapableArtifact, resolve_capability
 from .signing import build_manifest, load_private_pem
@@ -58,7 +59,6 @@ from .wake import WakeCoordinator
 from .web import WEB_DIR, web_routes
 
 # Terminal statuses live in the result blob; anything else is queue state.
-_TERMINAL = {"done", "failed", "expired"}
 
 # Urgency classes that carry wake rights (ADR 18): directly submitted or escalated.
 _WAKE_RIGHTS = {Urgency.urgent, Urgency.necessary}
@@ -488,8 +488,16 @@ def create_app(
                 deadline_epoch = datetime.fromisoformat(
                     body.deadline.replace("Z", "+00:00")
                 ).timestamp()
-            except ValueError:
-                deadline_epoch = None
+            except ValueError as e:
+                # Fail loudly. Silently dropping an unparseable deadline to "no expiry"
+                # gave a client the opposite of what it asked for — an unbounded job — and
+                # told it nothing, so the mistake was undiscoverable from the outside.
+                # Consistent with how both addressing forms already 422 at submit rather
+                # than queueing work nothing will honour.
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"deadline is not an RFC 3339 timestamp: {body.deadline!r}",
+                ) from e
 
         sub = body.submitter
         app.state.store.insert(
@@ -512,7 +520,12 @@ def create_app(
             # from a client that sends no provenance at all.
             observed_ip=request.client.host if request.client else None,
         )
-        await app.state.queue.enqueue(record.to_wire())
+        entry_id = await app.state.queue.enqueue(record.to_wire())
+        # The row was inserted before the XADD, so the delivery is recorded here. This is
+        # what makes queue position exact rather than a stream scan.
+        app.state.store.record_delivery(
+            job_id, stream=stream_key(capability), entry_id=entry_id
+        )
 
         # Wake rights: urgent/necessary jobs may create capacity on submit.
         if body.urgency in _WAKE_RIGHTS:
@@ -539,6 +552,54 @@ def create_app(
         }
         return view if any(v is not None for v in view.values()) else None
 
+    def _timing_view(row) -> dict:
+        """When this job was received, observed to start, and seen to finish.
+
+        `created_at` is server-stamped at receipt and authoritative. `started_at` and
+        `finished_at` are coordinator *observations* (observe.py), so `started_at` can be
+        null on a job that certainly ran — one claimed and acked between two ticks is
+        never seen in the pending list. Null therefore means "no claim observed", never
+        "not started"; a client's wait state keys on `status` and `queue_position`.
+        """
+        return {
+            "created_at": row.created_at,
+            "started_at": row.started_at,
+            "finished_at": row.finished_at,
+        }
+
+    def _limits_view(row) -> dict:
+        """When, if ever, clusterbuck stops trying.
+
+        A client cannot otherwise tell "slow but healthy" from "will never be served",
+        and had no principled point at which to stop waiting. `expires_at` is the
+        effective give-up time; **null means nothing will ever give up on this job**,
+        which is the honest answer for a `waitable` job submitted with neither a
+        `deadline` nor an `escalate_after_min` (see protocols.md §1b).
+        """
+        deadline = _now_iso_at(row.deadline_epoch) if row.deadline_epoch else None
+        return {
+            "deadline": deadline,
+            "escalates_at": _now_iso_at(row.escalate_at) if row.escalate_at else None,
+            # Only the deadline bounds a job today; a max-queue-age backstop would fold
+            # in here as the earlier of the two.
+            "expires_at": deadline,
+        }
+
+    async def _queue_position(row) -> int | None:
+        """How many never-delivered jobs sit ahead of this one, or None.
+
+        Counts *unclaimed* work only: anything already claimed is in flight, not ahead in
+        the queue, so a position of 0 is compatible with one job still generating. None
+        once the job is no longer queued. Capped, so a deep queue does not make every poll
+        read thousands of prompts — past the cap the number means "at least".
+        """
+        if row.status != "queued" or row.entry_id is None:
+            return None
+        ahead, _capped = await app.state.queue.undelivered(
+            row.capability, settings.consumer_group, before_entry_id=row.entry_id,
+        )
+        return ahead
+
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str) -> dict:
         row = app.state.store.get(job_id)
@@ -553,28 +614,37 @@ def create_app(
                 "status": row.status,
                 "urgency": row.urgency,  # reflects escalation (waitable → necessary)
                 "capability": row.capability,
+                **_timing_view(row),
+                **_limits_view(row),
+                "queue_position": await _queue_position(row),
                 "result": None,
                 "usage": None,
                 "error": None,
                 "attempts": row.attempts,
-                "worker": None,
+                # From the pending list, so a running job finally has an answer to "has
+                # anything picked this up" — the result blob cannot say until it is over.
+                "worker": row.claimed_by,
                 "submitter": _submitter_view(row),
             }
 
         status = result.get("status", "done")
-        if status in _TERMINAL and row.status != status:
+        if status in RESULT_STATUSES and row.status != status:
             app.state.store.set_status(job_id, status)
+            row = app.state.store.get(job_id) or row  # pick up finished_at
 
         return {
             "id": job_id,
             "status": status,
             "urgency": row.urgency,
             "capability": row.capability,
+            **_timing_view(row),
+            **_limits_view(row),
+            "queue_position": None,  # terminal: nothing is ahead of it any more
             "result": result.get("completion"),
             "usage": result.get("usage"),
             "error": result.get("error"),
             "attempts": row.attempts,
-            "worker": result.get("worker"),
+            "worker": result.get("worker") or row.claimed_by,
             "submitter": _submitter_view(row),
         }
 

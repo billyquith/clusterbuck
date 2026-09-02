@@ -184,3 +184,106 @@ def test_repeated_request_id_is_recorded_not_rejected(client):
     distinct = [_submit(client, submitter={**shared, "request_id": f"req_{n}"})
                 for n in range(2)]
     assert [r.status_code for r in distinct] == [202, 202]
+
+
+# --- lifecycle timing, limits and position (protocols.md §1b) -----------------------
+
+
+_JOB_KEYS = {
+    "id", "status", "urgency", "capability",
+    "created_at", "started_at", "finished_at",
+    "deadline", "escalates_at", "expires_at",
+    "queue_position", "result", "usage", "error", "attempts", "worker", "submitter",
+}
+
+
+def test_job_view_key_set_is_stable_in_both_branches(client, redis_url):
+    """Pinned deliberately: every other assertion in this file reads individual keys, so
+    the endpoint's shape could change — or lose a field a client depends on — without a
+    single test failing. This is the guard that makes such a change deliberate."""
+    job_id = _submit(client).json()["id"]
+    assert set(client.get(f"/jobs/{job_id}").json()) == _JOB_KEYS
+
+    conn = redis.from_url(redis_url, decode_responses=True)
+    conn.set(f"res_{job_id[4:]}", json.dumps({
+        "job_id": job_id, "status": "done", "worker": "node-a",
+        "completed_at": "2026-09-02T00:00:00Z",
+        "completion": {"id": "c1", "choices": []},
+    }))
+    conn.close()
+    assert set(client.get(f"/jobs/{job_id}").json()) == _JOB_KEYS
+
+
+def test_created_at_is_reported_so_a_client_need_not_time_it_locally(client):
+    got = client.get(f"/jobs/{_submit(client).json()['id']}").json()
+    assert got["created_at"], "server receipt time, authoritative"
+    # Not yet observed running, and not finished.
+    assert got["started_at"] is None and got["finished_at"] is None
+
+
+def test_a_job_with_no_bounds_reports_that_nothing_will_give_up_on_it(client):
+    """The honest answer to "when does clusterbuck stop trying" for the default shape:
+    waitable, no deadline, no escalate_after_min. `null` is the answer, not a gap."""
+    got = client.get(f"/jobs/{_submit(client).json()['id']}").json()
+    assert got["deadline"] is None
+    assert got["escalates_at"] is None
+    assert got["expires_at"] is None
+
+
+def test_deadline_and_escalation_are_echoed_back(client):
+    r = _submit(client, deadline="2030-01-01T00:00:00Z", escalate_after_min=10)
+    got = client.get(f"/jobs/{r.json()['id']}").json()
+    assert got["deadline"].startswith("2030-01-01")
+    assert got["expires_at"] == got["deadline"], "the effective give-up time"
+    assert got["escalates_at"], "waitable(10) gains the right to demand capacity"
+
+
+def test_a_malformed_deadline_is_rejected_not_silently_dropped(client):
+    """It used to fall back to "no expiry" with no error, so a client asking for a bound
+    got an unbounded job and was never told."""
+    r = _submit(client, deadline="next tuesday")
+    assert r.status_code == 422
+    assert "deadline" in r.json()["detail"]
+
+
+def test_queue_position_reports_work_ahead_while_nothing_is_running(client):
+    """No worker exists in this fixture, so every job stays queued — which is exactly the
+    state in which `depth` and `pending` both lie."""
+    ids = [_submit(client).json()["id"] for _ in range(3)]
+    positions = [client.get(f"/jobs/{i}").json()["queue_position"] for i in ids]
+    assert positions == [0, 1, 2]
+
+
+def test_worker_is_reported_before_the_job_finishes(client, redis_url):
+    """`worker` came only from the result blob, so it was null until the job was over —
+    which meant a client had no way to tell queued from running. The claim is now read
+    from the queue's own pending list.
+
+    The claim and the tick run on a queue built here rather than `app.state.queue`: that
+    client is bound to the TestClient's event loop, and driving it from another one fails
+    on a cross-loop future. The store is plain SQLite, so it is shared directly.
+    """
+    import anyio
+
+    from clusterbuck.observe import observe_tick
+    from clusterbuck.queue import Queue, stream_key
+
+    job_id = _submit(client).json()["id"]
+    store = client.app.state.store
+
+    async def claim_then_observe():
+        queue = Queue.from_url(redis_url)
+        try:
+            await queue.client.xreadgroup(
+                "cbk-workers", "node-alpha", {stream_key("8b-extract"): ">"}, count=1)
+            await observe_tick(store, queue, group="cbk-workers")
+        finally:
+            await queue.aclose()
+
+    anyio.run(claim_then_observe)
+
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["status"] == "running"
+    assert got["worker"] == "node-alpha", "known before any result exists"
+    assert got["started_at"] is not None
+    assert got["queue_position"] is None, "not queued any more"
