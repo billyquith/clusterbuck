@@ -224,6 +224,33 @@ class Queue:
         raw = await self._r.get(result_key)
         return json.loads(raw) if raw is not None else None
 
+    async def find_entry_for_job(
+        self, capability: str, job_id: str, *, count: int = 10_000
+    ) -> tuple[str, str] | None:
+        """Locate a job's stream entry by scanning, returning `(stream, entry_id)`.
+
+        The slow path, and only used where the fast one is unavailable: a row whose
+        delivery predates delivery tracking has `entry_id IS NULL`, which is *unknown*,
+        not *never enqueued*. Without this, every job in flight when the coordinator is
+        upgraded would be swept away as an orphan — the deploy itself would fail live work.
+
+        Bounded by the stream cap (`CBK_STREAM_MAXLEN`) and normally run against nothing:
+        candidate rows are usually zero.
+        """
+        for tier in TIER_ORDER:
+            stream = stream_key(capability, tier)
+            entries = await self._r.xrange(stream, count=count)
+            for entry_id, fields in entries or []:
+                raw = (fields or {}).get("job")
+                if not raw:
+                    continue
+                try:
+                    if json.loads(raw).get("id") == job_id:
+                        return (stream, entry_id)
+                except ValueError:
+                    continue
+        return None
+
     async def read_entry(self, stream: str, entry_id: str) -> dict[str, Any] | None:
         """The job payload of one specific stream entry, or None if it is not there.
 

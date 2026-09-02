@@ -61,17 +61,32 @@ async def backstop_scan(
     the call site anyway.
     """
     at = datetime.fromtimestamp(now, UTC) if now is not None else datetime.now(UTC)
-    orphaned = failed = expired = 0
+    orphaned = failed = expired = adopted = 0
 
     cutoff = (at - timedelta(seconds=orphan_grace_s)).isoformat().replace("+00:00", "Z")
     for row in store.orphaned_jobs(cutoff):
+        # `entry_id IS NULL` means "no delivery recorded", which is not the same as "never
+        # enqueued": a row written before delivery tracking existed has no entry id
+        # either. Upgrading the coordinator therefore leaves every in-flight job looking
+        # like an orphan, and failing them would mean the deploy itself destroying live
+        # work. So look for the entry before concluding it is not there — and if it turns
+        # up, adopt it rather than killing the job.
+        found = await queue.find_entry_for_job(row.capability, row.id)
+        if found is not None:
+            stream, entry_id = found
+            store.record_delivery(row.id, stream=stream, entry_id=entry_id)
+            adopted += 1
+            _log.info("adopted %s: found its queue entry, not an orphan", row.id)
+            continue
+
         # Deliberately NOT re-enqueued: `messages`/`prompt`/`params` are not columns, so
         # the payload cannot be rebuilt from SQLite. Failing honestly beats inventing one,
         # and it tells a client retrying under an idempotency key to use a fresh one.
         await _terminalise(store, queue, fleet, row, group=group, status="failed",
                            error=(
-            "never enqueued: the coordinator recorded this job but did not reach the "
-            "queue. It cannot be recovered — resubmit it."
+            "no queue entry exists for this job: it was either never enqueued (the "
+            "coordinator recorded it but did not reach the queue) or its entry was "
+            "trimmed away unserved. It cannot be recovered — resubmit it."
         ))
         orphaned += 1
         failed += 1
@@ -87,9 +102,11 @@ async def backstop_scan(
             ))
             expired += 1
 
-    if orphaned or expired:
-        _log.info("backstop: %d orphaned, %d aged out", orphaned, expired)
-    return {"orphaned": orphaned, "failed": failed, "expired": expired}
+    if orphaned or expired or adopted:
+        _log.info("backstop: %d orphaned, %d aged out, %d adopted",
+                  orphaned, expired, adopted)
+    return {"orphaned": orphaned, "failed": failed, "expired": expired,
+            "adopted": adopted}
 
 
 async def _terminalise(

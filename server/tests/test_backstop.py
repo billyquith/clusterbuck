@@ -160,5 +160,48 @@ async def test_an_already_terminal_job_is_left_alone(store, queue):
 
     counts = await backstop_scan(
         store, queue, None, **_thresholds(max_queue_age_s=60))
-    assert counts == {"orphaned": 0, "failed": 0, "expired": 0}
+    assert counts == {"orphaned": 0, "failed": 0, "expired": 0, "adopted": 0}
     assert store.get("job_done").status == "done"
+
+
+async def test_an_in_flight_job_with_no_recorded_delivery_is_adopted(store, queue):
+    """The deploy hazard this sweep must not become.
+
+    Migration leaves every non-terminal row with `entry_id IS NULL`, because the column is
+    new — so "no delivery recorded" describes an in-flight job on an upgraded coordinator
+    just as well as a genuine orphan. Failing on that alone would mean the act of deploying
+    destroyed live work. The entry is looked for first, and adopted when found.
+    """
+    entry = await queue.enqueue({
+        "id": "job_inflight", "created_at": LONG_AGO, "capability": CAP, "prompt": "x",
+        "params": {}, "urgency": "waitable", "privacy": "local_only",
+        "result_key": "res_inflight", "attempts": 0, "max_attempts": 3,
+    })
+    # Exactly the post-migration shape: the job is queued and real, but SQLite has no
+    # record of which entry is its own.
+    store.insert(id="job_inflight", result_key="res_inflight", capability=CAP,
+                 created_at=LONG_AGO)
+
+    counts = await backstop_scan(store, queue, None, **_thresholds())
+
+    assert counts["adopted"] == 1 and counts["orphaned"] == 0
+    row = store.get("job_inflight")
+    assert row.status == "queued", "still someone's to run"
+    assert row.entry_id == entry, "and now we know which entry is its own"
+    assert row.stream == stream_key(CAP)
+    assert await queue.read_result("res_inflight") is None, "no terminal answer written"
+
+
+async def test_a_job_whose_entry_was_trimmed_away_is_still_failed(store, queue):
+    """The other half: no entry anywhere means the job genuinely cannot be served, whether
+    it was never enqueued or its entry was trimmed unserved. The error says both, because
+    from here the two are indistinguishable — and the outcome is the same either way."""
+    store.insert(id="job_lost", result_key="res_lost", capability=CAP,
+                 created_at=LONG_AGO)
+
+    counts = await backstop_scan(store, queue, None, **_thresholds())
+
+    assert counts["orphaned"] == 1 and counts["adopted"] == 0
+    assert store.get("job_lost").status == "failed"
+    assert "no queue entry exists" in (await queue.read_result("res_lost"))["error"]
+
