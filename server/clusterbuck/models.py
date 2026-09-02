@@ -29,6 +29,28 @@ class Message(BaseModel):
     content: str
 
 
+class Submitter(BaseModel):
+    """Caller provenance (contract/job.schema.json → `submitter`).
+
+    Answers "who submitted this, and is a burst of identical jobs one call retried or
+    many real calls?" — the question a queue full of byte-identical payloads cannot
+    answer on its own. Every field is optional so pre-existing clients keep working.
+
+    Identification only: nothing in the coordinator dedupes, collapses, reorders or
+    rejects on these. `request_id` is deliberately NOT unique-constrained — a client
+    reusing one is *describing a retry*, which is exactly the signal we want to keep.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    app: str | None = Field(default=None, min_length=1)
+    instance: str | None = Field(default=None, min_length=1)
+    request_id: str | None = Field(default=None, min_length=1)
+    # Advisory only — a clock-skew / queue-delay signal. `created_at` (server-stamped at
+    # receipt) stays authoritative for ordering, escalation and metering.
+    submitted_at: str | None = None
+
+
 class JobSubmit(BaseModel):
     """Client request body for POST /jobs (protocols.md §1b).
 
@@ -54,6 +76,7 @@ class JobSubmit(BaseModel):
     callback_url: str | None = None
     reservation: str | None = None  # opt-in reservation id to queue against (§8)
     client_key: str | None = None  # optional client identity (attention scoping, §9)
+    submitter: Submitter | None = None  # optional caller provenance (§1b)
 
     @model_validator(mode="after")
     def _check(self) -> "JobSubmit":
@@ -224,6 +247,7 @@ class JobRecord(BaseModel):
     result_key: str
     attempts: int = 0
     max_attempts: int = 3
+    submitter: Submitter | None = None
 
     def to_wire(self) -> dict[str, Any]:
         """Contract-shaped dict: drop null optionals so it validates cleanly."""

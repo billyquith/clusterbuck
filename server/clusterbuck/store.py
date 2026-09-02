@@ -52,6 +52,13 @@ _MIGRATIONS = {
         "task_class": "ALTER TABLE jobs ADD COLUMN task_class TEXT",
         "promoted_by": "ALTER TABLE jobs ADD COLUMN promoted_by TEXT",
         "attempts": "ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+        # Caller provenance (protocols.md §1b). Nullable with no default: rows written
+        # before this existed have no attribution, and NULL says so honestly.
+        "submitter_app": "ALTER TABLE jobs ADD COLUMN submitter_app TEXT",
+        "submitter_instance": "ALTER TABLE jobs ADD COLUMN submitter_instance TEXT",
+        "submitter_request_id": "ALTER TABLE jobs ADD COLUMN submitter_request_id TEXT",
+        "submitted_at": "ALTER TABLE jobs ADD COLUMN submitted_at TEXT",
+        "observed_ip": "ALTER TABLE jobs ADD COLUMN observed_ip TEXT",
     },
     "ability": {
         "provenance": "ALTER TABLE ability ADD COLUMN provenance TEXT NOT NULL DEFAULT 'measured'",
@@ -158,6 +165,11 @@ class Store:
         deadline_epoch: float | None = None,
         client_key: str | None = None,
         task_class: str | None = None,
+        submitter_app: str | None = None,
+        submitter_instance: str | None = None,
+        submitter_request_id: str | None = None,
+        submitted_at: str | None = None,
+        observed_ip: str | None = None,
     ) -> None:
         with self._session() as s:
             s.add(Job(
@@ -165,6 +177,9 @@ class Store:
                 created_at=created_at, urgency=urgency, escalate_at=escalate_at,
                 reservation=reservation, deadline_epoch=deadline_epoch,
                 client_key=client_key, task_class=task_class,
+                submitter_app=submitter_app, submitter_instance=submitter_instance,
+                submitter_request_id=submitter_request_id, submitted_at=submitted_at,
+                observed_ip=observed_ip,
             ))
             s.commit()
 

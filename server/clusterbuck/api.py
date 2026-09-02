@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -434,7 +434,7 @@ def create_app(
         }
 
     @app.post("/jobs", status_code=202)
-    async def submit_job(body: JobSubmit) -> JSONResponse:
+    async def submit_job(body: JobSubmit, request: Request) -> JSONResponse:
         # A reservation, if named, must exist and be confirmed. It does NOT override
         # addressing (the job addresses normally); it's recorded as the linkage (§8).
         if body.reservation is not None:
@@ -474,6 +474,7 @@ def create_app(
             privacy=body.privacy,
             deadline=body.deadline,
             result_key=result_key,
+            submitter=body.submitter,
         )
 
         # A patience bound (waitable(N)) becomes an absolute escalation deadline.
@@ -490,6 +491,7 @@ def create_app(
             except ValueError:
                 deadline_epoch = None
 
+        sub = body.submitter
         app.state.store.insert(
             id=job_id,
             result_key=result_key,
@@ -501,6 +503,14 @@ def create_app(
             deadline_epoch=deadline_epoch,
             client_key=body.client_key,
             task_class=body.task_class,
+            submitter_app=sub.app if sub else None,
+            submitter_instance=sub.instance if sub else None,
+            submitter_request_id=sub.request_id if sub else None,
+            submitted_at=sub.submitted_at if sub else None,
+            # Stamped here, never taken from the body: a client can misreport its own
+            # name but not the address it dialled from. This is what attributes a flood
+            # from a client that sends no provenance at all.
+            observed_ip=request.client.host if request.client else None,
         )
         await app.state.queue.enqueue(record.to_wire())
 
@@ -512,6 +522,22 @@ def create_app(
             status_code=202,
             content={"id": job_id, "result_key": result_key, "status": "queued"},
         )
+
+    def _submitter_view(row) -> dict | None:
+        """Caller provenance for a job. `observed_ip` is server-stamped and the rest
+        client-supplied — the split is what matters when attributing a burst of
+        identical jobs, since only the client-supplied half can be misreported.
+
+        None only for jobs recorded before provenance existed (pre-0004 rows): an
+        address is stamped on every HTTP submit, so a live job always has a view."""
+        view = {
+            "app": row.submitter_app,
+            "instance": row.submitter_instance,
+            "request_id": row.submitter_request_id,
+            "submitted_at": row.submitted_at,
+            "observed_ip": row.observed_ip,
+        }
+        return view if any(v is not None for v in view.values()) else None
 
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str) -> dict:
@@ -532,6 +558,7 @@ def create_app(
                 "error": None,
                 "attempts": row.attempts,
                 "worker": None,
+                "submitter": _submitter_view(row),
             }
 
         status = result.get("status", "done")
@@ -548,6 +575,7 @@ def create_app(
             "error": result.get("error"),
             "attempts": row.attempts,
             "worker": result.get("worker"),
+            "submitter": _submitter_view(row),
         }
 
     def _reservation_view(row) -> dict:

@@ -15,5 +15,11 @@
   "privacy": "local_only",
   "result_key": "res_01HZX9K2QJ8P4V7M3N6T5R0abc",
   "attempts": 0,
-  "max_attempts": 3
+  "max_attempts": 3,
+  "submitter": {
+    "app": "nightly-importer",
+    "instance": "workstation-2",
+    "request_id": "req_4f9c1e70a2",
+    "submitted_at": "2026-07-24T18:29:59Z"
+  }
 }

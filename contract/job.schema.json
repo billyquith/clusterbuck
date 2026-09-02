@@ -111,6 +111,33 @@
       "type": "integer",
       "minimum": 1,
       "description": "After this many attempts the job fails rather than requeues."
+    },
+    "submitter": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional caller provenance: which client submitted this job, from where, and under which logical request. IDENTIFICATION ONLY — the coordinator never dedupes, collapses, reorders or rejects on these fields. Absent on jobs from clients that predate it, so every consumer must treat it as optional.",
+      "properties": {
+        "app": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Client application name, e.g. \"nightly-importer\". Opaque to clusterbuck, which never interprets or branches on it (domain-agnostic)."
+        },
+        "instance": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Hostname of the machine the call came from — distinguishes two copies of the same app running on different nodes."
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Client-supplied UID identifying one LOGICAL call. This is the duplicate-vs-repeat discriminator: two jobs sharing a request_id are the same call retried (a duplicate — a client retry loop), whereas two jobs with identical content but different request_ids are genuinely repeated work. Never enforced as unique; a client that reuses one is describing a retry, not violating a constraint."
+        },
+        "submitted_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The client's own clock at submission. ADVISORY ONLY — useful as a clock-skew / queue-delay signal. `created_at` (server-stamped at receipt) remains authoritative for every ordering, escalation and metering decision, and nothing in the coordinator may read this instead."
+        }
+      }
     }
   }
 }

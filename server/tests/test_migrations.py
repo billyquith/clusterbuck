@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from alembic import command
 from sqlmodel import SQLModel
 
 from clusterbuck import migrate
@@ -39,6 +40,11 @@ from clusterbuck.orm.proposal import Proposal
 from clusterbuck.orm.reservation import Reservation
 from clusterbuck.orm.usage import Usage
 from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
+
+# The current Alembic head. Pinned deliberately rather than derived from the migration
+# scripts: deriving it from the machinery under test would let "nobody thought about the
+# legacy path" pass silently. Bump this in the same commit as a new migration.
+_HEAD = "0004"
 
 
 def _affinity(decl_type: str) -> str:
@@ -125,7 +131,7 @@ def test_fresh_database_matches_alembic_baseline(tmp_path) -> None:
     migrate.upgrade_to_head(str(alembic_db))
 
     assert _schema_signature(store_db) == _schema_signature(alembic_db)
-    assert _alembic_version(store_db) == _alembic_version(alembic_db) == ("0003",)
+    assert _alembic_version(store_db) == _alembic_version(alembic_db) == (_HEAD,)
 
 
 def test_legacy_database_is_stamped_not_migrated(tmp_path) -> None:
@@ -140,9 +146,58 @@ def test_legacy_database_is_stamped_not_migrated(tmp_path) -> None:
     Store(str(legacy_db))  # must not raise, and must not alter the schema
 
     assert _schema_signature(legacy_db) == before
-    assert _alembic_version(legacy_db) == ("0003",)
+    assert _alembic_version(legacy_db) == (_HEAD,)
 
     # A second Store() against the now-stamped database takes the "already stamped"
     # branch (plain `alembic upgrade head`, a no-op since it's already at head).
     Store(str(legacy_db))
     assert _schema_signature(legacy_db) == before
+
+
+def test_0004_adds_provenance_to_a_populated_jobs_table(tmp_path) -> None:
+    """0004 is the first migration whose DDL runs against a live, populated `jobs` table
+    (the deployed coordinator's database is past the legacy-stamp path), so upgrading
+    must add the columns without disturbing the rows already there.
+
+    Asserted explicitly rather than assumed from "ALTER TABLE ADD COLUMN is safe": the
+    point of the check is that existing rows survive and read back as NULL provenance,
+    which is the honest value for jobs submitted before provenance existed.
+    """
+    db = tmp_path / "populated.db"
+
+    with migrate._db_path_env(str(db)) as cfg:
+        command.upgrade(cfg, "0003")
+
+    existing = [
+        ("job_old_1", "res_old_1", "8b-extract", "done", "2026-08-01T10:00:00Z", "waitable"),
+        ("job_old_2", "res_old_2", "8b-extract", "queued", "2026-08-02T11:00:00Z", "urgent"),
+    ]
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO jobs (id, result_key, capability, status, created_at, urgency) "
+            "VALUES (?, ?, ?, ?, ?, ?)", existing)
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrate.upgrade_to_head(str(db))
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        assert {"submitter_app", "submitter_instance", "submitter_request_id",
+                "submitted_at", "observed_ip"} <= columns
+
+        rows = conn.execute(
+            "SELECT id, result_key, capability, status, created_at, urgency, "
+            "submitter_app, submitter_request_id, observed_ip FROM jobs ORDER BY id"
+        ).fetchall()
+        assert [tuple(r)[:6] for r in rows] == existing, "pre-existing rows must survive"
+        for row in rows:
+            assert row["submitter_app"] is None
+            assert row["submitter_request_id"] is None
+            assert row["observed_ip"] is None
+    finally:
+        conn.close()

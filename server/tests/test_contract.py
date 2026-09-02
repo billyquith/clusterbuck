@@ -21,6 +21,7 @@ from clusterbuck.models import (
     JobRecord,
     Message,
     Privacy,
+    Submitter,
     Urgency,
 )
 
@@ -74,6 +75,63 @@ def test_pydantic_jobrecord_matches_schema(contract_dir):
         result_key="res_abc",
     )
     v.validate(record.to_wire())
+
+
+def test_pydantic_jobrecord_with_submitter_matches_schema(contract_dir):
+    """Caller provenance rides the wire record, so it must satisfy the shared schema
+    too — the worker parses this payload (protocols.md §1b/§2)."""
+    v = _validator(contract_dir, "job.schema.json")
+    record = JobRecord(
+        id="job_ghi",
+        created_at="2026-07-24T18:30:00Z",
+        capability="8b-extract",
+        prompt="extract the dates",
+        urgency=Urgency.waitable,
+        privacy=Privacy.local_only,
+        result_key="res_ghi",
+        submitter=Submitter(
+            app="nightly-importer",
+            instance="workstation-2",
+            request_id="req_4f9c1e70a2",
+            submitted_at="2026-07-24T18:29:59Z",
+        ),
+    )
+    wire = record.to_wire()
+    v.validate(wire)
+    assert wire["submitter"]["request_id"] == "req_4f9c1e70a2"
+
+
+def test_jobrecord_without_submitter_omits_it(contract_dir):
+    """`exclude_none` must drop it entirely rather than send `"submitter": null` — the
+    schema types it as an object, and a null would be a shape a consumer must special-case."""
+    v = _validator(contract_dir, "job.schema.json")
+    record = JobRecord(
+        id="job_jkl",
+        created_at="2026-07-24T18:30:00Z",
+        capability="8b-extract",
+        prompt="no provenance here",
+        urgency=Urgency.waitable,
+        privacy=Privacy.local_only,
+        result_key="res_jkl",
+    )
+    wire = record.to_wire()
+    v.validate(wire)
+    assert "submitter" not in wire
+
+
+def test_submitter_is_identification_only_not_a_dedup_key(contract_dir):
+    """Two DIFFERENT jobs may legitimately share a request_id — that is precisely how a
+    retried call is expressed. The schema must not constrain it to be unique, or the
+    coordinator would reject the very signal the field exists to carry."""
+    v = _validator(contract_dir, "job.schema.json")
+    shared = Submitter(app="importer", instance="host-1", request_id="req_same")
+    for job_id in ("job_1", "job_2"):
+        wire = JobRecord(
+            id=job_id, created_at="2026-07-24T18:30:00Z", capability="8b-extract",
+            prompt="same logical call, retried", urgency=Urgency.waitable,
+            privacy=Privacy.local_only, result_key=f"res_{job_id}", submitter=shared,
+        ).to_wire()
+        v.validate(wire)
 
 
 def test_pydantic_prompt_form_matches_schema(contract_dir):

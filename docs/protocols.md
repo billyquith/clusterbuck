@@ -42,7 +42,13 @@ POST /jobs
   "privacy":     "local_only",          // local_only | cloud_ok (default local_only —
                                         //   local_only NEVER routes to cloud)
   "deadline":    "2026-01-01T00:00:00Z",// optional hard expiry
-  "callback_url":"https://…"            // optional; else poll
+  "callback_url":"https://…",           // optional; else poll
+  "submitter": {                        // optional caller provenance (all fields optional)
+    "app":          "nightly-importer", // which client
+    "instance":     "workstation-2",    //   on which machine
+    "request_id":   "req_4f9c1e70a2",   // one LOGICAL call — see below
+    "submitted_at": "2026-01-01T00:00:00Z" // client's own clock; ADVISORY only
+  }
 }
 → 202 Accepted
 { "id": "job_…", "result_key": "res_…", "status": "queued" }
@@ -54,13 +60,38 @@ nothing will ever serve: `task_class`/`min_ability` when no artifact clears the 
 capability would otherwise sit on a stream no worker consumes, with no error and no expiry
 short of `deadline`.
 
+**Caller provenance (`submitter`).** A queue holding N byte-identical payloads cannot say
+whether it is one logical call retried N times (a client retry loop) or N genuinely repeated
+calls — and the difference decides whether the fix is on the client or the fleet.
+`request_id` is that discriminator: **two jobs sharing a `request_id` are the same call
+retried; two jobs with identical content but different `request_id`s are real repeated
+work.** `app` and `instance` name the caller.
+
+It is **identification only**. The coordinator never dedupes, collapses, reorders or rejects
+on these fields, and `request_id` is deliberately not unique-constrained — a client reusing
+one is *describing a retry*, which is the signal, not a constraint to enforce. Every field is
+optional, so clients predating it keep working unchanged.
+
+Two properties worth stating because they are easy to get wrong:
+
+- `submitted_at` is **advisory** — useful only as a clock-skew / queue-delay signal.
+  `created_at`, stamped server-side at receipt, remains authoritative for every ordering,
+  escalation and metering decision.
+- `observed_ip` is stamped **server-side** from the connection and is rejected (`422`) if sent
+  in the body: a client can misreport its own name but not the address it dialled from. It is
+  therefore the only provenance that attributes a flood from a client sending none at all —
+  the case that motivates the whole block. Being coordinator-side only, it is **not** in
+  `contract/job.schema.json`; a worker has no use for it.
+
 Poll for the result:
 
 ```
 GET /jobs/{id}
 → { "id","status":"queued|running|done|failed|expired",
     "result": { … OpenAI-style completion … } | null,
-    "error": null, "attempts": 1, "worker": "<opaque-node-id>" }
+    "error": null, "attempts": 1, "worker": "<opaque-node-id>",
+    "submitter": { "app","instance","request_id","submitted_at",
+                   "observed_ip" } | null }   // provenance as recorded; null if none
 ```
 
 The client never learns which machine ran the job beyond an opaque id (diagnostics only).
@@ -94,7 +125,8 @@ semantics natively.
     params,                 # forwarded to the model server; see the `model` pin below
     urgency, escalate_after_min, privacy, deadline,
     result_key,
-    attempts, max_attempts
+    attempts, max_attempts,
+    submitter?              # optional caller provenance (§1b); parse-and-ignore is fine
   }
   ```
 

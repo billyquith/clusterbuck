@@ -37,3 +37,20 @@ class Job(SQLModel, table=True):
     task_class: str | None = None  # need-shaped task class (for attention scoping)
     promoted_by: str | None = None  # null | 'age' | 'attention' (escalation provenance)
     attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})  # delivery attempts, incremented by the reaper
+
+    # --- caller provenance (protocols.md §1b) ---------------------------------------
+    # Flattened from JobRecord's nested `submitter`: this table is scanned by the
+    # escalation/reaper/usage ticks, and columns keep those scans indexable where a JSON
+    # blob would not. All nullable — jobs from clients predating this carry none.
+    submitter_app: str | None = None
+    submitter_instance: str | None = None
+    # The duplicate-vs-repeat discriminator. Deliberately NOT unique: a repeated value is
+    # a client retrying one logical call, which is the signal, not a constraint breach.
+    submitter_request_id: str | None = None
+    # The client's own clock. Advisory only — `created_at` stays authoritative.
+    submitted_at: str | None = None
+    # Stamped server-side at receipt, never read from the request body (a client could
+    # lie). This is the only provenance that identifies a client sending none at all —
+    # exactly the case a runaway submitter presents. Coordinator-side only: it is not in
+    # contract/job.schema.json, because the worker has no use for it.
+    observed_ip: str | None = None
