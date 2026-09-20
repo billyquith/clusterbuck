@@ -33,7 +33,7 @@ from .config import JOIN_PASSWORD_MIN_LEN, settings
 from .coordinator import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
-from .fleet import load_fleet
+from .fleet import load_fleet, unservable_capabilities
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
 from .models import (
     RESULT_STATUSES,
@@ -233,6 +233,11 @@ def create_app(
                 "sync plane disabled: no fleet file at %s (set CBK_FLEET_PATH); "
                 "/v1/* will return 503, async plane unaffected", path.resolve(),
             )
+
+        # Last-reported capability/model mismatch per node, so the warning is logged when
+        # it changes rather than on every heartbeat. In-memory by design: it is a cache for
+        # log deduplication, and losing it on restart just means one more warning.
+        app.state.capability_warnings = {}
 
         app.state.update_signing_key = update_signing_key or settings.update_signing_key
         app.state.update_release = update_release or settings.update_release
@@ -1053,6 +1058,25 @@ def create_app(
             if propose_reeval(store, node_id, artifact, old, new, now=now):
                 notes.append(f"{artifact} changed upstream — re-evaluation proposed")
 
+        # Does what this node ADVERTISES match what it can actually run? The registry's
+        # `model:` is what clears a job's min_ability bar; the worker answers with its own
+        # CBK_MODEL, for every tier it serves. Nothing reconciled the two, so a node
+        # serving a tier whose model it hasn't got answers those jobs with something else
+        # and reports success.
+        #
+        # Logged for the operator, NOT returned to the worker: this is a coordinator-side
+        # configuration fact the worker can do nothing about, and it would repeat on every
+        # heartbeat. `/nodes` carries the same list for checking the whole fleet at once.
+        # Logged only when it CHANGES, for the same reason — a warning repeated every few
+        # seconds is one nobody reads.
+        mismatches = unservable_capabilities(
+            app.state.fleet, json.loads(store.get_node(node_id).capabilities or "[]"),
+            body.installed)
+        if app.state.capability_warnings.get(node_id) != mismatches:
+            app.state.capability_warnings[node_id] = mismatches
+            for warning in mismatches:
+                _log.warning("node %s %s", node_id, warning)
+
         # Close the loop on any action the previous response issued.
         if body.action_result is not None:
             notes += apply_action_result(store, node_id, body.action_result, now=now)
@@ -1189,6 +1213,16 @@ def create_app(
                 # speed on a GPU box versus a CPU one. null until the node finishes a job.
                 "tps": n.tps, "jobs_done": n.jobs_done,
                 "capabilities": json.loads(n.capabilities or "[]"),
+                # Tiers this node advertises but cannot actually honour, because the
+                # registry's model for them is not among its installed artifacts. Empty is
+                # the healthy case. This is the failure that looks fine from every other
+                # angle: enrolment succeeds, heartbeats are green, jobs are answered — by
+                # the wrong model.
+                "capability_warnings": unservable_capabilities(
+                    app.state.fleet,
+                    json.loads(n.capabilities or "[]"),
+                    json.loads(n.installed or "[]"),
+                ),
                 "mode": n.mode,
                 # Observed from the node's model server, not configured (M6a).
                 "installed": json.loads(n.installed or "[]"),

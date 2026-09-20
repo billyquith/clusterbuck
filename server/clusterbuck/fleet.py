@@ -127,3 +127,56 @@ def resolve_api_key(spec: CapabilitySpec) -> str | None:
 def load_fleet(path: str | Path) -> Fleet:
     data = yaml.safe_load(Path(path).read_text()) or {}
     return Fleet.model_validate(data)
+
+
+def _artifact_aliases(name: str) -> set[str]:
+    """The spellings that mean the same artifact to a model server.
+
+    Ollama's `/v1/models` reports an explicit tag, so a registry that says `llama3.2` and a
+    node that reports `llama3.2:latest` are the same thing. Treating them as different
+    would make the coherence check below cry wolf on the most ordinary configuration there
+    is, and a check that cries wolf gets ignored.
+    """
+    name = name.strip()
+    base = name.split(":", 1)[0]
+    return {name, base, f"{base}:latest"}
+
+
+def unservable_capabilities(
+    fleet: "Fleet | None", advertised: list[str], installed: list[str],
+) -> list[str]:
+    """Capabilities this node serves whose model it does not actually have installed.
+
+    This is the gap between what the registry SAYS a tier is and what the node can really
+    run. `fleet.yaml`'s `model:` decides whether a job clears its `min_ability` bar; the
+    worker answers with whatever `CBK_MODEL` names, for every tier it serves. Nothing
+    reconciled the two, so a node advertising both an 8B and a 32B tier while running a 7B
+    answered the 32B tier's jobs with that 7B — at whatever quality that implies, silently,
+    and reported as having met the floor.
+
+    Read-only and advisory. It names the mismatch so an operator can fix it (a model that
+    fits the tier, or a narrower CBK_CAPABILITIES) before enforcement makes those jobs fail
+    instead of quietly under-serving.
+
+    A node that reports no inventory at all gets no warnings: an empty `installed` means
+    the model server did not answer, not that it is empty.
+    """
+    if fleet is None or not installed:
+        return []
+    have: set[str] = set()
+    for artifact in installed:
+        have |= _artifact_aliases(artifact)
+    out = []
+    for cap in advertised:
+        spec = fleet.capabilities.get(cap)
+        # Unknown tier: a different failure, already reported at join. A no-host cloud
+        # capability is served by the coordinator, never by this node's model server.
+        if spec is None or (spec.cloud and spec.model_server is None):
+            continue
+        if not (_artifact_aliases(spec.model) & have):
+            out.append(
+                f"serves {cap!r}, whose registered model is {spec.model!r}, but that model "
+                f"is not installed here — jobs routed to {cap!r} on the strength of "
+                f"{spec.model!r}'s ability score will be answered by something else"
+            )
+    return out

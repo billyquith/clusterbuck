@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from clusterbuck.fleet import CapabilitySpec, Fleet, NodeSpec, load_fleet, resolve_api_key
+from clusterbuck.fleet import (
+    CapabilitySpec,
+    Fleet,
+    NodeSpec,
+    load_fleet,
+    resolve_api_key,
+    unservable_capabilities,
+)
 
 SEED = Path(__file__).resolve().parents[1] / "fleet.yaml"
 
@@ -99,3 +106,63 @@ def test_a_declared_queue_that_matches_still_loads():
     f = Fleet(capabilities={"8b-extract": CapabilitySpec(
         queue="q:8b-extract", model="m", model_server="http://x/v1")})
     assert f.stream_for("8b-extract") == "q:8b-extract"
+
+
+# --- the registry says one thing, the node runs another (the silent under-serve) --------
+
+def _two_tier_fleet() -> Fleet:
+    return Fleet(
+        nodes=[NodeSpec(id="n", capabilities=["small", "big"])],
+        capabilities={
+            "small": CapabilitySpec(model_server="http://h/v1", model="llama3.2:3b"),
+            "big": CapabilitySpec(model_server="http://h/v1", model="qwen2.5:32b"),
+        },
+    )
+
+
+def test_a_node_running_one_model_across_two_tiers_is_flagged():
+    """The signature failure: enrolment succeeds, heartbeats are green, jobs are answered —
+    by a model that never cleared the bar the job asked for."""
+    warnings = unservable_capabilities(
+        _two_tier_fleet(), ["small", "big"], installed=["llama3.2:3b"])
+    assert len(warnings) == 1
+    assert "'big'" in warnings[0] and "qwen2.5:32b" in warnings[0]
+
+
+def test_a_node_with_both_models_is_clean():
+    assert unservable_capabilities(
+        _two_tier_fleet(), ["small", "big"],
+        installed=["llama3.2:3b", "qwen2.5:32b"]) == []
+
+
+def test_an_implicit_latest_tag_is_the_same_artifact():
+    """Ollama reports an explicit tag; a registry commonly omits it. Flagging that as a
+    mismatch would fire on the most ordinary configuration there is, and a check that
+    cries wolf is one nobody reads."""
+    fleet = Fleet(capabilities={
+        "c": CapabilitySpec(model_server="http://h/v1", model="llama3.2")})
+    assert unservable_capabilities(fleet, ["c"], installed=["llama3.2:latest"]) == []
+    assert unservable_capabilities(fleet, ["c"], installed=["llama3.2"]) == []
+
+
+def test_no_inventory_means_unknown_not_empty():
+    """An empty `installed` is a model server that did not answer. Warning about every
+    tier at that moment would bury the real mismatches in noise."""
+    assert unservable_capabilities(_two_tier_fleet(), ["small", "big"], installed=[]) == []
+
+
+def test_a_provider_account_is_not_the_nodes_job_to_serve():
+    """A no-host cloud capability is called by the coordinator in-process, so a node never
+    needs its model installed."""
+    fleet = Fleet(capabilities={
+        "frontier": CapabilitySpec(model="anthropic/x", cloud=True)})
+    assert unservable_capabilities(fleet, ["frontier"], installed=["llama3.2:3b"]) == []
+
+
+def test_an_unknown_tier_is_left_to_the_join_time_warning():
+    assert unservable_capabilities(_two_tier_fleet(), ["nonexistent"],
+                                   installed=["llama3.2:3b"]) == []
+
+
+def test_no_fleet_registry_means_nothing_to_check():
+    assert unservable_capabilities(None, ["small"], installed=["x"]) == []

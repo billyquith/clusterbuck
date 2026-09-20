@@ -56,3 +56,47 @@ def test_capability_proposal_scales_with_ram(client):
 
 def test_enroll_rejects_bad_token(client):
     assert client.post("/nodes/enroll", json=_enroll_body("jt_never_minted")).status_code == 401
+
+
+# --- the registry/worker model mismatch, surfaced across the whole fleet ----------------
+
+def _joined(client, caps=None):
+    token = client.post("/nodes/tokens").json()["join_token"]
+    body = client.post("/nodes/enroll", json=_enroll_body(token)).json()
+    return body["node_id"], body["node_key"]
+
+
+def test_nodes_reports_tiers_a_node_cannot_actually_honour(client):
+    """A 64 GB node is proposed all three tiers. If its model server only has the 3B, the
+    two larger tiers are addresses that resolve to a model it will never run — and every
+    other signal (enrolment, heartbeat, fitness) says the node is healthy."""
+    node_id, node_key = _joined(client)
+    client.post(f"/nodes/{node_id}/heartbeat",
+                json={"mode": "active", "installed": ["llama3.2:3b"]},
+                headers={"x-cbk-node-key": node_key})
+
+    node = next(n for n in client.get("/nodes").json()["nodes"] if n["node_id"] == node_id)
+    warnings = " ".join(node["capability_warnings"])
+    assert "32b-reason" in warnings and "70b-reason" in warnings
+    assert "8b-extract" not in warnings, "flagged the one tier it CAN serve"
+
+
+def test_a_node_holding_every_registered_model_is_clean(client):
+    node_id, node_key = _joined(client)
+    client.post(
+        f"/nodes/{node_id}/heartbeat",
+        json={"mode": "active",
+              "installed": ["llama3.2:3b", "qwen2.5:32b", "llama3.1:70b"]},
+        headers={"x-cbk-node-key": node_key})
+    node = next(n for n in client.get("/nodes").json()["nodes"] if n["node_id"] == node_id)
+    assert node["capability_warnings"] == []
+
+
+def test_the_mismatch_is_not_pushed_back_to_the_worker(client):
+    """It is a coordinator-side configuration fact the worker can do nothing about, and it
+    holds on every heartbeat — returning it would repeat forever in the worker's log."""
+    node_id, node_key = _joined(client)
+    hb = client.post(f"/nodes/{node_id}/heartbeat",
+                     json={"mode": "active", "installed": ["llama3.2:3b"]},
+                     headers={"x-cbk-node-key": node_key})
+    assert hb.json()["planner_notes"] == []
