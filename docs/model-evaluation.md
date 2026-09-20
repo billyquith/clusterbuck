@@ -18,7 +18,11 @@ ability(artifact, task_class) → 1–10
 - **artifact** = model + quantisation (an 8B-Q4 and 8B-Q8 are different artifacts;
   quality belongs to the artifact, throughput belongs to artifact × node).
 - **task_class** = the classes jobs already carry: `extract | summarize | reason |
-  code | embed`.
+  code`. `embed` was listed here and seeded in the matrix, but no suite item measured it
+  and no worker could serve it — the worker speaks `/v1/chat/completions` only. So a
+  request for it routed on a permanently unreplaceable guess and came back as prose. A
+  task class must be both **measurable** and **servable** to exist; adding embeddings back
+  means an `/v1/embeddings` execution path and suite items, not a row in a list.
 - A **headline scalar** per artifact still exists for humans: the ability matrix
   weighted by the fleet's *actual task mix* — "6.2" means "for what this network does."
 - Scores are coarse by design: **half-point granularity**, with an uncertainty note.
@@ -29,13 +33,32 @@ ability(artifact, task_class) → 1–10
 ### Tier 1 — programmatic checks (deterministic, no judge)
 Wherever an output is mechanically verifiable, verify it:
 
-- JSON validity + schema conformance; enum-value validity.
+- JSON validity **and the requested field values** — validity alone measures whether a
+  model can emit braces, not whether it extracted anything.
 - Exact-answer retrieval from a supplied document (long-context recall).
 - Instruction compliance: length limits, format, forbidden content honoured.
-- Code items that must pass unit tests; math with known answers.
+- Math and code items with a single known answer.
 
 Free, unarguable, and covers most of what matters for extraction-type work. Run these
 the most.
+
+**Two limits are enforced in code, not left to discipline.**
+
+*It cannot reach the top of the scale.* Programmatic checks establish **compliance**, not
+quality: they cannot tell a 7 from a 9. So a perfect tier-1 pass rate maps to
+`TIER1_MAX_ABILITY` (7, the "strong local model" anchor) and the 8–10 band stays reserved
+for the judged tiers. The cap is on the **instrument**, not the scale — a judge, or an
+operator, may still record above it. A `min_ability` in that band therefore fails
+explicitly on a default install, which is the honest answer: nothing here can certify it.
+
+*It needs enough items to mean anything.* Each task class carries at least
+`MIN_ITEMS_FOR_SCORE` items, and a score is not recorded below that count. Half-point
+granularity over a handful of items is a fiction, and every score is stored with the item
+count behind it so the uncertainty can actually be read.
+
+**Items must be un-gameable by echoing.** An item whose check passes when the model repeats
+the prompt, emits an empty object, or names the answer among several candidates measures
+verbosity, not ability.
 
 ### Tier 2 — checklist judging (for summaries and extraction quality)
 Never ask a judge "rate this summary 1–10" — holistic grading is noisy and biased.
@@ -82,8 +105,10 @@ over the years. Ability values are always reported with their scale version.
 
 ## Eval suites
 
-- **Per task class**, small and fixed: ~20–50 items each, versioned alongside the
-  scale version.
+- **Per task class**, small and fixed: at least `MIN_ITEMS_FOR_SCORE` and ideally 20–50
+  items each, versioned alongside the scale version. The suite version is stamped on every
+  dispatched run: item identity is positional, so a run collected after the suite changed
+  would otherwise be scored against whatever now sits at that index.
 - **Bespoke and rotating** — never reuse well-known public benchmarks verbatim; models
   have memorised them (contamination), which inflates scores meaninglessly.
 - clusterbuck ships generic seed suites; an installation may add **private local

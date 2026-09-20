@@ -97,7 +97,7 @@ so one load is amortised over many jobs instead of thrashing swaps.
 clusterbuck should know what is asked of it, so the fleet can be shaped to fit:
 
 - **Demand side:** clients may tag jobs with a task class (`extract` / `summarize` /
-  `reason` / `code` / `embed`), typical context length, and latency class. Untagged jobs
+  `reason` / `code`), typical context length, and latency class. Untagged jobs
   still count via their capability. The coordinator keeps a demand histogram: which
   capabilities are used, how often, how long jobs wait.
 - **Supply side:** the registry knows every node's hardware, profile, and ladder.

@@ -32,7 +32,12 @@ from .cloud_executor import CloudExecutor, cloud_capabilities
 from .config import JOIN_PASSWORD_MIN_LEN, settings
 from .coordinator import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
-from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
+from .evaluation import (
+    SCALE_VERSION,
+    TASK_CLASSES,
+    TIER1_MAX_ABILITY,
+    seed_ability,
+)
 from .fleet import load_fleet, unservable_capabilities
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
 from .models import (
@@ -347,7 +352,14 @@ def create_app(
         """The ability matrix + a per-artifact headline scalar (ADR 15/16)."""
         rows = app.state.store.ability_matrix(SCALE_VERSION)
         matrix = [{"artifact": r.artifact, "task_class": r.task_class,
-                   "score": r.score} for r in rows]
+                   "score": r.score,
+                   # How much evidence is behind the score. model-evaluation.md asks for
+                   # scores to be read "with an uncertainty note"; a bare number made a 7
+                   # from forty items look identical to one from a lucky handful.
+                   # `provenance: seed` with null counts is a placeholder, not a
+                   # measurement — the harness will replace it.
+                   "provenance": r.provenance,
+                   "n_items": r.n_items, "n_passed": r.n_passed} for r in rows]
         # Headline scalar per artifact = mean over its measured task classes (equal-weight
         # for now; a workload-weighted headline is the documented refinement).
         by_artifact: dict[str, list[float]] = {}
@@ -355,6 +367,10 @@ def create_app(
             by_artifact.setdefault(r.artifact, []).append(r.score)
         headline = {a: round(sum(s) / len(s), 1) for a, s in by_artifact.items()}
         return {"scale_version": SCALE_VERSION, "task_classes": TASK_CLASSES,
+                # The highest a programmatic run may claim. Published so a caller can tell
+                # "nothing here is that good" from "nothing here has been measured that
+                # precisely" when a min_ability above it fails.
+                "tier1_max_ability": TIER1_MAX_ABILITY,
                 "matrix": matrix, "headline": headline}
 
     @app.post("/ability/clear")

@@ -28,3 +28,8 @@ class EvalRun(SQLModel, table=True):
     # recomputed from these rows, so without it a re-eval averaged the NEW artifact's items
     # together with the old one's — the inheritance ADR 15 forbids.
     generation: int = Field(default=1, sa_column_kwargs={"server_default": "1"})
+    # Which suite `item_index` points into. Item identity is POSITIONAL, so a run dispatched
+    # against one suite and collected after the suite changed would be scored against
+    # whatever now sits at that index — measuring one thing and recording another. The
+    # collector discards runs whose suite version is not the current one.
+    suite_version: str = Field(default="", sa_column_kwargs={"server_default": "''"})

@@ -35,14 +35,16 @@ def seeded(tmp_path) -> Store:
 
 
 def test_seed_populates_matrix(seeded):
-    assert seeded.ability_count(SCALE_VERSION) == 15  # 3 artifacts × 5 task classes
+    assert seeded.ability_count(SCALE_VERSION) == 12  # 3 artifacts × 4 task classes
     assert seeded.get_ability("llama3.2:3b", "reason", SCALE_VERSION) == 3.0
-    assert seeded.get_ability("llama3.1:70b", "summarize", SCALE_VERSION) == 8.0
+    # The 70B sits exactly on its anchor (7 = "strong 70B-class local"), not above it:
+    # nothing in a fresh install claims a band no instrument here can justify.
+    assert seeded.get_ability("llama3.1:70b", "summarize", SCALE_VERSION) == 7.0
 
 
 def test_seed_is_idempotent(tmp_path):
     s = Store(str(tmp_path / "a.db"))
-    assert seed_ability(s, now="t") == 15
+    assert seed_ability(s, now="t") == 12
     assert seed_ability(s, now="t") == 0  # already populated
 
 
@@ -54,8 +56,17 @@ def test_routing_picks_cheapest_clearing_the_bar(seeded):
                                   task_class="summarize", min_ability=min_ability)
 
     assert route(4) == "8b-extract"   # 3b(4) clears, cheapest
-    assert route(7) == "32b-reason"   # 3b out; 32b(7) & 70b(8) clear → cheaper 32b
-    assert route(8) == "70b-reason"   # only 70b(8) clears
+    assert route(7) == "70b-reason"   # only the 70B seed reaches its 7 anchor
+
+
+def test_a_floor_above_the_tier1_ceiling_fails_loudly(seeded):
+    """8-10 is the judged band, and the judged tiers are deferred. Nothing in a default
+    install has an instrument that can certify one, so asking for it fails explicitly
+    rather than being quietly served by the best thing to hand — the same invariant that
+    governs every other unmet floor."""
+    with pytest.raises(NoCapableArtifact, match="no artifact reaches ability 9"):
+        resolve_capability(_fleet(), seeded, capability=None,
+                           task_class="summarize", min_ability=9)
 
 
 def test_routing_explicit_capability_wins(seeded):
@@ -209,7 +220,7 @@ def test_seeded_scores_are_labelled_as_seeds(seeded):
 def test_ability_endpoint(client):
     data = client.get("/ability").json()
     assert data["scale_version"] == SCALE_VERSION
-    assert len(data["matrix"]) == 15
+    assert len(data["matrix"]) == 12
     assert data["headline"]["llama3.1:70b"] > data["headline"]["llama3.2:3b"]
 
 
@@ -217,7 +228,7 @@ def test_clear_ability_endpoint_drops_only_that_artifact(client):
     resp = client.post("/ability/clear", params={"artifact": "llama3.2:3b"})
     # `generation` alongside `cleared`: dropping the score is only half the reset, since
     # ability is recomputed from the artifact's eval_runs (ADR 15).
-    assert resp.json() == {"artifact": "llama3.2:3b", "cleared": 5, "generation": 2}
+    assert resp.json() == {"artifact": "llama3.2:3b", "cleared": 4, "generation": 2}
 
     data = client.get("/ability").json()
     artifacts = {row["artifact"] for row in data["matrix"]}

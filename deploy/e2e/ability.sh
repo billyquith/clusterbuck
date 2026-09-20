@@ -5,7 +5,9 @@
 # on the chosen capability's stream, which we can observe.
 #
 #   min_ability 4 → 8b-extract (llama3.2:3b, ability 4, cheapest)
-#   min_ability 7 → 32b-reason (qwen2.5:32b, ability 7, cheaper than 70b)
+#   min_ability 6 → 32b-reason (qwen2.5:32b, ability 6.5, cheaper than 70b)
+#   min_ability 7 → 70b-reason (only the 70B seed sits ON the 7 anchor)
+#   min_ability 9 → 422 (the judged band; no instrument here can certify it)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -37,14 +39,28 @@ submit_needshaped(){  # task_class, min_ability
 depth(){ ${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 XLEN "q:$1" | tr -d '\r'; }
 
 submit_needshaped summarize 4
+submit_needshaped summarize 6
 submit_needshaped summarize 7
 sleep 0.3
 
 D8=$(depth 8b-extract); D32=$(depth 32b-reason); D70=$(depth 70b-reason)
 log "queue depths → 8b-extract=$D8  32b-reason=$D32  70b-reason=$D70"
 [[ "$D8" == "1" ]]  || fail "min_ability 4 did not route to 8b-extract (got depth $D8)"
-[[ "$D32" == "1" ]] || fail "min_ability 7 did not route to 32b-reason (got depth $D32)"
-[[ "$D70" == "0" ]] || fail "70b-reason should be untouched (got depth $D70)"
+[[ "$D32" == "1" ]] || fail "min_ability 6 did not route to 32b-reason (got depth $D32)"
+[[ "$D70" == "1" ]] || fail "min_ability 7 did not route to 70b-reason (got depth $D70)"
+
+# A floor in the judged band (8-10) is refused outright. The judged tiers are deferred, so
+# no artifact here has an instrument that could certify one — and serving the job on the
+# best thing to hand would be exactly the silent under-serve need-shaped addressing exists
+# to prevent.
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL/jobs" \
+  -H 'content-type: application/json' -d '{
+  "task_class": "summarize", "min_ability": 9,
+  "messages": [{"role":"user","content":"nothing here can certify this"}],
+  "urgency": "waitable", "privacy": "local_only"
+}')
+[[ "$CODE" == "422" ]] || fail "min_ability 9 should be refused, got HTTP $CODE"
+log "min_ability 9 refused with 422 — explicit, not under-served ✓"
 
 # The ability matrix is visible too.
 HEAD70=$(curl -fsS "$URL/ability" | python3 -c 'import sys,json;print(json.load(sys.stdin)["headline"]["llama3.1:70b"])')

@@ -25,7 +25,15 @@ from __future__ import annotations
 
 import logging
 
-from .evaluation import SCALE_VERSION, SEED_SUITE, EvalItem, score_to_ability
+from .evaluation import (
+    MIN_ITEMS_FOR_SCORE,
+    SCALE_VERSION,
+    SEED_SUITE,
+    SUITE_VERSION,
+    EvalItem,
+    score_to_ability,
+    suite_is_measurable,
+)
 from .fleet import Fleet, resolve_api_key
 from .ids import new_ids
 from .models import JobRecord, Message, Privacy, Urgency
@@ -49,8 +57,16 @@ MAX_FAILED_RUNS = 6
 MIN_SIGNAL_FRACTION = 0.5
 
 
-def _suite_classes(suite: list[EvalItem]) -> set[str]:
-    return {item.task_class for item in suite}
+def _suite_classes(suite: list[EvalItem], min_items: int = MIN_ITEMS_FOR_SCORE) -> set[str]:
+    """Task classes this suite can produce an HONEST score for.
+
+    A class the suite barely covers is excluded outright rather than measured and then
+    discarded at collection: dispatching items whose result can never be recorded spends
+    fleet capacity to learn nothing. `embed` used to sit in the opposite trap — scored by a
+    seed, absent from the suite, so never measurable and never replaced.
+    """
+    return {item.task_class for item in suite
+            if suite_is_measurable(item.task_class, suite, min_items)}
 
 
 def _cloud_artifacts(fleet: Fleet | None) -> list[tuple[str, list[str]]]:
@@ -73,6 +89,7 @@ def _cloud_artifacts(fleet: Fleet | None) -> list[tuple[str, list[str]]]:
 def artifacts_needing_eval(
     store: Store, *, fleet: Fleet | None = None,
     suite: list[EvalItem] = SEED_SUITE, scale_version: str = SCALE_VERSION,
+    min_items: int = MIN_ITEMS_FOR_SCORE,
 ) -> list[tuple[str, list[str]]]:
     """(artifact, capabilities) for artifacts missing any tested task class.
 
@@ -80,7 +97,7 @@ def artifacts_needing_eval(
     worker can serve), and registered cloud provider accounts (ADR 30) — measured the same
     way, just dispatched to the coordinator's own cloud executor instead of a worker.
     """
-    classes = _suite_classes(suite)
+    classes = _suite_classes(suite, min_items)
     busy = store.artifacts_under_eval()
     seen: dict[str, list[str]] = {}
 
@@ -112,12 +129,13 @@ def artifacts_needing_eval(
 async def dispatch(
     store: Store, queue: Queue, *, now: str, fleet: Fleet | None = None,
     suite: list[EvalItem] = SEED_SUITE, scale_version: str = SCALE_VERSION,
+    min_items: int = MIN_ITEMS_FOR_SCORE,
 ) -> int:
     """Submit eval jobs for unmeasured artifacts (local or registered cloud). Returns jobs
     enqueued."""
     enqueued = 0
     candidates = artifacts_needing_eval(store, fleet=fleet, suite=suite,
-                                        scale_version=scale_version)
+                                        scale_version=scale_version, min_items=min_items)
     for artifact, caps in candidates[:MAX_ARTIFACTS_IN_FLIGHT]:
         capability = caps[0]  # any capability this node serves reaches its model server
         spec = fleet.capabilities.get(capability) if fleet else None
@@ -131,6 +149,10 @@ async def dispatch(
         privacy = Privacy.cloud_ok if is_cloud else Privacy.local_only
         generation = store.current_eval_generation(artifact)
         for index, item in enumerate(suite):
+            # Skip a class the suite cannot score. Dispatching it would spend real fleet
+            # capacity on items `collect` is then obliged to throw away.
+            if not suite_is_measurable(item.task_class, suite, min_items):
+                continue
             measured = (
                 store.get_ability(artifact, item.task_class, scale_version) is not None
                 and store.ability_provenance(artifact, item.task_class, scale_version)
@@ -160,7 +182,7 @@ async def dispatch(
             store.add_eval_run(job_id=job_id, artifact=artifact,
                                task_class=item.task_class, item_index=index,
                                result_key=result_key, created_at=now,
-                               generation=generation)
+                               generation=generation, suite_version=SUITE_VERSION)
             enqueued += 1
         if enqueued:
             _log.info("eval dispatched for %s via %s", artifact, capability)
@@ -179,7 +201,7 @@ def _completion_text(result: dict) -> str | None:
 
 async def collect(
     store: Store, queue: Queue, *, now: str, suite: list[EvalItem] = SEED_SUITE,
-    scale_version: str = SCALE_VERSION,
+    scale_version: str = SCALE_VERSION, min_items: int = MIN_ITEMS_FOR_SCORE,
 ) -> int:
     """Score finished eval jobs and record ability for completed batches.
 
@@ -191,6 +213,15 @@ async def collect(
     touched: set[tuple[str, str, int]] = set()
 
     for run in store.pending_eval_runs():
+        # A run dispatched against a different suite points at an index that now holds a
+        # different item. Scoring it would measure one thing and record another, so it is
+        # retired rather than guessed at. (Rows written before suite versioning carry an
+        # empty string, which is likewise not the current suite.)
+        if run.suite_version != SUITE_VERSION:
+            store.fail_eval_run(run.job_id)
+            _log.info("eval run %s discarded: measured suite %r, current is %r",
+                      run.job_id, run.suite_version, SUITE_VERSION)
+            continue
         result = await queue.read_result(run.result_key)
         if result is None:
             continue  # still queued or running
@@ -226,10 +257,19 @@ async def collect(
                 "eval inconclusive: %s/%s — only %d of %d items produced signal, "
                 "refusing to score on a shrunken sample", artifact, task_class, done, total)
             continue
+        if done < min_items:
+            # The sample is intact but too SMALL to carry a 1–10 score. MIN_SIGNAL_FRACTION
+            # guards a batch that shrank; this guards one that was never big enough. Without
+            # it, a suite of two items scored a model on two items — and a perfect run on a
+            # single item was recorded as the top of the scale.
+            _log.warning(
+                "eval inconclusive: %s/%s — %d item(s) is below the %d needed for a score",
+                artifact, task_class, done, min_items)
+            continue
         ability = score_to_ability(passed / done)
         store.set_ability(artifact=artifact, task_class=task_class, score=ability,
                           scale_version=scale_version, updated_at=now,
-                          provenance="measured")
+                          provenance="measured", n_items=done, n_passed=passed)
         _log.info("eval complete: %s/%s → ability %.1f (%d/%d passed, %d no-signal)",
                   artifact, task_class, ability, passed, done, failed)
 
@@ -239,9 +279,11 @@ async def collect(
 async def eval_tick(
     store: Store, queue: Queue, *, now: str, fleet: Fleet | None = None,
     suite: list[EvalItem] = SEED_SUITE, scale_version: str = SCALE_VERSION,
+    min_items: int = MIN_ITEMS_FOR_SCORE,
 ) -> tuple[int, int]:
     """One coordinator pass: collect finished work first, then dispatch new work."""
-    collected = await collect(store, queue, now=now, suite=suite, scale_version=scale_version)
+    collected = await collect(store, queue, now=now, suite=suite,
+                              scale_version=scale_version, min_items=min_items)
     enqueued = await dispatch(store, queue, now=now, fleet=fleet, suite=suite,
-                              scale_version=scale_version)
+                              scale_version=scale_version, min_items=min_items)
     return collected, enqueued

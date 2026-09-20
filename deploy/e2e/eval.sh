@@ -5,9 +5,12 @@
 #   eval items dispatched as ORDINARY fleet jobs → a real worker drains them →
 #   results scored → ability recorded → the artifact becomes ROUTABLE.
 #
-# The stub model server echoes its prompt, which genuinely fails the JSON items and passes
-# the keyword items — so this asserts real discrimination (extract 1.0, summarize 10.0),
-# not a rigged all-pass.
+# The stub model server echoes its prompt, so it answers nothing. That makes it the ideal
+# subject for the assertion this file now leads with: an echo bot lands at the FLOOR of
+# every task class. Under the old suite it reached the ceiling — two "is this JSON?" items
+# and a single "reply with the word PASS" were enough to record 10.0, which the anchor
+# table calls a frontier cloud model, and which then beat a correctly configured cloud
+# capability in routing because the sort prefers local.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -93,26 +96,46 @@ print(next((r['score'] for r in m if r['artifact']=='$ARTIFACT' and r['task_clas
 done
 [[ -n "$SCORE" ]] || fail "ability never recorded for $ARTIFACT"
 
-# 4. The measurement discriminates: JSON items fail, keyword items pass.
-EXTRACT=$(curl -fsS "$URL/ability" | python3 -c "
-import sys,json
-m=json.load(sys.stdin)['matrix']
-print(next((r['score'] for r in m if r['artifact']=='$ARTIFACT' and r['task_class']=='extract'), ''))")
-log "measured $ARTIFACT → summarize=$SCORE  extract=$EXTRACT"
-python3 -c "import sys; sys.exit(0 if float('$SCORE') >= 9 else 1)" \
-  || fail "summarize should score high (echo contains the keyword), got $SCORE"
-python3 -c "import sys; sys.exit(0 if float('$EXTRACT') <= 2 else 1)" \
-  || fail "extract should score low (echo is not valid JSON), got $EXTRACT"
+# 4. A model that answers NOTHING scores at the floor of every class — and the score
+#    carries the evidence behind it, so a reader can see what it rests on.
+python3 - "$URL" "$ARTIFACT" <<'PY' || fail "echo bot was not scored at the floor"
+import json, sys, urllib.request
+url, artifact = sys.argv[1], sys.argv[2]
+body = json.load(urllib.request.urlopen(f"{url}/ability"))
+rows = [r for r in body["matrix"] if r["artifact"] == artifact]
+assert rows, f"no ability rows for {artifact}"
+ceiling = body["tier1_max_ability"]
+for r in rows:
+    assert r["provenance"] == "measured", r
+    assert r["score"] <= 1.5, f"an echo bot scored {r['score']} at {r['task_class']}"
+    assert r["score"] < ceiling, "echo reached the tier-1 ceiling"
+    assert r["n_items"] and r["n_items"] >= 8, f"scored on {r['n_items']} item(s): {r}"
+print("floor scores on", {r["task_class"]: r["n_items"] for r in rows}, "items each")
+PY
+log "echo bot scored at the floor, with its item counts recorded ✓"
 
-# 5. Routable: a need only the freshly-measured artifact can meet now resolves to it.
+# 5. Routable: the artifact has a real, measured score, so a need it can meet resolves to
+#    its capability.
 curl -fsS -X POST "$URL/jobs" -H 'content-type: application/json' -d '{
-  "task_class": "summarize", "min_ability": 9,
+  "task_class": "summarize", "min_ability": 1,
   "messages": [{"role":"user","content":"route me to the newly measured model"}],
   "urgency": "waitable"
 }' >/dev/null
 sleep 0.5
 BEFORE_DEPTH=$(${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 XLEN "q:$CAP" | tr -d '\r')
 [[ "$BEFORE_DEPTH" -gt 0 ]] || fail "need-shaped job did not reach q:$CAP"
-log "min_ability 9 now routes to $CAP (backed by $ARTIFACT) ✓"
+log "measured artifact is routable via $CAP ✓"
 
-printf '\033[32m[eval] PASS — unmeasured model measured via ordinary jobs, then routable\033[0m\n'
+# 6. …and a floor above what any instrument here can certify FAILS, rather than being
+#    quietly served by the best thing to hand. 8-10 is the judged band; those tiers are
+#    deferred, so nothing may claim it.
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL/jobs" \
+  -H 'content-type: application/json' -d '{
+  "task_class": "summarize", "min_ability": 9,
+  "messages": [{"role":"user","content":"nothing here can certify this"}],
+  "urgency": "waitable"
+}')
+[[ "$CODE" == "422" ]] || fail "min_ability 9 should fail explicitly, got HTTP $CODE"
+log "min_ability 9 refused with 422 rather than silently under-served ✓"
+
+printf '\033[32m[eval] PASS — measured via ordinary jobs; an echo bot cannot buy a high score\033[0m\n'

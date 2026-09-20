@@ -494,18 +494,23 @@ class Store:
 
     def set_ability(self, *, artifact: str, task_class: str, score: float,
                     scale_version: str, updated_at: str,
-                    provenance: str = "measured") -> None:
+                    provenance: str = "measured",
+                    n_items: int | None = None, n_passed: int | None = None) -> None:
         with self._session() as s:
             key = (artifact, task_class, scale_version)
             row = s.get(Ability, key)
             if row is None:
                 row = Ability(artifact=artifact, task_class=task_class, score=score,
                               scale_version=scale_version, updated_at=updated_at,
-                              provenance=provenance)
+                              provenance=provenance, n_items=n_items, n_passed=n_passed)
             else:
                 row.score = score
                 row.updated_at = updated_at
                 row.provenance = provenance
+                # Overwritten, not merged: these describe THIS measurement. Keeping a
+                # previous round's counts beside a new score would misreport the evidence.
+                row.n_items = n_items
+                row.n_passed = n_passed
             s.add(row)
             s.commit()
 
@@ -743,14 +748,14 @@ class Store:
 
     def add_eval_run(self, *, job_id: str, artifact: str, task_class: str,
                      item_index: int, result_key: str, created_at: str,
-                     generation: int = 1) -> None:
+                     generation: int = 1, suite_version: str = "") -> None:
         with self._session() as s:
             if s.get(EvalRun, job_id) is not None:
                 return  # INSERT OR IGNORE equivalent
             s.add(EvalRun(
                 job_id=job_id, artifact=artifact, task_class=task_class,
                 item_index=item_index, result_key=result_key, created_at=created_at,
-                generation=generation,
+                generation=generation, suite_version=suite_version,
             ))
             s.commit()
 

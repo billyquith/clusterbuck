@@ -24,3 +24,9 @@ class Ability(SQLModel, table=True):
     provenance: str = Field(
         default="measured", sa_column_kwargs={"server_default": "'measured'"}
     )
+    # How much evidence is behind `score`. model-evaluation.md requires scores to be
+    # reported "with an uncertainty note", which was impossible while the table held a bare
+    # number: a 10 from one item and a 7 from forty looked identical. Nullable because a
+    # seeded placeholder rests on no items at all, which is itself the useful signal.
+    n_items: int | None = None
+    n_passed: int | None = None

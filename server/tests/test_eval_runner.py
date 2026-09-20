@@ -13,7 +13,13 @@ from clusterbuck.eval_runner import (
     dispatch,
     eval_tick,
 )
-from clusterbuck.evaluation import SCALE_VERSION, EvalItem, check_json_valid
+from clusterbuck.evaluation import (
+    MIN_ITEMS_FOR_SCORE,
+    SCALE_VERSION,
+    TIER1_MAX_ABILITY,
+    EvalItem,
+    check_json_valid,
+)
 from clusterbuck.fleet import CapabilitySpec, Fleet
 from clusterbuck.models import EnrollRequest, HwProbe, Privacy
 from clusterbuck.queue import Queue, stream_key
@@ -68,9 +74,9 @@ async def _finish(queue: Queue, store: Store, *, text_for) -> None:
 # --- candidate selection ---
 
 def test_only_installed_artifacts_are_candidates(store):
-    assert artifacts_needing_eval(store, suite=SUITE) == []  # no nodes yet
+    assert artifacts_needing_eval(store, suite=SUITE, min_items=1) == []  # no nodes yet
     _enroll_with(store, [ARTIFACT])
-    assert artifacts_needing_eval(store, suite=SUITE) == [(ARTIFACT, [CAP])]
+    assert artifacts_needing_eval(store, suite=SUITE, min_items=1) == [(ARTIFACT, [CAP])]
 
 
 def test_measured_artifacts_are_skipped(store):
@@ -78,21 +84,21 @@ def test_measured_artifacts_are_skipped(store):
     for tc in ("extract", "summarize"):
         store.set_ability(artifact=ARTIFACT, task_class=tc, score=6.0,
                           scale_version=SCALE_VERSION, updated_at="t")
-    assert artifacts_needing_eval(store, suite=SUITE) == []
+    assert artifacts_needing_eval(store, suite=SUITE, min_items=1) == []
 
 
 async def test_in_flight_artifacts_are_not_redispatched(store, queue):
     _enroll_with(store, [ARTIFACT])
-    assert await dispatch(store, queue, now="t", suite=SUITE) == 2
-    assert artifacts_needing_eval(store, suite=SUITE) == []   # already under eval
-    assert await dispatch(store, queue, now="t", suite=SUITE) == 0  # no duplicate storm
+    assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 2
+    assert artifacts_needing_eval(store, suite=SUITE, min_items=1) == []   # already under eval
+    assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 0  # no duplicate storm
 
 
 # --- dispatch shape ---
 
 async def test_dispatched_jobs_pin_the_artifact_and_stay_polite(store, queue):
     _enroll_with(store, [ARTIFACT])
-    assert await dispatch(store, queue, now="t", suite=SUITE) == 2
+    assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 2
 
     entries = await queue.client.xrange(stream_key(CAP))
     assert len(entries) == 2
@@ -113,28 +119,28 @@ async def test_dispatched_jobs_pin_the_artifact_and_stay_polite(store, queue):
 
 async def test_all_pass_records_top_ability(store, queue):
     _enroll_with(store, [ARTIFACT])
-    await dispatch(store, queue, now="t", suite=SUITE)
+    await dispatch(store, queue, now="t", suite=SUITE, min_items=1)
     await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "a fox jumped")
 
-    assert await collect(store, queue, now="t", suite=SUITE) == 2
-    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 10.0
-    assert store.get_ability(ARTIFACT, "summarize", SCALE_VERSION) == 10.0
+    assert await collect(store, queue, now="t", suite=SUITE, min_items=1) == 2
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY
+    assert store.get_ability(ARTIFACT, "summarize", SCALE_VERSION) == TIER1_MAX_ABILITY
 
 
 async def test_all_fail_records_floor_ability(store, queue):
     _enroll_with(store, [ARTIFACT])
-    await dispatch(store, queue, now="t", suite=SUITE)
+    await dispatch(store, queue, now="t", suite=SUITE, min_items=1)
     await _finish(queue, store, text_for=lambda r: "unhelpful garbage")
 
-    await collect(store, queue, now="t", suite=SUITE)
+    await collect(store, queue, now="t", suite=SUITE, min_items=1)
     assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 1.0
     assert store.get_ability(ARTIFACT, "summarize", SCALE_VERSION) == 1.0
 
 
 async def test_unfinished_batch_records_nothing(store, queue):
     _enroll_with(store, [ARTIFACT])
-    await dispatch(store, queue, now="t", suite=SUITE)
+    await dispatch(store, queue, now="t", suite=SUITE, min_items=1)
     # Only the extract item comes back.
     run = next(r for r in store.pending_eval_runs() if r.task_class == "extract")
     await queue.client.set(run.result_key, json.dumps({
@@ -142,21 +148,21 @@ async def test_unfinished_batch_records_nothing(store, queue):
         "completion": {"choices": [{"message": {"role": "a", "content": '{"n":1}'}}]},
     }))
 
-    assert await collect(store, queue, now="t", suite=SUITE) == 1
-    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 10.0   # its batch settled
+    assert await collect(store, queue, now="t", suite=SUITE, min_items=1) == 1
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY   # its batch settled
     assert store.get_ability(ARTIFACT, "summarize", SCALE_VERSION) is None  # still waiting
 
 
 async def test_failed_job_yields_no_score(store, queue):
     _enroll_with(store, [ARTIFACT])
-    await dispatch(store, queue, now="t", suite=SUITE)
+    await dispatch(store, queue, now="t", suite=SUITE, min_items=1)
     for run in store.pending_eval_runs():
         await queue.client.set(run.result_key, json.dumps({
             "job_id": run.job_id, "status": "failed", "worker": "w",
             "completed_at": "t", "error": "model server down",
         }))
 
-    assert await collect(store, queue, now="t", suite=SUITE) == 0
+    assert await collect(store, queue, now="t", suite=SUITE, min_items=1) == 0
     # A broken run must not be scored as a failure of the model.
     assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None
 
@@ -168,14 +174,14 @@ async def test_tick_measures_a_new_artifact_end_to_end(store, queue):
     _enroll_with(store, [ARTIFACT])
     assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None
 
-    collected, dispatched = await eval_tick(store, queue, now="t", suite=SUITE)
+    collected, dispatched = await eval_tick(store, queue, now="t", suite=SUITE, min_items=1)
     assert (collected, dispatched) == (0, 2)
 
     await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "the fox")
-    collected, dispatched = await eval_tick(store, queue, now="t", suite=SUITE)
+    collected, dispatched = await eval_tick(store, queue, now="t", suite=SUITE, min_items=1)
     assert collected == 2
-    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 10.0
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY
     # Measured now, so nothing further is queued for it.
     assert dispatched == 0
 
@@ -200,19 +206,19 @@ def test_unkeyed_cloud_artifacts_are_not_candidates(store, monkeypatch):
     only ever fail, the same reason sync.build_router excludes it from the sync plane."""
     monkeypatch.delenv("CBK_TEST_PROVIDER_KEY", raising=False)
     fleet = _cloud_fleet(monkeypatch, keyed=False)
-    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE) == []
+    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE, min_items=1) == []
 
 
 def test_keyed_cloud_artifact_is_a_candidate(store, monkeypatch):
     fleet = _cloud_fleet(monkeypatch)
-    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE) == [(CLOUD_ARTIFACT, [CLOUD_CAP])]
+    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE, min_items=1) == [(CLOUD_ARTIFACT, [CLOUD_CAP])]
 
 
 async def test_cloud_artifact_dispatch_uses_cloud_ok_privacy(store, queue, monkeypatch):
     """A cloud artifact can only be measured by actually calling the provider, so its eval
     jobs must carry cloud_ok — local_only would just have them refused (ADR 14)."""
     fleet = _cloud_fleet(monkeypatch)
-    assert await dispatch(store, queue, now="t", fleet=fleet, suite=SUITE) == 2
+    assert await dispatch(store, queue, now="t", fleet=fleet, suite=SUITE, min_items=1) == 2
 
     entries = await queue.client.xrange(stream_key(CLOUD_CAP))
     assert len(entries) == 2
@@ -225,14 +231,14 @@ async def test_cloud_artifact_dispatch_uses_cloud_ok_privacy(store, queue, monke
 
 async def test_cloud_artifact_scored_end_to_end(store, queue, monkeypatch):
     fleet = _cloud_fleet(monkeypatch)
-    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE)
+    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE, min_items=1)
     assert (collected, dispatched) == (0, 2)
 
     await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "the fox")
-    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE)
+    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE, min_items=1)
     assert collected == 2
-    assert store.get_ability(CLOUD_ARTIFACT, "extract", SCALE_VERSION) == 10.0
+    assert store.get_ability(CLOUD_ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY
 
 
 # --- endpoints ---
@@ -259,7 +265,7 @@ async def test_mixed_batch_does_not_score_from_a_shrunken_sample(store, queue):
     """
     _enroll_with(store, [ARTIFACT])
     single = [SUITE[0], SUITE[0]]  # two items, one task class
-    await dispatch(store, queue, now="t", suite=single)
+    await dispatch(store, queue, now="t", suite=single, min_items=1)
     runs = store.pending_eval_runs()
     assert len(runs) == 2
 
@@ -271,7 +277,7 @@ async def test_mixed_batch_does_not_score_from_a_shrunken_sample(store, queue):
         "job_id": runs[1].job_id, "status": "failed", "worker": "w",
         "completed_at": "t", "error": "model server down"}))
 
-    await collect(store, queue, now="t", suite=single)
+    await collect(store, queue, now="t", suite=single, min_items=1)
     pending, scored, passed, failed = store.eval_progress(ARTIFACT, "extract")
     assert (pending, scored, failed) == (0, 1, 1)
     # 1 of 2 items produced signal — below the majority threshold, so no score.
@@ -284,12 +290,12 @@ async def test_all_failed_batch_stops_redispatching(store, queue):
     single = [SUITE[0]]
 
     for _ in range(10):
-        await dispatch(store, queue, now="t", suite=single)
+        await dispatch(store, queue, now="t", suite=single, min_items=1)
         for run in store.pending_eval_runs():
             await queue.client.set(run.result_key, json.dumps({
                 "job_id": run.job_id, "status": "failed", "worker": "w",
                 "completed_at": "t", "error": "always broken"}))
-        await collect(store, queue, now="t", suite=single)
+        await collect(store, queue, now="t", suite=single, min_items=1)
 
     # No score was invented from zero signal…
     assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None
@@ -307,15 +313,15 @@ async def test_seeded_artifacts_are_still_measured(store, queue):
 
     # It has a score, but only a seeded one — so it must still be queued for measurement.
     assert store.get_ability("llama3.2:3b", "extract", SCALE_VERSION) is not None
-    assert [a for a, _ in artifacts_needing_eval(store, suite=SUITE)] == ["llama3.2:3b"]
-    assert await dispatch(store, queue, now="t", suite=SUITE) == 2
+    assert [a for a, _ in artifacts_needing_eval(store, suite=SUITE, min_items=1)] == ["llama3.2:3b"]
+    assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 2
 
     # A real measurement replaces the seed and is labelled as earned.
     await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "a fox")
-    await collect(store, queue, now="t", suite=SUITE)
+    await collect(store, queue, now="t", suite=SUITE, min_items=1)
     assert store.ability_provenance("llama3.2:3b", "extract", SCALE_VERSION) == "measured"
-    assert artifacts_needing_eval(store, suite=SUITE) == []
+    assert artifacts_needing_eval(store, suite=SUITE, min_items=1) == []
 
 
 async def test_a_superseded_artifact_is_scored_only_on_its_own_measurements(store, queue):
@@ -324,25 +330,25 @@ async def test_a_superseded_artifact_is_scored_only_on_its_own_measurements(stor
 
     Dropping the ability row was not enough. Ability is recomputed from every eval_run
     recorded for the (artifact, task_class), so the re-eval averaged the new artifact's
-    items together with the old artifact's: a model that now passed 2 of 2 was recorded at
-    8.0 (3 of 4 across both rounds) rather than 10.0, carrying the superseded measurement
-    forward under a new digest.
+    items together with the old artifact's: a model that now passed 2 of 2 was recorded on
+    3 of 4 across both rounds rather than on its own 2 of 2, carrying the superseded
+    measurement forward under a new digest.
     """
     _enroll_with(store, [ARTIFACT])
     single = [SUITE[0], SUITE[0]]  # two items, one task class
 
     async def run_batch(*answers: str) -> None:
-        await dispatch(store, queue, now="t", suite=single)
+        await dispatch(store, queue, now="t", suite=single, min_items=1)
         for run, answer in zip(store.pending_eval_runs(), answers, strict=True):
             await queue.client.set(run.result_key, json.dumps({
                 "job_id": run.job_id, "status": "done", "worker": "w",
                 "completed_at": "t",
                 "completion": {"choices": [{"message": {"role": "a", "content": answer}}]}}))
-        await collect(store, queue, now="t", suite=single)
+        await collect(store, queue, now="t", suite=single, min_items=1)
 
     # Round 1: the old artifact gets one of two right.
     await run_batch('{"n":1}', "not json")
-    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 5.5
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 4.0
 
     # The artifact changes upstream.
     cleared, generation = store.supersede_artifact(ARTIFACT, SCALE_VERSION, now="t2")
@@ -351,7 +357,7 @@ async def test_a_superseded_artifact_is_scored_only_on_its_own_measurements(stor
 
     # Round 2: the new artifact gets both right, and is scored on those two items ALONE.
     await run_batch('{"n":1}', '{"n":2}')
-    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 10.0
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY
     assert store.eval_progress(ARTIFACT, "extract", generation) == (0, 2, 2, 0)
 
 
@@ -363,16 +369,17 @@ async def test_superseding_frees_an_artifact_that_exhausted_its_failure_budget(s
     single = [SUITE[0]]
 
     for _ in range(10):
-        await dispatch(store, queue, now="t", suite=single)
+        await dispatch(store, queue, now="t", suite=single, min_items=1)
         for run in store.pending_eval_runs():
             await queue.client.set(run.result_key, json.dumps({
                 "job_id": run.job_id, "status": "failed", "worker": "w",
                 "completed_at": "t", "error": "always broken"}))
-        await collect(store, queue, now="t", suite=single)
-    assert artifacts_needing_eval(store, suite=single) == []   # budget exhausted
+        await collect(store, queue, now="t", suite=single, min_items=1)
+    assert artifacts_needing_eval(store, suite=single, min_items=1) == []  # budget spent
 
     store.supersede_artifact(ARTIFACT, SCALE_VERSION, now="t2")
-    assert [a for a, _ in artifacts_needing_eval(store, suite=single)] == [ARTIFACT]
+    assert [a for a, _ in
+            artifacts_needing_eval(store, suite=single, min_items=1)] == [ARTIFACT]
 
 
 async def test_superseding_retires_runs_still_in_flight(store, queue):
@@ -380,11 +387,11 @@ async def test_superseding_retires_runs_still_in_flight(store, queue):
     would both contaminate the next score and keep the artifact permanently 'under eval',
     which is a state dispatch refuses to touch."""
     _enroll_with(store, [ARTIFACT])
-    await dispatch(store, queue, now="t", suite=SUITE)
+    await dispatch(store, queue, now="t", suite=SUITE, min_items=1)
     assert len(store.pending_eval_runs()) == 2
     assert ARTIFACT in store.artifacts_under_eval()
 
     store.supersede_artifact(ARTIFACT, SCALE_VERSION, now="t2")
     assert store.pending_eval_runs() == []
     assert ARTIFACT not in store.artifacts_under_eval()
-    assert await dispatch(store, queue, now="t2", suite=SUITE) == 2
+    assert await dispatch(store, queue, now="t2", suite=SUITE, min_items=1) == 2
