@@ -1,0 +1,116 @@
+"""`install/worker/join.py` — the parts that are wrong only on the platform you skipped.
+
+Loaded by path because the joining script deliberately ships as a standalone file next to
+the installers it drives, not as part of an installed package: the machine running it has
+nothing installed yet.
+
+The argument-flavour test below exists because the first version of this script passed
+GNU-style `--coordinator` to both installers, and `install.ps1` declares PowerShell
+parameters (`-CoordinatorUrl`) which will not bind a double-dash name. That failure is
+invisible on Linux and macOS and would have surfaced as "missing mandatory parameter" on
+the first real Windows run.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+JOIN_PY = REPO / "install" / "worker" / "join.py"
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("cbk_join", JOIN_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def join():
+    assert JOIN_PY.is_file(), f"join script missing at {JOIN_PY}"
+    return _load()
+
+
+def _args(**over):
+    base = {
+        "coordinator": "http://coordinator.local:8018",
+        "redis_url": "redis://:pw@coordinator.local:6379/0",
+        "model": "qwen2.5:7b",
+        "model_server": "http://127.0.0.1:11434/v1",
+        "model_manager": "auto",
+        "artifact": Path("/tmp/cbk.pyz"),
+        "token": "tok-123",
+    }
+    base.update(over)
+    return base
+
+
+def test_linux_gets_gnu_style_flags(join):
+    cmd = join.installer_command(REPO, system="Linux", **_args())
+    assert cmd[0] == "bash" and cmd[1].endswith("install.sh")
+    assert "--coordinator" in cmd and "--redis-url" in cmd
+    assert "--model-server" in cmd
+    assert not any(a.startswith("-Coordinator") for a in cmd)
+
+
+def test_windows_gets_powershell_parameter_names(join):
+    """install.ps1's param block is -CoordinatorUrl / -RedisUrl / -ModelServerUrl. A
+    double-dash name does not bind to those, so passing the Linux flavour here fails with
+    a missing-mandatory-parameter error on the very first real run."""
+    cmd = join.installer_command(REPO, system="Windows", **_args())
+    assert cmd[0] == "powershell"
+    assert cmd[cmd.index("-File") + 1].endswith("install.ps1")
+    for expected in ("-CoordinatorUrl", "-RedisUrl", "-Model",
+                     "-ModelServerUrl", "-ModelManager", "-Artifact", "-Token"):
+        assert expected in cmd, f"{expected} missing from the Windows invocation"
+    assert not any(a.startswith("--") for a in cmd), \
+        "no GNU-style flag may reach install.ps1"
+
+
+def test_every_value_survives_into_both_flavours(join):
+    """A name that binds but drops its value is the same outage, quieter."""
+    args = _args()
+    for system in ("Linux", "Windows"):
+        cmd = join.installer_command(REPO, system=system, **args)
+        for value in (args["coordinator"], args["redis_url"], args["model"],
+                      args["model_server"], args["model_manager"], args["token"],
+                      str(args["artifact"])):
+            assert value in cmd, f"{value!r} missing on {system}"
+
+
+def test_capability_warning_names_the_unroutable_tier(join, tmp_path, capsys):
+    """The onboarding failure that is otherwise silent: capabilities are proposed from
+    probed RAM, so a 32GB+ machine is offered tiers a small fleet never defined — it then
+    enrols fine, heartbeats fine, and no job ever routes."""
+    state = tmp_path / "node.json"
+    state.write_text('{"node_id":"n","node_key":"k","server":"s",'
+                     '"capabilities":["8b-extract","32b-reason"]}')
+
+    join.check_capabilities(["8b-extract"], state)
+
+    out = capsys.readouterr().out
+    assert "32b-reason" in out
+    assert "NOT in the coordinator's registry" in out
+    assert "8b-extract" in out, "should say what the coordinator does know"
+
+
+def test_no_warning_when_every_tier_is_known(join, tmp_path, capsys):
+    state = tmp_path / "node.json"
+    state.write_text('{"node_id":"n","node_key":"k","server":"s",'
+                     '"capabilities":["8b-extract"]}')
+
+    join.check_capabilities(["8b-extract", "32b-reason"], state)
+
+    out = capsys.readouterr().out
+    assert "NOT in the coordinator's registry" not in out
+
+
+def test_a_missing_node_state_does_not_fail_the_join(join, tmp_path, capsys):
+    """The check is advisory. A node that installed correctly must not be reported as
+    failed just because the state file moved."""
+    join.check_capabilities(["8b-extract"], tmp_path / "absent.json")
+    assert "skipping the capability check" in capsys.readouterr().out

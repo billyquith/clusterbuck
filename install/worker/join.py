@@ -115,19 +115,48 @@ def fetch_artifact(coordinator: str, password: str, dest: Path) -> Path:
     return dest
 
 
-def installer_for(repo_root: Path) -> list[str]:
-    """The platform installer to hand off to, as an argv prefix."""
+def installer_command(
+    repo_root: Path, *, coordinator: str, redis_url: str, model: str,
+    model_server: str, model_manager: str, artifact: Path, token: str,
+    system: str | None = None,
+) -> list[str]:
+    """Full argv for the platform installer.
+
+    The two installers do NOT share an argument style, and getting this wrong fails only
+    on the platform you did not test on: `install.sh` takes GNU-style `--coordinator`,
+    while `install.ps1` declares PowerShell parameters (`-CoordinatorUrl`, `-RedisUrl`,
+    `-ModelServerUrl`) which will not bind a `--double-dash` name at all. So the flavour
+    is built per platform rather than shared.
+
+    `system` is injectable so both flavours are testable from one machine.
+    """
     here = repo_root / "install" / "worker"
-    if platform.system() == "Windows":
-        script = here / "install.ps1"
-        if not script.is_file():
-            die(f"installer not found: {script}")
-        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", str(script)]
-    script = here / "install.sh"
+    on_windows = (system or platform.system()) == "Windows"
+    script = here / ("install.ps1" if on_windows else "install.sh")
     if not script.is_file():
         die(f"installer not found: {script}")
-    return ["bash", str(script)]
+
+    if on_windows:
+        return [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+            "-CoordinatorUrl", coordinator,
+            "-RedisUrl", redis_url,
+            "-Model", model,
+            "-ModelServerUrl", model_server,
+            "-ModelManager", model_manager,
+            "-Artifact", str(artifact),
+            "-Token", token,
+        ]
+    return [
+        "bash", str(script),
+        "--coordinator", coordinator,
+        "--redis-url", redis_url,
+        "--model", model,
+        "--model-server", model_server,
+        "--model-manager", model_manager,
+        "--artifact", str(artifact),
+        "--token", token,
+    ]
 
 
 def node_state_path() -> Path:
@@ -219,15 +248,16 @@ def main(argv: list[str] | None = None) -> int:
     fetch_artifact(args.coordinator, password, staging)
     ok(f"artifact → {staging} ({staging.stat().st_size // 1024} KiB)")
 
-    cmd = installer_for(repo_root) + [
-        "--coordinator", args.coordinator,
-        "--redis-url", cfg["redis_url"],
-        "--model", args.model,
-        "--model-server", args.model_server,
-        "--model-manager", args.model_manager,
-        "--artifact", str(staging),
-        "--token", cfg["join_token"],
-    ]
+    cmd = installer_command(
+        repo_root,
+        coordinator=args.coordinator,
+        redis_url=cfg["redis_url"],
+        model=args.model,
+        model_server=args.model_server,
+        model_manager=args.model_manager,
+        artifact=staging,
+        token=cfg["join_token"],
+    )
 
     if args.dry_run:
         # The redis URL carries a password, so show the argv with it redacted rather than
