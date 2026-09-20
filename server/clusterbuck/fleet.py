@@ -48,6 +48,15 @@ class CapabilitySpec(BaseModel):
     # key itself, so fleet.yaml stays committable. The coordinator reads it; a worker never
     # sees it. Unset env at routing time excludes the artifact rather than failing startup.
     api_key_env: str | None = None
+    # Capabilities of this tier's model (ADR 37), for a provider account only. A local
+    # artifact's features live in the model catalog, which is the coordinator's record of
+    # what it knows about artifacts it can install — but a provider account has no host and
+    # never enters that catalog, so the operator who registered it declares them here. The
+    # two sources cover disjoint sets of artifacts and never disagree.
+    context_tokens: int | None = None
+    supports_tools: bool | None = None
+    supports_json_schema: bool | None = None
+    supports_vision: bool | None = None
 
 
 class NodeSpec(BaseModel):

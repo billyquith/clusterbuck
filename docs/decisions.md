@@ -829,3 +829,46 @@ The job fails rather than being under-served, which is the correct half; getting
 fast node instead needs node-addressed dispatch, and that is the design above whose costs are
 not yet worth paying at home-fleet scale. On the common shape — a small always-on box and a
 large workstation serving *different* tiers — the race does not arise.
+
+## 37. What a model *can do* is a filter, not a score
+
+**Decision:** jobs may carry **`requires`** — `context_tokens`, `tools`, `json_schema`,
+`vision` — and routing applies it as a **hard filter before ability is compared at all**.
+Local artifacts declare these in the **model catalog**; provider accounts, which have no host
+and never enter that catalog, declare them on their `fleet.yaml` capability. An artifact that
+does not declare a required feature is **excluded, by name**.
+
+**Why not a score.** Ability (ADR 15) is a graded 1–10 judgement of how *well* a model does a
+task class. These are not that shape. A context window is a number with a hard edge; tool
+calling is a boolean. A 4k-context model and a 128k one can both honestly be "a 6 at
+summarize", and routing a 60k-token document to the first silently truncates it — the ability
+matrix cannot see the difference, because there is no quality axis along which to see it. So
+a client needing tool calling could not ask for it: it either named a `capability` explicitly,
+abandoning need-shaped addressing, or submitted and hoped.
+
+**Why filter before comparing ability.** Otherwise a capable-but-unsuitable artifact wins on
+score and the requirement is decided by an unrelated number. Filter on what a model *can* do,
+then compare how *well* it does it.
+
+**Why undeclared reads as "no".** This is the opposite of the `min_tps` rule (ADR 36), and
+deliberately so. An unmeasured *speed* is genuinely unknown and self-corrects — the node
+checks again and refuses if it turns out to be too slow. An undeclared *feature* has no such
+backstop: serving a tool-calling job on a model nobody has checked fails at the model server,
+where it reads as a model bug rather than a routing one, or worse succeeds while quietly
+ignoring the tools. The refusal names the artifact, so the fix is one `POST /catalog` away.
+
+**Why the catalog rather than probing the node.** The portable `GET /v1/models` returns an id
+and nothing else — no window, no capability list. The facts exist only behind vendor-specific
+endpoints (Ollama's `/api/show`, LM Studio's own route), which is exactly the dependency
+`inventory.py` keeps optional for `loaded` and `digests`. Curation also covers artifacts no
+node has yet, which a probe by definition cannot. A vendor adapter can populate these later
+without changing the routing contract.
+
+**Considered:** a free-form JSON `features` blob (extensible without migrations, but a typo'd
+key silently matches nothing, and these four are a small stable set); **inferring** the window
+from parameter count or family (wrong often enough to be worse than absent, and it would
+manufacture exactly the confident-but-unfounded metadata this system keeps removing); and
+enforcing `context_tokens` **worker-side** against the running server's configured window (the
+right long-term check, since a runtime started with a smaller window than the model supports
+will still truncate — but it needs a per-server adapter, and the catalog's published figure is
+the useful first cut).

@@ -55,15 +55,29 @@ capabilities:
   # routing with a warning; it does not stop the server from starting. Like any capability,
   # these enter the ability matrix unscored and are measured by the eval harness before
   # they are ever selected — nothing here is assumed quality, only priced.
+  #
+  # The capability fields are what the model CAN DO, as opposed to how well (ADR 37):
+  # context window, tool calling, schema-constrained output, vision. For a LOCAL artifact
+  # these live in the model catalog; a provider account has no host and never enters that
+  # catalog, so it declares them here. An artifact that declares nothing is excluded from
+  # any job that requires a feature, rather than served on the assumption it copes.
   claude-sonnet:
     model: "anthropic/claude-3-5-sonnet-20241022"
     api_key_env: CBK_ANTHROPIC_API_KEY
     cloud: true
     price_in_per_1k: 0.003
     price_out_per_1k: 0.015
+    context_tokens: 200000
+    supports_tools: true
+    supports_json_schema: true
+    supports_vision: true
   gpt-4o-mini:
     model: "openai/gpt-4o-mini"
     api_key_env: CBK_OPENAI_API_KEY
     cloud: true
     price_in_per_1k: 0.00015
     price_out_per_1k: 0.0006
+    context_tokens: 128000
+    supports_tools: true
+    supports_json_schema: true
+    supports_vision: true

@@ -536,6 +536,7 @@ def create_app(
                 task_class=body.task_class,
                 min_ability=body.min_ability,
                 min_tps=body.min_tps,
+                requires=body.requires,
                 privacy=body.privacy.value,
                 urgency=body.urgency.value,
                 cloud_budget_monthly=settings.cloud_budget_monthly,
@@ -1173,7 +1174,14 @@ def create_app(
             {"artifact": r.artifact, "family": r.family, "params_b": r.params_b,
              "quant": r.quant, "size_gb": r.size_gb, "min_ram_gb": r.min_ram_gb,
              "source": r.source, "registry_ref": r.registry_ref,
-             "expected_ability": r.expected_ability}
+             "expected_ability": r.expected_ability,
+             # What the artifact CAN DO, as opposed to how well (ADR 37). null means not
+             # curated — a job requiring it is refused, naming this artifact, rather than
+             # served by a model nobody has checked.
+             "context_tokens": r.context_tokens,
+             "supports_tools": r.supports_tools,
+             "supports_json_schema": r.supports_json_schema,
+             "supports_vision": r.supports_vision}
             for r in app.state.store.list_catalog()]}
 
     @app.post("/catalog", status_code=201)

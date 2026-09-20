@@ -39,6 +39,16 @@ POST /jobs
                                         //   one. Checked against each node's MEASURED
                                         //   stats.tps, and again by the node before it
                                         //   answers (ADR 36).
+  "requires": {                         // optional HARD requirements (ADR 37) — what the
+    "context_tokens": 60000,            //   model must be ABLE to do, as opposed to how
+    "tools": true,                      //   well. Not a score: a window has a hard edge
+    "json_schema": true,                //   and tool calling is a boolean, and a 32k and
+    "vision": false                     //   a 128k model can both be "a 6 at summarize".
+  },                                    //   Filtered BEFORE ability is compared. An
+                                        //   artifact that does not DECLARE a required
+                                        //   feature is excluded by name — curate it with
+                                        //   POST /catalog (or, for a provider account,
+                                        //   in fleet.yaml).
   "messages":    [ {role, content}, … ],// OpenAI-style; or "prompt"
   "params":      { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
   "urgency":     "waitable",            // urgent | necessary | waitable — a trajectory:
@@ -68,7 +78,7 @@ POST /jobs
 Both addressing forms **fail explicitly** (`422`) at submit time rather than queuing a job
 nothing will ever serve: `task_class`/`min_ability` when no artifact clears the ability bar
 (model-evaluation.md), `min_tps` when no node serving a qualifying capability has ever
-measured that throughput, and `capability` when the name isn't in the fleet registry — a
+measured that throughput, `requires` when no artifact declares the needed capability, and `capability` when the name isn't in the fleet registry — a
 typo'd capability would otherwise sit on a stream no worker consumes, with no error and no
 expiry short of `deadline`.
 

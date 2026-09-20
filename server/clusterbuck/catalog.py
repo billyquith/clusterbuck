@@ -54,6 +54,13 @@ SEED_CATALOG = [
     # measured ability, which a not-yet-installed artifact does not have — so these are
     # ordering hints, and a wrong one costs an eval, not a bad route.
     #
+    # The capability fields, by contrast, ARE load-bearing at routing time (ADR 37): they
+    # are hard yes/no facts no ability score can express, and a job requiring one is
+    # refused rather than served by an artifact that does not declare it. `context_tokens`
+    # is the model's published window, not whatever a given server happens to be
+    # configured with — a runtime that was started with a smaller one will error, which is
+    # visible, whereas routing a long document to a model that cannot hold it is not.
+    #
     # Families are deliberately mixed. A catalog drawn from one vendor leaves a fleet with
     # nowhere to go when that line stalls or a tag is pulled.
     #
@@ -63,40 +70,60 @@ SEED_CATALOG = [
     # A sub-1B entry matters on RAM-tight nodes, where nothing larger fits at all.
     {"artifact": "qwen3:0.6b", "family": "qwen3", "params_b": 0.6, "quant": "Q4_K_M",
      "size_gb": 0.5, "min_ram_gb": 2.0, "source": "ollama", "registry_ref": "qwen3:0.6b",
-     "expected_ability": 2.5},
+     "expected_ability": 2.5,
+     "context_tokens": 32768, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
     # The example fleet in fleet.yaml serves this one; keeping it in the catalog is what
     # lets reeval and reclaim reason about it.
     {"artifact": "llama3.2:3b", "family": "llama3.2", "params_b": 3.0, "quant": "Q4_K_M",
      "size_gb": 2.0, "min_ram_gb": 8.0, "source": "ollama", "registry_ref": "llama3.2:3b",
-     "expected_ability": 4.0},
+     "expected_ability": 4.0,
+     "context_tokens": 131072, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
     {"artifact": "gemma3:4b", "family": "gemma3", "params_b": 4.0, "quant": "Q4_K_M",
      "size_gb": 3.3, "min_ram_gb": 8.0, "source": "ollama", "registry_ref": "gemma3:4b",
-     "expected_ability": 4.5},
+     "expected_ability": 4.5,
+     "context_tokens": 131072, "supports_tools": False,
+     "supports_json_schema": True, "supports_vision": True},
     {"artifact": "qwen3:8b", "family": "qwen3", "params_b": 8.0, "quant": "Q4_K_M",
      "size_gb": 5.2, "min_ram_gb": 16.0, "source": "ollama", "registry_ref": "qwen3:8b",
-     "expected_ability": 5.5},
+     "expected_ability": 5.5,
+     "context_tokens": 131072, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
     {"artifact": "qwen3:14b", "family": "qwen3", "params_b": 14.0, "quant": "Q4_K_M",
      "size_gb": 9.3, "min_ram_gb": 24.0, "source": "ollama", "registry_ref": "qwen3:14b",
-     "expected_ability": 6.5},
+     "expected_ability": 6.5,
+     "context_tokens": 131072, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
     {"artifact": "mistral-small3.2:24b", "family": "mistral-small3.2", "params_b": 24.0,
      "quant": "Q4_K_M", "size_gb": 15.2, "min_ram_gb": 32.0, "source": "ollama",
-     "registry_ref": "mistral-small3.2:24b", "expected_ability": 6.8},
+     "registry_ref": "mistral-small3.2:24b", "expected_ability": 6.8,
+     "context_tokens": 131072, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": True},
     # Mixture-of-experts: 30B total, ~3B active per token. On a node whose accelerator
     # cannot hold the whole model, cost per token tracks the ACTIVE parameters, so this
     # stays usable where a dense 30B does not. The fits gate cannot see that — it has no
     # VRAM concept at all — so the distinction lives here, in the ranking.
     {"artifact": "qwen3:30b-a3b", "family": "qwen3", "params_b": 30.0, "quant": "Q4_K_M",
      "size_gb": 18.6, "min_ram_gb": 40.0, "source": "ollama",
-     "registry_ref": "qwen3:30b-a3b", "expected_ability": 7.0},
+     "registry_ref": "qwen3:30b-a3b", "expected_ability": 7.0,
+     "context_tokens": 131072, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
     {"artifact": "qwen2.5:32b", "family": "qwen2.5", "params_b": 32.0, "quant": "Q4_K_M",
      "size_gb": 20.0, "min_ram_gb": 48.0, "source": "ollama", "registry_ref": "qwen2.5:32b",
-     "expected_ability": 7.0},
+     "expected_ability": 7.0,
+     "context_tokens": 32768, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
     {"artifact": "llama3.1:70b", "family": "llama3.1", "params_b": 70.0, "quant": "Q4_K_M",
      "size_gb": 40.0, "min_ram_gb": 64.0, "source": "ollama", "registry_ref": "llama3.1:70b",
-     "expected_ability": 8.0},
+     "expected_ability": 8.0,
+     "context_tokens": 131072, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
     {"artifact": "llama3.3:70b", "family": "llama3.3", "params_b": 70.0, "quant": "Q4_K_M",
      "size_gb": 42.5, "min_ram_gb": 64.0, "source": "ollama", "registry_ref": "llama3.3:70b",
-     "expected_ability": 8.2},
+     "expected_ability": 8.2,
+     "context_tokens": 131072, "supports_tools": True,
+     "supports_json_schema": True, "supports_vision": False},
 ]
 
 

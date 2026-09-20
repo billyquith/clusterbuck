@@ -35,6 +35,13 @@ A capability with no measurement at all is NOT excluded. A fresh fleet has finis
 and treating "unknown" as "too slow" would make every speed-sensitive request fail on a
 healthy new install. The worker checks again before answering, so an unknown node that turns
 out to be too slow refuses the job rather than under-serving it.
+
+**`requires` is a hard filter, applied before ability is compared** (ADR 37). Context window,
+tool calling, schema-constrained output and vision are not quality questions — they have no
+good/bad axis and no 1-10 score can express them. An artifact that does not declare a needed
+feature is excluded; unlike speed, unknown here reads as "no", because serving a job that
+needs tool calling on an unchecked model fails somewhere downstream where it looks like a
+model bug rather than a routing one.
 """
 
 from __future__ import annotations
@@ -102,6 +109,48 @@ def _cloud_gate(
     return None
 
 
+# Requirement name → the attribute holding it, on a catalog row or a capability spec.
+_FEATURE_FIELDS = {
+    "context_tokens": "context_tokens",
+    "tools": "supports_tools",
+    "json_schema": "supports_json_schema",
+    "vision": "supports_vision",
+}
+
+
+def _unmet_requirement(store: Store, artifact: str, spec, requires) -> str | None:
+    """Which required capability this artifact does not provide, or None.
+
+    Features come from the model catalog, which is the coordinator's record of what it
+    knows about artifacts. A provider account has no host and never enters that catalog, so
+    it declares its own on the capability — disjoint sets, never in conflict.
+
+    An artifact that does not DECLARE a feature is treated as not having it. That is the
+    conservative reading, and it is the right one: the alternative is serving a job that
+    needs tool calling on a model nobody has checked, which fails somewhere further down
+    where it looks like a model bug rather than a routing one. The refusal names the
+    artifact, so the fix is to curate it.
+    """
+    if requires is None:
+        return None
+    row = store.catalog_entry(artifact)
+    for name, field in _FEATURE_FIELDS.items():
+        needed = getattr(requires, name, None)
+        if not needed:
+            continue
+        have = getattr(row, field, None) if row is not None else None
+        if have is None:
+            have = getattr(spec, field, None)
+        if have is None:
+            return f"{artifact} does not declare {name}"
+        if name == "context_tokens":
+            if have < needed:
+                return f"{artifact} holds {have} tokens, needs {needed}"
+        elif not have:
+            return f"{artifact} does not support {name}"
+    return None
+
+
 def _too_slow(store: Store, capability: str, min_tps: float | None,
               cloud: bool) -> tuple[bool, float | None]:
     """(excluded, measured) for a capability against a throughput floor.
@@ -126,6 +175,7 @@ def resolve(
     task_class: str | None,
     min_ability: int | None,
     min_tps: float | None = None,
+    requires=None,
     privacy: str = "local_only",
     urgency: str = "waitable",
     cloud_budget_monthly: float | None = None,
@@ -159,6 +209,10 @@ def resolve(
             raise NoCapableArtifact(
                 f"capability {capability!r} is cloud-backed and excluded: {excluded}"
             )
+        unmet = _unmet_requirement(store, spec.model, spec, requires)
+        if unmet is not None:
+            raise NoCapableArtifact(f"capability {capability!r} cannot meet the job's "
+                                    f"requirements: {unmet}")
         slow, measured = _too_slow(store, capability, min_tps, spec.cloud)
         if slow:
             raise NoCapableArtifact(
@@ -183,6 +237,7 @@ def resolve(
     excluded_by_privacy = 0
     excluded_by_budget = 0
     excluded_by_speed = 0
+    unmet_requirements: list[str] = []
     best_available: float | None = None
     fastest_seen: float | None = None
     for cap, spec in fleet.capabilities.items():
@@ -192,6 +247,10 @@ def resolve(
                 excluded_by_privacy += 1
             elif excluded != "urgency=waitable never uses cloud":
                 excluded_by_budget += 1
+            continue
+        unmet = _unmet_requirement(store, spec.model, spec, requires)
+        if unmet is not None:
+            unmet_requirements.append(unmet)
             continue
         score = store.get_ability(spec.model, task_class, scale_version)
         if score is None:
@@ -226,6 +285,10 @@ def resolve(
         detail += f"; {excluded_by_privacy} cloud artifact(s) excluded by privacy=local_only"
     if excluded_by_budget:
         detail += f"; {excluded_by_budget} cloud artifact(s) excluded by budget ({budget.reason})"
+    if unmet_requirements:
+        # Listed rather than counted: "which model was missing what" is the whole content
+        # of this failure, and it names exactly which catalog entries to curate.
+        detail += "; requirements unmet by " + ", ".join(sorted(set(unmet_requirements)))
     if excluded_by_speed:
         # Named separately from the ability miss: "your fleet is not good enough" and "your
         # fleet is not fast enough" call for completely different fixes, and a caller told

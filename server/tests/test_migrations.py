@@ -45,7 +45,7 @@ from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
 # The current Alembic head. Pinned deliberately rather than derived from the migration
 # scripts: deriving it from the machinery under test would let "nobody thought about the
 # legacy path" pass silently. Bump this in the same commit as a new migration.
-_HEAD = "0007"
+_HEAD = "0008"
 
 
 def _affinity(decl_type: str) -> str:

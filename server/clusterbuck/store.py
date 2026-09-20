@@ -596,25 +596,24 @@ class Store:
     def upsert_catalog(self, *, artifact: str, family: str | None, params_b: float | None,
                        quant: str | None, size_gb: float, min_ram_gb: float, source: str,
                        registry_ref: str, expected_ability: float | None,
-                       added_at: str) -> None:
+                       added_at: str, context_tokens: int | None = None,
+                       supports_tools: bool | None = None,
+                       supports_json_schema: bool | None = None,
+                       supports_vision: bool | None = None) -> None:
+        fields = dict(
+            family=family, params_b=params_b, quant=quant, size_gb=size_gb,
+            min_ram_gb=min_ram_gb, source=source, registry_ref=registry_ref,
+            expected_ability=expected_ability, context_tokens=context_tokens,
+            supports_tools=supports_tools, supports_json_schema=supports_json_schema,
+            supports_vision=supports_vision,
+        )
         with self._session() as s:
             row = s.get(CatalogEntry, artifact)
             if row is None:
-                row = CatalogEntry(
-                    artifact=artifact, family=family, params_b=params_b, quant=quant,
-                    size_gb=size_gb, min_ram_gb=min_ram_gb, source=source,
-                    registry_ref=registry_ref, expected_ability=expected_ability,
-                    added_at=added_at,
-                )
+                row = CatalogEntry(artifact=artifact, added_at=added_at, **fields)
             else:
-                row.family = family
-                row.params_b = params_b
-                row.quant = quant
-                row.size_gb = size_gb
-                row.min_ram_gb = min_ram_gb
-                row.source = source
-                row.registry_ref = registry_ref
-                row.expected_ability = expected_ability
+                for name, value in fields.items():
+                    setattr(row, name, value)
             s.add(row)
             s.commit()
 
@@ -832,6 +831,10 @@ class Store:
                 "ORDER BY artifact, task_class, generation DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+
+    def catalog_entry(self, artifact: str) -> CatalogEntry | None:
+        with self._session() as s:
+            return s.get(CatalogEntry, artifact)
 
     def best_tps_for(self, capability: str) -> float | None:
         """Fastest MEASURED throughput among enrolled nodes serving `capability`.

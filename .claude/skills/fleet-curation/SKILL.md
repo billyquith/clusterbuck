@@ -26,13 +26,18 @@ The node registry needs no maintenance. The other two do, and for different reas
 ### The disconnect worth knowing
 
 A worker serves **one model** — whatever `CBK_MODEL` says — across *every* queue it
-consumes. The `model:` field in `fleet.yaml` is used by the sync plane (LiteLLM calls
-`model_server` directly) and for pricing. **Nothing reconciles the two.**
+consumes, while `fleet.yaml`'s `model:` is what decides whether a job clears its ability
+bar. These are still two separate settings, but they are **no longer unreconciled**:
 
-So a node advertising `8b-extract` and `32b-reason` while running a 7B will answer
-`32b-reason` jobs with that 7B, at whatever quality that implies, silently. When you find
-a node serving a tier its model can't honour, the fix is either a model that fits the tier
-or narrowing the node with `CBK_CAPABILITIES`.
+- The coordinator **pins** the artifact it selected onto the job, and a worker that does
+  not have it returns a `failed` result naming it — rather than answering with whatever it
+  happens to be running. So the mismatch is now loud instead of silent.
+- `GET /nodes` → `capability_warnings` names every tier a node advertises whose model it
+  has not got, **before** any job hits it.
+
+So a node advertising `8b-extract` and `32b-reason` while running a 7B will now *fail* the
+`32b-reason` jobs rather than answering them badly. The fix is unchanged: a model that fits
+the tier, or narrowing the node with `CBK_CAPABILITIES`.
 
 ## Which thing do I touch?
 
@@ -41,6 +46,8 @@ or narrowing the node with `CBK_CAPABILITIES`.
 | Let the fleet propose a newer model | catalog: `POST /catalog` | run the planner |
 | Define a new tier, or change what one serves | `server/fleet.yaml` | restart the coordinator |
 | Stop a node serving a tier it can't honour | `CBK_CAPABILITIES` in its `worker.env` | restart the worker |
+| Find which nodes serve a tier they can't honour | nothing — `GET /nodes` reports it | fix the model or the tier list |
+| Let a job demand tools / a big context / vision | catalog: `POST /catalog` capability fields | clients pass `requires` |
 | Re-measure a model whose behaviour changed | `POST /ability/clear?artifact=…` | the harness picks it up |
 | Give a node's disk back | let `reclaim` propose it | approve it |
 
@@ -69,7 +76,11 @@ curl -s -X POST -H "X-CBK-Api-Key: $CBK_API_KEY" \
   "family": "<family>",
   "params_b": 14.0,
   "quant": "Q4_K_M",
-  "expected_ability": 6.5
+  "expected_ability": 6.5,
+  "context_tokens": 131072,
+  "supports_tools": true,
+  "supports_json_schema": true,
+  "supports_vision": false
 }'
 ```
 
@@ -80,6 +91,15 @@ decide whether a candidate fits the node's RAM and the owner's disk quota. Guess
 and the model is silently never proposed anywhere; guess them low and you propose a
 multi-GB pull onto a machine that can't run it. Get them from the model's actual quantised
 size, not from the parameter count.
+
+**The capability fields ARE load-bearing at routing time** (ADR 37), unlike
+`expected_ability` below. `context_tokens`, `supports_tools`, `supports_json_schema` and
+`supports_vision` say what a model CAN DO rather than how well — a window has a hard edge
+and tool calling is a boolean, and no 1–10 score can express either. A job carrying
+`requires` is filtered on them *before* ability is compared. Leaving one null is not
+"false", it is "not curated": the artifact is excluded from any job needing that feature,
+and the 422 names it, so the fix is a re-POST. Get `context_tokens` from the model's
+published window, not from the runtime's current setting.
 
 **`expected_ability` is a ranking hint, not a score.** It orders candidates for the
 planner. It never routes anything. Routing uses *measured* ability (ADR 15), which a
@@ -158,7 +178,17 @@ heartbeats are green, `fitness: ok`. Work through it in this order:
 3. **Has the artifact been measured?** `GET /ability`. Need-shaped routing
    (`task_class` + `min_ability`) can't select an unscored artifact. `GET /eval` shows what's
    still pending; `POST /eval/run` forces a pass.
-4. **Is the node paused, or below its presence ladder?** `GET /nodes`.
+4. **Does the node serve a tier whose model it hasn't got?** `GET /nodes` →
+   `capability_warnings`. The registry's `model:` is what clears a job's ability bar, and the
+   coordinator now pins it on the job — so a node advertising a tier it cannot serve FAILS
+   those jobs with a reason rather than answering with whatever it is running. Fix it with a
+   model that fits the tier, or a narrower `CBK_CAPABILITIES`.
+5. **Are the artifact's capabilities curated?** `GET /catalog`. A job carrying `requires`
+   (context window, tools, JSON schema, vision) skips any artifact that does not *declare*
+   the feature, whether or not it has it.
+6. **Is the node paused, or below its presence ladder?** `GET /nodes`. Note the enrolment
+   proposal only serves the FIRST tier while the owner is `active` — a multi-tier node
+   leaves its other tiers unconsumed until it goes `away`.
 
 ## Keep it domain-agnostic
 

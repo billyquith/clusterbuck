@@ -332,3 +332,19 @@ def test_a_client_cannot_pin_its_way_past_the_ability_floor(client, redis_url):
     job = _queued_job(redis_url)
     assert job["params"]["model"] == "llama3.2:3b", "client pin overrode the router"
     assert job["params"]["temperature"] == 0.1, "other params must still pass through"
+
+
+def test_a_job_requiring_an_unservable_feature_is_refused_at_submit(client):
+    """`requires` is hard yes/no facts about what a model CAN DO. Nothing in the seed fleet
+    is curated for vision, so the job fails at the API rather than being queued for a model
+    that will error on the image — or worse, quietly drop it."""
+    r = _submit(client, capability=None, task_class="summarize", min_ability=4,
+                requires={"vision": True})
+    assert r.status_code == 422
+    assert "requirement" in r.json()["detail"].lower()
+
+
+def test_a_job_whose_requirements_are_met_still_routes(client, redis_url):
+    r = _submit(client, capability=None, task_class="summarize", min_ability=4,
+                requires={"tools": True, "context_tokens": 8000})
+    assert r.status_code == 202, r.text

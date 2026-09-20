@@ -299,3 +299,83 @@ def test_explicit_addressing_is_checked_for_speed_too(seeded_with_nodes):
     with pytest.raises(NoCapableArtifact, match="below the requested"):
         resolve_capability(_fleet(), seeded_with_nodes, capability="8b-extract",
                            task_class=None, min_ability=None, min_tps=20)
+
+
+# --- requirements: what a model CAN DO, which no 1-10 score can express -----------------
+
+def _requires(**kw):
+    from clusterbuck.models import Requirements
+    return Requirements(**kw)
+
+
+@pytest.fixture()
+def curated(seeded, tmp_path):
+    """Ability seeds plus a catalog: the 3B has a huge window and no vision, the 32B a
+    small window, the 70B neither curated."""
+    seeded.upsert_catalog(artifact="llama3.2:3b", family=None, params_b=None, quant=None,
+                          size_gb=2, min_ram_gb=8, source="ollama",
+                          registry_ref="llama3.2:3b", expected_ability=4.0, added_at="t",
+                          context_tokens=131072, supports_tools=True,
+                          supports_json_schema=True, supports_vision=False)
+    seeded.upsert_catalog(artifact="qwen2.5:32b", family=None, params_b=None, quant=None,
+                          size_gb=20, min_ram_gb=48, source="ollama",
+                          registry_ref="qwen2.5:32b", expected_ability=7.0, added_at="t",
+                          context_tokens=32768, supports_tools=True,
+                          supports_json_schema=True, supports_vision=False)
+    return seeded
+
+
+def test_a_context_window_too_small_excludes_the_artifact(curated):
+    """A 32k model and a 128k one can both be 'a 6 at summarize'. Sending a 60k document
+    to the first silently truncates it, and no ability score can see the difference."""
+    got = resolve_capability(_fleet(), curated, capability=None, task_class="summarize",
+                             min_ability=4, requires=_requires(context_tokens=60000))
+    assert got == "8b-extract", "picked a tier whose model cannot hold the prompt"
+
+
+def test_a_feature_nothing_declares_fails_explicitly(curated):
+    """Vision is a yes/no fact, so 'nearly' is not an option. Serving it on a text-only
+    model would fail at the model server, where it looks like a model bug."""
+    with pytest.raises(NoCapableArtifact, match="requirements unmet"):
+        resolve_capability(_fleet(), curated, capability=None, task_class="summarize",
+                           min_ability=4, requires=_requires(vision=True))
+
+
+def test_an_uncurated_artifact_is_excluded_and_named(curated):
+    """The 70B has no catalog row. Excluding it is the conservative reading, and the
+    message has to say WHICH artifact to curate or the operator cannot act on it."""
+    with pytest.raises(NoCapableArtifact, match="llama3.1:70b does not declare"):
+        resolve_capability(_fleet(), curated, capability=None, task_class="summarize",
+                           min_ability=7, requires=_requires(tools=True))
+
+
+def test_requirements_are_filtered_before_ability_is_compared(curated):
+    """A capable-but-unsuitable artifact must not win on ability. Order matters: filter
+    on what a model CAN do, then compare how WELL it does it."""
+    got = resolve_capability(_fleet(), curated, capability=None, task_class="summarize",
+                             min_ability=4, requires=_requires(context_tokens=100000))
+    assert got == "8b-extract"   # the 32B scores higher but holds only 32k
+
+
+def test_no_requirements_means_no_filtering(curated):
+    assert resolve_capability(_fleet(), curated, capability=None, task_class="summarize",
+                              min_ability=4, requires=None) == "8b-extract"
+
+
+def test_explicit_addressing_is_checked_for_requirements_too(curated):
+    with pytest.raises(NoCapableArtifact, match="cannot meet the job's requirements"):
+        resolve_capability(_fleet(), curated, capability="32b-reason", task_class=None,
+                           min_ability=None, requires=_requires(context_tokens=100000))
+
+
+def test_a_provider_account_declares_its_own_features(seeded):
+    """A cloud artifact has no host and never enters the catalog, so fleet.yaml is where
+    its capabilities live. Without that it could never serve a job requiring one."""
+    f = _fleet()
+    f.capabilities["frontier"] = CapabilitySpec(
+        model="anthropic/x", cloud=True, context_tokens=200000, supports_vision=True)
+    seeded.set_ability(artifact="anthropic/x", task_class="summarize", score=7.0,
+                       scale_version=SCALE_VERSION, updated_at="t")
+    assert resolve_capability(f, seeded, capability=None, task_class="summarize",
+                              min_ability=7, privacy="cloud_ok", urgency="necessary",
+                              requires=_requires(vision=True)) == "frontier"
