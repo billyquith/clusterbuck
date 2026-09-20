@@ -388,6 +388,43 @@ POST /nodes/enroll
         "proposed": { "capabilities": [...], "ladder": {...} } }  // owner confirms/edits
 ```
 
+**Bootstrap** (optional, opt-in) — one command joins a machine without the operator key:
+
+```
+POST /nodes/bootstrap
+X-CBK-Join-Password: …
+→ 201 { "join_token": "…",        // single-use; feeds POST /nodes/enroll below
+        "redis_url":  "…",        // the broker, credential included
+        "consumer_group": "…",
+        "capabilities": [ … ] }   // what the registry knows, for the caller to check
+
+GET /worker/artifact              // same header; the blessed cbk.pyz
+```
+
+The point is that **the operator key never leaves the coordinator**. A worker has no
+business holding it — it mints join tokens, approves model installs and deletes models
+(ADR 26) — so a joining machine presents a join password once and receives a single-use
+token plus the broker URL, then enrolls normally and thereafter authenticates with its own
+per-node key. `install/worker/join.py` drives this.
+
+Notes that matter:
+
+- **`CBK_JOIN_PASSWORD` unset ⇒ both routes 404**, so no surface is added by default. 404
+  rather than 401 so a coordinator that has not opted in does not advertise the feature.
+- These two are **exempt from the operator-key middleware** — they must be, since the
+  caller has no key. So the join password is the *only* thing in front of the broker
+  credential. It is therefore required to be at least 16 characters; a shorter value leaves
+  the routes disabled (and logs why) rather than weakly guarding Redis — failing closed on
+  the feature, not on the service.
+- The password is validated **before** a token is minted, so failed guesses cannot grow the
+  token table.
+- `/worker/artifact` is gated too, even though the artifact is public Apache-2.0 code. Not
+  a claim of secrecy: the caller holds the password anyway, so gating costs nothing and
+  keeps one invariant — the coordinator serves files to no unauthenticated caller.
+- `capabilities` is returned so the caller can warn when a node is about to serve a tier
+  the registry does not contain. That is the failure mode where enrolment succeeds,
+  heartbeats report `fitness: ok`, and no job ever routes.
+
 Heartbeat (periodic; also the poll point for updates):
 
 ```

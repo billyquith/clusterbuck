@@ -14,10 +14,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import install_auth
+from .auth import install_auth, key_matches
 from .background import coordinator_loop
 from .catalog import (
     apply_action_result,
@@ -28,7 +28,7 @@ from .catalog import (
     seed_catalog,
 )
 from .cloud_executor import CloudExecutor, cloud_capabilities
-from .config import settings
+from .config import JOIN_PASSWORD_MIN_LEN, settings
 from .coordinator import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import SCALE_VERSION, TASK_CLASSES, seed_ability
@@ -191,6 +191,8 @@ def create_app(
     update_signing_key: str | None = None,
     update_release: str | None = None,
     api_key: str | None = None,
+    join_password: str | None = None,
+    worker_artifact: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -863,6 +865,97 @@ def create_app(
         return _reservation_view(app.state.store.get_reservation(rsv_id))
 
     # --- dynamic registry: enrollment + heartbeat (protocols.md §6) ---
+
+    def _bootstrap_password() -> str | None:
+        """The configured join password, or None if bootstrap must stay disabled.
+
+        Fails closed on the FEATURE, not on the service: a too-short password leaves the
+        routes 404 and logs why, rather than refusing to start the coordinator (which
+        would turn a weak env var into an outage on the next restart).
+        """
+        pw = join_password if join_password is not None else settings.join_password
+        if not pw:
+            return None
+        if len(pw) < JOIN_PASSWORD_MIN_LEN:
+            _log.warning(
+                "CBK_JOIN_PASSWORD is shorter than %d characters — worker bootstrap is "
+                "DISABLED. It guards the broker credential, so a guessable value would be "
+                "equivalent to publishing that credential on the LAN.",
+                JOIN_PASSWORD_MIN_LEN,
+            )
+            return None
+        return pw
+
+    def _require_join_password(presented: str | None) -> None:
+        """Gate for the two bootstrap routes. 404 when unconfigured, 401 when wrong.
+
+        404 rather than 401 for the unconfigured case so a coordinator that has not opted
+        in does not advertise that the feature exists.
+        """
+        configured = _bootstrap_password()
+        if configured is None:
+            raise HTTPException(status_code=404, detail="worker bootstrap is not configured")
+        if not key_matches(presented, configured):
+            raise HTTPException(status_code=401, detail="missing or invalid join password")
+
+    @app.post("/nodes/bootstrap", status_code=201)
+    async def bootstrap_worker(
+        request: Request,
+        x_cbk_join_password: str | None = Header(default=None),
+    ) -> dict:
+        """Everything a joining machine needs, in exchange for the join password.
+
+        The point of this route is that the OPERATOR KEY NEVER LEAVES THE COORDINATOR. A
+        worker has no business holding it — it mints tokens, approves model installs and
+        deletes models — so a joining machine presents a join password once and gets back
+        a single-use join token plus the broker URL. It then enrolls normally
+        (`POST /nodes/enroll`) and thereafter authenticates with its own per-node key.
+
+        `capabilities` is what the coordinator's registry currently knows, so the joining
+        script can warn when a node is about to serve a tier that is not in it — the
+        failure where enrolment succeeds, heartbeats look healthy, and no job ever routes.
+        """
+        _require_join_password(x_cbk_join_password)
+
+        # Validate BEFORE minting: otherwise every failed attempt burns a token row and an
+        # unauthenticated caller can grow the table at will.
+        token = new_join_token()
+        app.state.store.mint_token(token, _now_iso())
+        _log.info("bootstrap: issued a join token to %s",
+                  request.client.host if request.client else "?")
+
+        fleet = app.state.fleet
+        return {
+            "join_token": token,
+            # The URL this coordinator is actually using, not the module default — a
+            # worker given the wrong broker would enrol fine and then never see a job.
+            "redis_url": redis_url or settings.redis_url,
+            "consumer_group": settings.consumer_group,
+            "capabilities": sorted(fleet.capabilities) if fleet else [],
+        }
+
+    @app.get("/worker/artifact")
+    async def serve_worker_artifact(
+        x_cbk_join_password: str | None = Header(default=None),
+    ) -> FileResponse:
+        """The blessed `cbk.pyz`, so every node runs the same build.
+
+        Behind the join password even though the artifact is not secret — it is public
+        Apache-2.0 code. That is not a claim of secrecy: the joining script holds the
+        password anyway, so gating costs nothing, and it keeps the invariant simple —
+        this coordinator serves files to no unauthenticated caller. Do not "fix" this to
+        open on the grounds that the code is public.
+        """
+        _require_join_password(x_cbk_join_password)
+        path = (worker_artifact if worker_artifact is not None
+                else settings.worker_artifact)
+        if not path or not Path(path).is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="no worker artifact configured (set CBK_WORKER_ARTIFACT)",
+            )
+        return FileResponse(path, media_type="application/octet-stream",
+                            filename="cbk.pyz")
 
     @app.post("/nodes/tokens", status_code=201)
     async def mint_join_token() -> dict:

@@ -997,6 +997,16 @@ class Store:
             s.add(JoinToken(token=token, created_at=created_at))
             s.commit()
 
+    def unused_token_count(self) -> int:
+        """Join tokens minted but not yet burned.
+
+        Exists so the bootstrap route's token hygiene is assertable: validating the join
+        password BEFORE minting is what stops an unauthenticated caller growing this table
+        with failed guesses.
+        """
+        with self._session() as s:
+            return len(list(s.exec(select(JoinToken).where(JoinToken.used == 0))))
+
     def claim_token(self, token: str, used_by: str) -> bool:
         """Atomically burn a one-time join token. True only on the first claim."""
         with self._session() as s:

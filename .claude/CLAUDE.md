@@ -144,6 +144,13 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
                               #   /static/*, /nodes/enroll (join token), heartbeat (node key).
                               #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
                               #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY,
+                              #    CBK_JOIN_PASSWORD + CBK_WORKER_ARTIFACT — opt-in
+                              #    worker bootstrap (install/worker/join.py): a joining
+                              #    machine trades one password for a single-use join
+                              #    token + the broker URL, so the operator key never
+                              #    leaves the coordinator. Unset ⇒ both routes 404; a
+                              #    password under 16 chars leaves them disabled, since
+                              #    it would be guarding the Redis credential,
                               #    CBK_URGENT_STREAMS (auto|on|off — auto tiers a
                               #    capability only once every node enrolled for it
                               #    reports an urgent stream on its heartbeat, so a
@@ -177,6 +184,7 @@ bash deploy/e2e/escalation.sh     # M2a: waitable job escalates to necessary (no
 bash deploy/e2e/reservation.sh    # M2b: reservation confirmed → warming → open (reconciler)
 bash deploy/e2e/usage.sh          # M3a: completed job metered; avoided-cloud-spend > 0
 bash deploy/e2e/enroll.sh         # M4b: enroll → registry → heartbeat → pause
+bash deploy/e2e/join.sh           # one password joins a node; operator key stays home
 bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} routing
 bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not config
 bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval

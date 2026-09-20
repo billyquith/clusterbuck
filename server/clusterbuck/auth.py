@@ -38,6 +38,14 @@ HEADER_NAME = "x-cbk-api-key"
 def _is_exempt(path: str) -> bool:
     if path in ("/healthz", "/nodes/enroll"):
         return True
+    # Worker bootstrap: a joining machine has no operator key, by design — that key never
+    # leaves the coordinator. These two carry their own credential (CBK_JOIN_PASSWORD) and
+    # are 404 unless it is configured, so exempting them adds no surface by default.
+    #
+    # Load-bearing: the operator-key middleware does NOT protect these, so the join
+    # password is the only thing in front of the broker URL that /nodes/bootstrap returns.
+    if path in ("/nodes/bootstrap", "/worker/artifact"):
+        return True
     if path.startswith("/static/"):
         return True
     # A node's own heartbeat is authenticated by its node_key, not the shared secret.

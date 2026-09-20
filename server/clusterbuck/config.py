@@ -32,6 +32,17 @@ class Settings:
         if os.environ.get("CBK_MAX_QUEUE_AGE_S")
         else None
     )
+    # Worker bootstrap (`install/worker/join.py`). A joining machine has no operator key —
+    # it presents this password once and receives a one-time join token plus the broker
+    # URL. UNSET ⇒ the bootstrap routes 404, so no surface is added by default.
+    #
+    # This password guards the REDIS CREDENTIAL, so it is as strong as the broker. A value
+    # shorter than JOIN_PASSWORD_MIN_LEN leaves the routes disabled rather than weakly
+    # protected — fail closed on the feature, not on the service (see api.bootstrap_ready).
+    join_password: str | None = os.environ.get("CBK_JOIN_PASSWORD") or None
+    # Path to the built `cbk.pyz` the coordinator hands to joining workers, so every node
+    # runs one blessed build rather than whatever its own checkout produced. Unset ⇒ 404.
+    worker_artifact: str | None = os.environ.get("CBK_WORKER_ARTIFACT") or None
     # Urgency-tiered streams (ADR 34). `auto` tiers a capability only once every node
     # enrolled for it demonstrably reads the urgent stream (it says so in the `queues` it
     # heartbeats), because a worker that predates tiering reads only the base stream and an
@@ -90,3 +101,8 @@ class Settings:
 
 
 settings = Settings()
+
+
+# Minimum length for CBK_JOIN_PASSWORD. It stands in front of the broker credential, so a
+# guessable value is equivalent to publishing that credential on the LAN.
+JOIN_PASSWORD_MIN_LEN = 16
