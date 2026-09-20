@@ -1179,6 +1179,10 @@ def create_app(
                 "node_id": n.node_id, "hostname": n.hostname,
                 "os": n.os, "arch": n.arch, "profile": n.profile,
                 "ram_gb": n.ram_gb, "accelerator": n.accelerator,
+                # VRAM, not RAM, is what decides whether a model runs at device speed.
+                # null on a CPU node, or where it could not be measured — which is NOT the
+                # same as zero, and the fits gate treats the two differently.
+                "vram_gb": n.vram_gb,
                 # MEASURED on this machine from real jobs (heartbeat `stats.tps`), not
                 # probed and not declared. Ability scores an artifact; this scores the
                 # pairing — the same model is identical on ability and nothing alike in

@@ -34,6 +34,7 @@ def _node(**over) -> Node:
     care about without an enroll_node() round trip."""
     base = {
         "node_id": "node-a", "node_key": "k", "profile": "shared", "ram_gb": 64.0,
+        "vram_gb": None,
         "disk_quota_gb": None, "auto_approve": 0, "installed": json.dumps(["llama3.2:3b"]),
         "enrolled_at": "t",
     }
@@ -62,20 +63,75 @@ def _mid(store):
 
 def test_fits_rejects_insufficient_ram(store):
     big = _largest(store)
-    ok, why = fits(big, _node(ram_gb=big.min_ram_gb - 1), quota_gb=500)
-    assert not ok and "RAM" in why
+    verdict, why = fits(big, _node(ram_gb=big.min_ram_gb - 1), quota_gb=500)
+    assert verdict == "no" and "RAM" in why
 
 
 def test_fits_rejects_over_quota(store):
     big = _largest(store)
-    ok, why = fits(big, _node(ram_gb=big.min_ram_gb * 2), quota_gb=big.size_gb / 2)
-    assert not ok and "quota" in why
+    verdict, why = fits(big, _node(ram_gb=big.min_ram_gb * 2), quota_gb=big.size_gb / 2)
+    assert verdict == "no" and "quota" in why
 
 
 def test_fits_accepts_when_within_both(store):
     row = _mid(store)
-    ok, _ = fits(row, _node(ram_gb=row.min_ram_gb), quota_gb=row.size_gb)
-    assert ok
+    verdict, _ = fits(row, _node(ram_gb=row.min_ram_gb), quota_gb=row.size_gb)
+    assert verdict == "ok"
+
+
+# --- gate 1b: VRAM tells "runs" from "runs well" ----------------------------
+
+def test_a_node_without_a_measurable_accelerator_is_ok_not_degraded(store):
+    """A CPU node running from RAM is not degraded — that is simply its speed. Calling it
+    degraded would put a slowness warning on every proposal in a CPU-only fleet."""
+    row = _mid(store)
+    verdict, _ = fits(row, _node(ram_gb=row.min_ram_gb, vram_gb=None), quota_gb=500)
+    assert verdict == "ok"
+
+
+def test_a_model_that_fits_the_accelerator_is_fast(store):
+    row = _mid(store)
+    verdict, why = fits(row, _node(ram_gb=row.min_ram_gb, vram_gb=row.size_gb * 4),
+                        quota_gb=500)
+    assert verdict == "fast" and "VRAM" in why
+
+
+def test_a_model_that_overflows_the_accelerator_is_degraded_not_rejected(store):
+    """The case the old boolean gate could not see: a workstation with plenty of RAM and a
+    small card. It runs — spilling layers across the bus every token — so it is offered,
+    but never as though it were equivalent to one that fits."""
+    row = _mid(store)
+    verdict, why = fits(row, _node(ram_gb=row.min_ram_gb * 4, vram_gb=row.size_gb / 4),
+                        quota_gb=500)
+    assert verdict == "degraded"
+    assert "slower" in why
+
+
+def test_a_model_the_same_size_as_the_card_does_not_fit_it(store):
+    """Weights are not the whole footprint — the KV cache and runtime buffers share that
+    memory, so exact equality is an overflow, not a fit."""
+    row = _mid(store)
+    verdict, _ = fits(row, _node(ram_gb=500, vram_gb=row.size_gb), quota_gb=500)
+    assert verdict == "degraded"
+
+
+def test_degraded_proposals_carry_the_warning_and_still_need_a_human(store):
+    """`auto_approve` is consent to routine upgrades, not to spending a multi-GB download
+    on something that will then crawl."""
+    node = _node(ram_gb=512.0, vram_gb=1.0, auto_approve=1, disk_quota_gb=500.0)
+    scan_node(store, node, now="t")
+    upgrades = [p for p in store.list_proposals() if p.kind == "upgrade"]
+    assert upgrades, "nothing proposed at all"
+    for prop in upgrades:
+        assert prop.status == "pending", "auto-approved a model that will spill"
+        assert prop.rationale.startswith("WILL RUN SLOWLY:")
+
+
+def test_fitting_proposals_still_honour_auto_approve(store):
+    node = _node(ram_gb=512.0, vram_gb=512.0, auto_approve=1, disk_quota_gb=500.0)
+    scan_node(store, node, now="t")
+    upgrades = [p for p in store.list_proposals() if p.kind == "upgrade"]
+    assert upgrades and all(p.status == "approved" for p in upgrades)
 
 
 # --- gate 2: the upgrade proposal -------------------------------------------

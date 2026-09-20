@@ -115,14 +115,49 @@ def quota_for(profile: str | None, explicit: float | None) -> float:
     return PROFILE_DISK_QUOTA_GB.get(profile or "shared", 50.0)
 
 
-def fits(candidate, node, quota_gb: float) -> tuple[bool, str]:
-    """Gate 1: hardware + the owner's disk contract."""
+# Weights are not the whole footprint: the KV cache, activations and the runtime's own
+# buffers have to live in the same memory. A model whose file exactly equals the card's
+# capacity does not fit in it. This headroom is deliberately modest — it decides only
+# whether a candidate is proposed as FAST or as one that will spill, never whether it is
+# proposed at all.
+VRAM_HEADROOM = 1.2
+
+
+def fits(candidate, node, quota_gb: float) -> tuple[str, str]:
+    """Gate 1: hardware + the owner's disk contract.
+
+    Returns a verdict, not a boolean, because "will it run" and "will it run well" are
+    different questions and only the second one is worth acting on:
+
+    * `"fast"`     — fits in the accelerator's memory; runs at device speed.
+    * `"degraded"` — fits in system RAM but overflows the accelerator, so layers cross the
+      bus every token. It runs, often an order of magnitude slower. Worth proposing only
+      when nothing better exists, and never without saying so.
+    * `"ok"`       — fits in RAM on a node with no accelerator (or none we could measure),
+      which is simply what that node's speed is. Not a degradation.
+    * `"no"`       — does not fit, or breaks the owner's disk contract.
+
+    A boolean could not tell `fast` from `degraded`, so the gate approved a 70B onto a
+    workstation with an 8 GB card exactly as readily as onto one that could hold it.
+    """
     ram = node.ram_gb or 0
     if candidate.min_ram_gb > ram:
-        return False, f"needs {candidate.min_ram_gb:g} GB RAM, node has {ram:g}"
+        return "no", f"needs {candidate.min_ram_gb:g} GB RAM, node has {ram:g}"
     if candidate.size_gb > quota_gb:
-        return False, f"{candidate.size_gb:g} GB exceeds {quota_gb:g} GB disk quota"
-    return True, "fits"
+        return "no", f"{candidate.size_gb:g} GB exceeds {quota_gb:g} GB disk quota"
+
+    vram = getattr(node, "vram_gb", None)
+    # None means "no accelerator, or we could not measure one" — NOT zero. Judging such a
+    # node by RAM is right; calling it degraded would libel every CPU node in the fleet.
+    if not vram:
+        return "ok", "fits"
+    needed = candidate.size_gb * VRAM_HEADROOM
+    if needed <= vram:
+        return "fast", f"fits in {vram:g} GB VRAM"
+    return "degraded", (
+        f"{candidate.size_gb:g} GB needs ~{needed:.1f} GB with overhead but the "
+        f"accelerator has {vram:g} GB — it will run from system RAM and be far slower"
+    )
 
 
 def _new_id() -> str:
@@ -145,8 +180,8 @@ def scan_node(store: Store, node, *, now: str, scale_version: str = SCALE_VERSIO
         artifact = cand.artifact
         if artifact in installed:
             continue
-        ok, why = fits(cand, node, quota)
-        if not ok:
+        verdict, why = fits(cand, node, quota)
+        if verdict == "no":
             continue
         hint = cand.expected_ability
         if hint is None:
@@ -168,12 +203,21 @@ def scan_node(store: Store, node, *, now: str, scale_version: str = SCALE_VERSIO
             continue
         gain, task_class, incumbent_best = best_gain
         pid = _new_id()
+        # A candidate that will spill off the accelerator is still worth OFFERING — it may
+        # be the only thing that raises ability on this node — but never silently. The
+        # warning leads the rationale so the human approving sees it before the numbers.
+        warning = "WILL RUN SLOWLY: " if verdict == "degraded" else ""
+        # `auto_approve` is consent to routine upgrades, not to spending a multi-GB
+        # download and the owner's disk on something that will then crawl. That trade is a
+        # judgement call, so it goes to a human even on an opted-in node — the same reason
+        # reclaim is never auto-approved.
+        status = "pending" if verdict == "degraded" else initial_status
         store.insert_proposal(
             id=pid, kind="upgrade", node_id=node_id, artifact=artifact,
-            incumbent=None, task_class=task_class, status=initial_status, created_at=now,
+            incumbent=None, task_class=task_class, status=status, created_at=now,
             rationale=(
-                f"{artifact} ({cand.size_gb:g} GB, needs {cand.min_ram_gb:g} GB RAM) "
-                f"{why}; expected ability {hint:g} for {task_class} vs best installed "
+                f"{warning}{artifact} ({cand.size_gb:g} GB, needs {cand.min_ram_gb:g} GB "
+                f"RAM) {why}; expected ability {hint:g} for {task_class} vs best installed "
                 f"{incumbent_best:g} (+{gain:g}). Ability is re-measured after install."
             ),
         )

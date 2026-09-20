@@ -1,30 +1,13 @@
-"""Addressing resolution: turn a client's *need* into a supply-side capability.
+"""Node capability proposal: turn probed hardware into a proposed tier set.
 
-M0 STUB. The real resolver (model-evaluation.md, ADR 15/16) filters the model catalog
-by measured `ability(artifact, task_class) >= min_ability` and privacy, then prefers
-local → cheapest → fastest. Until the catalog and ability matrix exist, this maps
-`min_ability` onto the seed capability tiers by a crude threshold and ignores
-`task_class`. It exists only so clients can already address by need in M0.
+Addressing resolution used to live here too, as an M0 stub that mapped `min_ability` onto
+the seed tiers by a crude threshold. The real resolver is `routing.resolve_capability`
+(ADR 15/16) and has been since the catalog and ability matrix landed; the stub was
+unreferenced, and two functions of the same name with different semantics is an invitation
+to edit the wrong one.
 """
 
 from __future__ import annotations
-
-
-def resolve_capability(
-    *,
-    capability: str | None,
-    task_class: str | None,
-    min_ability: int | None,
-) -> str:
-    if capability is not None:
-        return capability
-    # Placeholder ladder over the seed tiers. Replaced by the catalog-driven resolver.
-    assert min_ability is not None  # guaranteed by JobSubmit validation
-    if min_ability <= 4:
-        return "8b-extract"
-    if min_ability <= 7:
-        return "32b-reason"
-    return "70b-reason"
 
 
 def propose_capabilities(ram_gb: float) -> tuple[list[str], dict[str, list[str]]]:
