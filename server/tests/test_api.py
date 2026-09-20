@@ -309,15 +309,17 @@ def test_the_resolved_artifact_is_pinned_on_the_job(client, redis_url):
 def test_a_need_shaped_job_is_pinned_to_the_artifact_that_qualified(client, redis_url):
     r = _submit(client, capability=None, task_class="summarize", min_ability=6)
     assert r.status_code == 202
-    # The chosen capability is not echoed in the response, so read every tier's stream.
+    job_id = r.json()["id"]
+    # The chosen capability is not echoed in the response, so read every tier's stream —
+    # then pick out THIS job rather than asserting on whatever else the queues hold.
     conn = redis.from_url(redis_url, decode_responses=True)
     found = [json.loads(e[1]["job"])
              for cap in ("8b-extract", "32b-reason", "70b-reason")
              for e in conn.xrange(stream_key(cap))]
     conn.close()
-    pinned = {j["params"].get("model") for j in found}
+    job = next(j for j in found if j["id"] == job_id)
     # 6 clears the 32B seed (6.5) and the 70B (7.0); local-then-cheapest picks the 32B.
-    assert pinned == {"qwen2.5:32b"}
+    assert job["params"]["model"] == "qwen2.5:32b"
 
 
 def test_a_client_cannot_pin_its_way_past_the_ability_floor(client, redis_url):
