@@ -62,6 +62,26 @@ function Write-Ok    { Write-Host "[cbk] OK  $args" -ForegroundColor Green }
 function Write-Fail  { Write-Host "[cbk] ERROR: $args" -ForegroundColor Red; exit 1 }
 function Write-Warn  { Write-Host "[cbk] WARN: $args" -ForegroundColor Yellow }
 
+# worker.env and the generated wrapper both carry CBK_REDIS_URL, and SYSTEM executes the
+# wrapper at boot. Left at the inherited ACL they are readable by Users and writable by
+# Authenticated Users - which discloses the broker credential to every local account and
+# hands one a way to run code as SYSTEM.
+#
+# Applied on EVERY run, not only the run that creates the file. An install that died
+# between writing a secret and securing it used to leave it exposed, and the
+# "already exists, not overwritten" guard meant no later run ever repaired it.
+function Protect-SecretFile {
+    param([Parameter(Mandatory)][string]$Path)
+    $acl = Get-Acl $Path
+    $acl.SetAccessRuleProtection($true, $false)          # stop inheriting, copy nothing
+    foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+    foreach ($id in @('Administrators', 'SYSTEM')) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $id, 'FullControl', 'Allow'))
+    }
+    Set-Acl -Path $Path -AclObject $acl
+}
+
 # ── prerequisite checks ───────────────────────────────────────────────────────
 Write-Step 'Checking prerequisites'
 
@@ -128,16 +148,11 @@ CBK_MODEL=$Model
 CBK_MODEL_MANAGER=$ModelManager
 CBK_NODE_STATE=$NodeState
 "@ | Set-Content -Path $EnvFile -Encoding UTF8
-    # Restrict to Administrators
-    $acl = Get-Acl $EnvFile
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-        'Administrators', 'FullControl', 'Allow'))
-    Set-Acl $EnvFile $acl
     Write-Ok "worker.env written -> $EnvFile"
 } else {
     Write-Ok 'worker.env already exists (not overwritten — edit manually to change)'
 }
+Protect-SecretFile $EnvFile
 
 # ── Scheduled Task ────────────────────────────────────────────────────────────
 Write-Step 'Scheduled Task'
@@ -158,17 +173,7 @@ $envLines
 python "$CbkBin" work >> "$LogDir\worker.log" 2>&1
 "@ | Set-Content $wrapper -Encoding ASCII
 
-# The wrapper carries every secret worker.env does - CBK_REDIS_URL included - and SYSTEM
-# executes it at boot. Left at the inherited ACL it is readable by Users and WRITABLE by
-# Authenticated Users, which hands any local account both the broker credential and a way
-# to run code as SYSTEM. Lock it down exactly as worker.env is.
-$wacl = Get-Acl $wrapper
-$wacl.SetAccessRuleProtection($true, $false)
-$wacl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-    'Administrators', 'FullControl', 'Allow'))
-$wacl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
-    'SYSTEM', 'FullControl', 'Allow'))
-Set-Acl $wrapper $wacl
+Protect-SecretFile $wrapper
 
 $action   = New-ScheduledTaskAction -Execute 'cmd.exe' `
                 -Argument "/c `"$wrapper`"" -WorkingDirectory $DeployDir
