@@ -1,4 +1,4 @@
-# Join this machine to a clusterbuck fleet as a worker — Windows.
+﻿# Join this machine to a clusterbuck fleet as a worker — Windows.
 #
 #   .\join.ps1 --coordinator http://coordinator.local:8018 --model qwen2.5:7b
 #

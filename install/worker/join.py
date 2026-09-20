@@ -159,6 +159,26 @@ def installer_command(
     ]
 
 
+def installer_env() -> dict[str, str] | None:
+    """Environment for the platform installer.
+
+    `install.ps1` runs under Windows PowerShell 5.1, which autoloads its core modules from
+    PSModulePath. Launch this script from PowerShell 7 and that variable is inherited
+    pointing at PS7's module directories — 5.1 then loads PS7's
+    Microsoft.PowerShell.Security over its own already-registered types, fails with "The
+    member Sddl is already present", and takes Get-Acl down with it. The installer needs
+    Get-Acl to restrict worker.env, which holds the Redis password.
+
+    Dropping the inherited value lets 5.1 compute its own default module path.
+    """
+    if platform.system() != "Windows":
+        return None
+    # dict(os.environ) upper-cases its keys on Windows, so a plain pop("PSModulePath")
+    # silently matches nothing. Drop every spelling.
+    env = {k: v for k, v in os.environ.items() if k.lower() != "psmodulepath"}
+    return env
+
+
 def node_state_path() -> Path:
     return NODE_STATE.get(platform.system().lower(), NODE_STATE_DEFAULT)
 
@@ -271,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     info("handing off to the platform installer (service, config, enrolment)")
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, env=installer_env())
     if result.returncode != 0:
         die(f"the platform installer failed (exit {result.returncode})")
 

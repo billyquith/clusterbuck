@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     clusterbuck worker installer — Windows
@@ -67,7 +67,7 @@ Write-Step 'Checking prerequisites'
 
 $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) { Write-Fail 'Python not found. Install Python 3.11+ from https://python.org' }
-$pyVer = & python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+$pyVer = & python -c 'import platform; print(platform.python_version())'
 if ([version]$pyVer -lt [version]'3.11') { Write-Fail "Python 3.11+ required (found $pyVer)" }
 Write-Ok "Python $pyVer"
 
@@ -150,15 +150,31 @@ $envLines = (Get-Content $EnvFile | Where-Object { $_ -match '^\w' } |
 
 @"
 @echo off
+rem SYSTEM runs this with stdout redirected to a file, so Python falls back to the legacy
+rem ANSI codepage and dies encoding the arrows in the worker's own log lines. Force UTF-8.
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 $envLines
 python "$CbkBin" work >> "$LogDir\worker.log" 2>&1
 "@ | Set-Content $wrapper -Encoding ASCII
+
+# The wrapper carries every secret worker.env does - CBK_REDIS_URL included - and SYSTEM
+# executes it at boot. Left at the inherited ACL it is readable by Users and WRITABLE by
+# Authenticated Users, which hands any local account both the broker credential and a way
+# to run code as SYSTEM. Lock it down exactly as worker.env is.
+$wacl = Get-Acl $wrapper
+$wacl.SetAccessRuleProtection($true, $false)
+$wacl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+    'Administrators', 'FullControl', 'Allow'))
+$wacl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+    'SYSTEM', 'FullControl', 'Allow'))
+Set-Acl $wrapper $wacl
 
 $action   = New-ScheduledTaskAction -Execute 'cmd.exe' `
                 -Argument "/c `"$wrapper`"" -WorkingDirectory $DeployDir
 $trigger  = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 `
-                -RestartCount 2147483647 `
+                -RestartCount 999 `
                 -RestartInterval (New-TimeSpan -Minutes 1) `
                 -StartWhenAvailable
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
