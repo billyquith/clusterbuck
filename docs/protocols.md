@@ -409,6 +409,12 @@ per-node key. `install/worker/join.py` drives this.
 
 Notes that matter:
 
+- **The advertised broker is not always the coordinator's own.** Redis normally runs on the
+  coordinator box, so its `CBK_REDIS_URL` is loopback — handing that to a joining worker
+  points it at its own localhost, and the failure is invisible at join time (install,
+  enrolment and service start all succeed). So `redis_url` comes from
+  `CBK_BROKER_ADVERTISE_URL`, falling back to `CBK_REDIS_URL`, and bootstrap returns **503
+  naming that setting** rather than advertising a loopback address.
 - **`CBK_JOIN_PASSWORD` unset ⇒ both routes 404**, so no surface is added by default. 404
   rather than 401 so a coordinator that has not opted in does not advertise the feature.
 - These two are **exempt from the operator-key middleware** — they must be, since the

@@ -37,7 +37,8 @@ def fleet_file(tmp_path):
 
 
 def _client(tmp_path, redis_url, fleet_file, *,
-            join_password=GOOD_PASSWORD, artifact=None, api_key=None):
+            join_password=GOOD_PASSWORD, artifact=None, api_key=None,
+            advertise="redis://:pw@192.168.50.146:6379/0"):
     """A coordinator with bootstrap configured as the test wants it.
 
     Passed as arguments rather than patched onto `settings`, which is a frozen dataclass —
@@ -46,7 +47,10 @@ def _client(tmp_path, redis_url, fleet_file, *,
     """
     app = create_app(redis_url=redis_url, db_path=str(tmp_path / "b.db"),
                      fleet_path=str(fleet_file), start_scheduler=False, api_key=api_key,
-                     join_password=join_password, worker_artifact=artifact)
+                     join_password=join_password, worker_artifact=artifact,
+                     # Routable on purpose: the test Redis is on localhost, and bootstrap
+                     # refuses to advertise a loopback address to a remote worker.
+                     broker_advertise_url=advertise)
     return TestClient(app)
 
 
@@ -61,7 +65,7 @@ def test_a_correct_password_returns_a_token_and_the_broker_url(
     assert r.status_code == 201
     body = r.json()
     assert body["join_token"]
-    assert body["redis_url"] == redis_url
+    assert body["redis_url"] == "redis://:pw@192.168.50.146:6379/0"
     assert body["capabilities"] == ["8b-extract"]
 
 
@@ -198,3 +202,67 @@ def test_a_missing_artifact_file_is_404_not_a_crash(
                  artifact=str(tmp_path / "gone.pyz")) as c:
         r = c.get("/worker/artifact", headers={HEADER: GOOD_PASSWORD})
     assert r.status_code == 404
+
+
+# --- the broker address a REMOTE worker is given -------------------------------------
+
+
+LAN_BROKER = "redis://:pw@192.168.50.146:6379/0"
+
+
+def test_a_loopback_broker_address_is_refused_not_served(
+    tmp_path, redis_url, fleet_file
+):
+    """The bug this guards, found on a live coordinator after deploying without it.
+
+    Redis normally runs on the coordinator box, so its own CBK_REDIS_URL is loopback.
+    Handing that to a joining worker points it at its OWN localhost — and the failure is
+    invisible at join time: install, enrolment and service start all succeed, and only
+    later does the worker find no broker. Refusing is the only honest answer.
+
+    Note the single-host e2e cannot catch this by construction: there, coordinator and
+    worker share a machine, so a loopback address works by accident.
+    """
+    app = create_app(redis_url="redis://:pw@127.0.0.1:6379/0",
+                     db_path=str(tmp_path / "lb.db"), fleet_path=str(fleet_file),
+                     start_scheduler=False, join_password=GOOD_PASSWORD)
+    with TestClient(app) as c:
+        r = c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD})
+    assert r.status_code == 503
+    assert "CBK_BROKER_ADVERTISE_URL" in r.json()["detail"], "say how to fix it"
+
+
+def test_the_advertise_url_overrides_the_coordinators_own(
+    tmp_path, redis_url, fleet_file
+):
+    """The coordinator's own connection and the address it advertises are different
+    concerns — loopback for itself, a routable address for everyone else."""
+    app = create_app(redis_url="redis://:pw@127.0.0.1:6379/0",
+                     db_path=str(tmp_path / "adv.db"), fleet_path=str(fleet_file),
+                     start_scheduler=False, join_password=GOOD_PASSWORD,
+                     broker_advertise_url=LAN_BROKER)
+    with TestClient(app) as c:
+        r = c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD})
+    assert r.status_code == 201
+    assert r.json()["redis_url"] == LAN_BROKER
+
+
+def test_localhost_by_name_is_refused_too(tmp_path, redis_url, fleet_file):
+    """`localhost` is the likelier spelling in a hand-written env file than 127.0.0.1."""
+    app = create_app(redis_url="redis://:pw@localhost:6379/0",
+                     db_path=str(tmp_path / "lh.db"), fleet_path=str(fleet_file),
+                     start_scheduler=False, join_password=GOOD_PASSWORD)
+    with TestClient(app) as c:
+        assert c.post("/nodes/bootstrap",
+                      headers={HEADER: GOOD_PASSWORD}).status_code == 503
+
+
+def test_refusing_mints_no_token(tmp_path, redis_url, fleet_file):
+    """The loopback check runs before minting, so a misconfigured coordinator does not
+    leak tokens to every retry."""
+    app = create_app(redis_url="redis://:pw@127.0.0.1:6379/0",
+                     db_path=str(tmp_path / "nt.db"), fleet_path=str(fleet_file),
+                     start_scheduler=False, join_password=GOOD_PASSWORD)
+    with TestClient(app) as c:
+        c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD})
+        assert c.app.state.store.unused_token_count() == 0

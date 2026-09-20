@@ -43,6 +43,7 @@ YAML
   CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
   CBK_API_KEY="$OPERATOR_KEY" CBK_JOIN_PASSWORD="$PASSWORD" \
   CBK_WORKER_ARTIFACT="$ARTIFACT" CBK_FLEET_PATH="$WORKDIR/fleet.yaml" \
+  CBK_BROKER_ADVERTISE_URL="redis://192.168.50.146:6379/0" \
   .venv/bin/python -m clusterbuck >"$WORKDIR/server.log" 2>&1 ) & PIDS+=($!)
 wait_for "$URL/healthz" "server"
 log "coordinator up with bootstrap enabled"
@@ -58,6 +59,19 @@ log "bootstrap rejects a missing and a wrong password  ✓"
 BODY=$(curl -fsS -X POST "$URL/nodes/bootstrap" -H "X-CBK-Join-Password: $PASSWORD")
 printf '%s' "$BODY" | grep -q "$OPERATOR_KEY" && fail "the operator key leaked into the bootstrap response"
 log "operator key is NOT in the response  ✓ (the whole point)"
+
+# A remote worker cannot reach a loopback broker. This single-host test would otherwise
+# never notice — here the coordinator and the "worker" share a machine, so a loopback
+# address works by accident. Assert on the advertised value instead.
+printf '%s' "$BODY" | python3 -c '
+import sys, json
+from urllib.parse import urlsplit
+host = urlsplit(json.load(sys.stdin)["redis_url"]).hostname
+if host in ("localhost", "127.0.0.1", "::1"):
+    raise SystemExit(f"advertised a loopback broker ({host}) — a remote worker cannot use it")
+print("  advertised broker host:", host)
+' || fail "bootstrap advertised an unusable broker address"
+log "advertised broker is routable, not loopback  ✓"
 
 # The exemption must not have opened anything else.
 CODE=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/nodes")

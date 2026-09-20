@@ -144,6 +144,11 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
                               #   /static/*, /nodes/enroll (join token), heartbeat (node key).
                               #   (CBK_PORT, CBK_REDIS_URL, CBK_DB_PATH, CBK_FLEET_PATH,
                               #    CBK_CLOUD_FALLBACK_MODEL, CBK_CLOUD_BUDGET_MONTHLY,
+                              #    CBK_BROKER_ADVERTISE_URL — the broker address given
+                              #    to JOINING workers. Redis usually runs on the
+                              #    coordinator, so its own CBK_REDIS_URL is loopback and
+                              #    a remote worker handed that dials its own localhost;
+                              #    bootstrap returns 503 rather than advertising one,
                               #    CBK_JOIN_PASSWORD + CBK_WORKER_ARTIFACT — opt-in
                               #    worker bootstrap (install/worker/join.py): a joining
                               #    machine trades one password for a single-use join

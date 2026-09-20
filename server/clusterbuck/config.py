@@ -40,6 +40,14 @@ class Settings:
     # shorter than JOIN_PASSWORD_MIN_LEN leaves the routes disabled rather than weakly
     # protected — fail closed on the feature, not on the service (see api.bootstrap_ready).
     join_password: str | None = os.environ.get("CBK_JOIN_PASSWORD") or None
+    # The broker address handed to JOINING WORKERS, which is not always the one the
+    # coordinator uses itself: Redis usually runs on the coordinator box, so its own
+    # CBK_REDIS_URL is loopback — and handing that to a remote worker points it at its own
+    # localhost, where it finds nothing. Unset ⇒ falls back to CBK_REDIS_URL, and bootstrap
+    # refuses to advertise a loopback address rather than serving one that cannot work.
+    broker_advertise_url: str | None = (
+        os.environ.get("CBK_BROKER_ADVERTISE_URL") or None
+    )
     # Path to the built `cbk.pyz` the coordinator hands to joining workers, so every node
     # runs one blessed build rather than whatever its own checkout produced. Unset ⇒ 404.
     worker_artifact: str | None = os.environ.get("CBK_WORKER_ARTIFACT") or None

@@ -12,6 +12,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -69,6 +70,9 @@ _log = logging.getLogger("clusterbuck")
 
 
 _IDEMPOTENCY_KEY_MAX = 255
+
+# Addresses a remote worker can never reach.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _validated_idempotency_key(raw: str | None) -> str | None:
@@ -193,6 +197,7 @@ def create_app(
     api_key: str | None = None,
     join_password: str | None = None,
     worker_artifact: str | None = None,
+    broker_advertise_url: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -917,6 +922,23 @@ def create_app(
         """
         _require_join_password(x_cbk_join_password)
 
+        # A joining worker is remote by definition, so a loopback broker address points it
+        # at its OWN localhost. That failure is invisible at join time — install, enrolment
+        # and service start all succeed, and only then does the worker find no broker — so
+        # refuse to hand one out rather than serving something that cannot work.
+        advertised = (broker_advertise_url or settings.broker_advertise_url
+                      or redis_url or settings.redis_url)
+        if urlsplit(advertised).hostname in _LOOPBACK_HOSTS:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "refusing to advertise a loopback broker address to a remote worker. "
+                    "Redis runs on the coordinator, so its own CBK_REDIS_URL is loopback; "
+                    "set CBK_BROKER_ADVERTISE_URL to the address workers should dial "
+                    "(e.g. redis://:<password>@<coordinator-lan-ip>:6379/0)."
+                ),
+            )
+
         # Validate BEFORE minting: otherwise every failed attempt burns a token row and an
         # unauthenticated caller can grow the table at will.
         token = new_join_token()
@@ -927,9 +949,7 @@ def create_app(
         fleet = app.state.fleet
         return {
             "join_token": token,
-            # The URL this coordinator is actually using, not the module default — a
-            # worker given the wrong broker would enrol fine and then never see a job.
-            "redis_url": redis_url or settings.redis_url,
+            "redis_url": advertised,
             "consumer_group": settings.consumer_group,
             "capabilities": sorted(fleet.capabilities) if fleet else [],
         }
