@@ -49,21 +49,32 @@ def test_quota_defaults_follow_profile():
     assert quota_for("shared", 7.5) == 7.5  # explicit override wins
 
 
+# Pick by shape, not by name. Naming seeded artifacts here pinned the catalog in place:
+# refreshing it for newer models broke gate tests that had nothing to do with the change.
+def _largest(store):
+    return max(store.list_catalog(), key=lambda r: r.min_ram_gb)
+
+
+def _mid(store):
+    rows = sorted(store.list_catalog(), key=lambda r: r.min_ram_gb)
+    return rows[len(rows) // 2]
+
+
 def test_fits_rejects_insufficient_ram(store):
-    big = next(r for r in store.list_catalog() if r.artifact == "llama3.1:70b")
-    ok, why = fits(big, _node(ram_gb=16.0), quota_gb=500)
+    big = _largest(store)
+    ok, why = fits(big, _node(ram_gb=big.min_ram_gb - 1), quota_gb=500)
     assert not ok and "RAM" in why
 
 
 def test_fits_rejects_over_quota(store):
-    big = next(r for r in store.list_catalog() if r.artifact == "llama3.1:70b")
-    ok, why = fits(big, _node(ram_gb=128.0), quota_gb=10.0)
+    big = _largest(store)
+    ok, why = fits(big, _node(ram_gb=big.min_ram_gb * 2), quota_gb=big.size_gb / 2)
     assert not ok and "quota" in why
 
 
 def test_fits_accepts_when_within_both(store):
-    small = next(r for r in store.list_catalog() if r.artifact == "llama3.1:8b")
-    ok, _ = fits(small, _node(ram_gb=64.0), quota_gb=100.0)
+    row = _mid(store)
+    ok, _ = fits(row, _node(ram_gb=row.min_ram_gb), quota_gb=row.size_gb)
     assert ok
 
 

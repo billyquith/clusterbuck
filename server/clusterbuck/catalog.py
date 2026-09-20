@@ -42,25 +42,61 @@ RECLAIM_UNUSED_DAYS = 30
 # Generic seed catalog: widely-available open models, described only by their public
 # metadata. Sizes/RAM floors are approximate 4-bit-class figures for planning, not promises.
 SEED_CATALOG = [
+    # Candidates a fresh install may propose. Sizes are the summed layer bytes from the
+    # Ollama registry manifest, not estimates from the parameter count — `size_gb` gates
+    # against the owner's disk quota, so guessing it high silently excludes a model
+    # everywhere and guessing low proposes a pull the node cannot hold.
+    #
+    # `min_ram_gb` keeps the ~2.4x-of-size convention the original seed used. What matters
+    # is that the ratio stays consistent across entries, since it is a relative gate.
+    #
+    # `expected_ability` only RANKS candidates for the planner (ADR 15). Routing uses
+    # measured ability, which a not-yet-installed artifact does not have — so these are
+    # ordering hints, and a wrong one costs an eval, not a bad route.
+    #
+    # Families are deliberately mixed. A catalog drawn from one vendor leaves a fleet with
+    # nowhere to go when that line stalls or a tag is pulled.
+    #
+    # NOTE: this list only seeds an EMPTY table, so it is the floor for a new install and
+    # never an update path. Curate a running fleet through `POST /catalog`.
+
     # A sub-1B entry matters on RAM-tight nodes, where nothing larger fits at all.
-    {"artifact": "qwen2.5:0.5b", "family": "qwen2.5", "params_b": 0.5, "quant": "Q4_K_M",
-     "size_gb": 0.4, "min_ram_gb": 2.0, "source": "ollama", "registry_ref": "qwen2.5:0.5b",
-     "expected_ability": 2.0},
+    {"artifact": "qwen3:0.6b", "family": "qwen3", "params_b": 0.6, "quant": "Q4_K_M",
+     "size_gb": 0.5, "min_ram_gb": 2.0, "source": "ollama", "registry_ref": "qwen3:0.6b",
+     "expected_ability": 2.5},
+    # The example fleet in fleet.yaml serves this one; keeping it in the catalog is what
+    # lets reeval and reclaim reason about it.
     {"artifact": "llama3.2:3b", "family": "llama3.2", "params_b": 3.0, "quant": "Q4_K_M",
      "size_gb": 2.0, "min_ram_gb": 8.0, "source": "ollama", "registry_ref": "llama3.2:3b",
      "expected_ability": 4.0},
-    {"artifact": "llama3.1:8b", "family": "llama3.1", "params_b": 8.0, "quant": "Q4_K_M",
-     "size_gb": 4.7, "min_ram_gb": 16.0, "source": "ollama", "registry_ref": "llama3.1:8b",
-     "expected_ability": 5.0},
-    {"artifact": "qwen2.5:14b", "family": "qwen2.5", "params_b": 14.0, "quant": "Q4_K_M",
-     "size_gb": 9.0, "min_ram_gb": 24.0, "source": "ollama", "registry_ref": "qwen2.5:14b",
-     "expected_ability": 6.0},
+    {"artifact": "gemma3:4b", "family": "gemma3", "params_b": 4.0, "quant": "Q4_K_M",
+     "size_gb": 3.3, "min_ram_gb": 8.0, "source": "ollama", "registry_ref": "gemma3:4b",
+     "expected_ability": 4.5},
+    {"artifact": "qwen3:8b", "family": "qwen3", "params_b": 8.0, "quant": "Q4_K_M",
+     "size_gb": 5.2, "min_ram_gb": 16.0, "source": "ollama", "registry_ref": "qwen3:8b",
+     "expected_ability": 5.5},
+    {"artifact": "qwen3:14b", "family": "qwen3", "params_b": 14.0, "quant": "Q4_K_M",
+     "size_gb": 9.3, "min_ram_gb": 24.0, "source": "ollama", "registry_ref": "qwen3:14b",
+     "expected_ability": 6.5},
+    {"artifact": "mistral-small3.2:24b", "family": "mistral-small3.2", "params_b": 24.0,
+     "quant": "Q4_K_M", "size_gb": 15.2, "min_ram_gb": 32.0, "source": "ollama",
+     "registry_ref": "mistral-small3.2:24b", "expected_ability": 6.8},
+    # Mixture-of-experts: 30B total, ~3B active per token. On a node whose accelerator
+    # cannot hold the whole model, cost per token tracks the ACTIVE parameters, so this
+    # stays usable where a dense 30B does not. The fits gate cannot see that — it has no
+    # VRAM concept at all — so the distinction lives here, in the ranking.
+    {"artifact": "qwen3:30b-a3b", "family": "qwen3", "params_b": 30.0, "quant": "Q4_K_M",
+     "size_gb": 18.6, "min_ram_gb": 40.0, "source": "ollama",
+     "registry_ref": "qwen3:30b-a3b", "expected_ability": 7.0},
     {"artifact": "qwen2.5:32b", "family": "qwen2.5", "params_b": 32.0, "quant": "Q4_K_M",
      "size_gb": 20.0, "min_ram_gb": 48.0, "source": "ollama", "registry_ref": "qwen2.5:32b",
      "expected_ability": 7.0},
     {"artifact": "llama3.1:70b", "family": "llama3.1", "params_b": 70.0, "quant": "Q4_K_M",
      "size_gb": 40.0, "min_ram_gb": 64.0, "source": "ollama", "registry_ref": "llama3.1:70b",
      "expected_ability": 8.0},
+    {"artifact": "llama3.3:70b", "family": "llama3.3", "params_b": 70.0, "quant": "Q4_K_M",
+     "size_gb": 42.5, "min_ram_gb": 64.0, "source": "ollama", "registry_ref": "llama3.3:70b",
+     "expected_ability": 8.2},
 ]
 
 
