@@ -42,6 +42,19 @@ def stream_key(capability: str, tier: str | None = None) -> str:
     return f"q:{capability}:{URGENT_TIER}" if tier == URGENT_TIER else f"q:{capability}"
 
 
+def artifact_aliases(name: str) -> set[str]:
+    """Spellings that mean the same artifact to a model server.
+
+    Ollama reports an explicit tag on `/v1/models` while a registry commonly omits it, so
+    `llama3.2` and `llama3.2:latest` are one artifact. Mirrors the coordinator's own
+    normalisation (server fleet.py) — the two must agree, or a pin the coordinator believes
+    valid is refused here.
+    """
+    name = (name or "").strip()
+    base = name.split(":", 1)[0]
+    return {name, base, f"{base}:latest"}
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -57,6 +70,10 @@ class WorkLoop:
         # Set by the heartbeat task when the owner is present or the coordinator quarantines
         # this build. In-flight jobs already claimed still finish; nothing new is claimed.
         self.paused = False
+        # What the local model server actually has, refreshed by the heartbeat task from
+        # the same inventory it reports. Empty means UNKNOWN (the server did not answer),
+        # not empty — so a pin is only ever refused on positive evidence.
+        self.installed: frozenset[str] = frozenset()
         self.jobs_done = 0
         # Output tokens/sec, sampled per completed job. A short window rather than a
         # lifetime mean: the first job after a cold model load runs dramatically slower
@@ -76,6 +93,34 @@ class WorkLoop:
         if not self._tps_samples:
             return None
         return round(statistics.median(self._tps_samples), 1)
+
+    def set_installed(self, artifacts: Iterable[str]) -> None:
+        """Record the local inventory, expanded to every spelling of each artifact."""
+        seen: set[str] = set()
+        for artifact in artifacts:
+            seen |= artifact_aliases(artifact)
+        self.installed = frozenset(seen)
+
+    def _refuse_reason(self, job: Job) -> str | None:
+        """Why this job's pinned artifact cannot be honoured here, or None.
+
+        The coordinator pins the artifact whose ability cleared the job's `min_ability`
+        bar. Running it on a different model would answer the job at a quality nobody
+        checked while reporting success — the silent under-serve the pin exists to end. So
+        a pin this node cannot serve becomes a FAILED result with a reason, which is
+        visible, instead of a plausible answer, which is not.
+
+        Silent when the inventory is unknown: a model server that did not answer must not
+        take the whole node offline.
+        """
+        pinned = (job.params or {}).get("model")
+        if not pinned or not self.installed:
+            return None
+        if artifact_aliases(str(pinned)) & self.installed:
+            return None
+        return (f"job pinned artifact {pinned!r}, which is not installed on this node "
+                f"(serving {self._cfg.model_name!r}). Refusing to answer with a different "
+                f"model than the one its ability bar was checked against.")
 
     def _record_tps(self, usage: dict | None, elapsed_s: float) -> None:
         """Sample tokens/sec when the model server reported enough to compute it.
@@ -175,6 +220,9 @@ class WorkLoop:
         # mid-inference, and a negative elapsed would poison the sample.
         t0 = time.monotonic()
         try:
+            refusal = self._refuse_reason(job)
+            if refusal is not None:
+                raise RuntimeError(refusal)
             completion, usage = await self._model.complete(job)
             result = Result(job_id=job.id, status="done", worker=self._cfg.worker_id,
                             started_at=started_at, finished_at=_now_iso(),

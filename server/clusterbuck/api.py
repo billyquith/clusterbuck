@@ -57,7 +57,7 @@ from .models import (
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
 from .queue import Queue, stream_key, tier_for
 from .reservations import admit, iso
-from .routing import NoCapableArtifact, resolve_capability
+from .routing import NoCapableArtifact, resolve
 from .signing import build_manifest, load_private_pem
 from .store import Store
 from .sync import build_router, sync_routes
@@ -530,7 +530,7 @@ def create_app(
                 )
 
         try:
-            capability = resolve_capability(
+            selection = resolve(
                 app.state.fleet, app.state.store,
                 capability=body.capability,
                 task_class=body.task_class,
@@ -543,6 +543,29 @@ def create_app(
         except NoCapableArtifact as e:
             # Explicit failure beats silently serving below the requested ability floor.
             raise HTTPException(status_code=422, detail=str(e)) from e
+        capability = selection.capability
+
+        # PIN THE ARTIFACT ROUTING CHOSE. A capability is only a queue name; the worker
+        # that drains it answers with its own CBK_MODEL, for every capability it serves.
+        # So the model whose ability cleared the bar and the model that ran the job were
+        # unrelated, and a node serving two tiers with one model answered both at whatever
+        # quality that implies, reported as having met the floor. The executors (worker and
+        # cloud alike) already honour this pin — the eval harness has relied on it from the
+        # start, precisely so a measurement is attributed to the right artifact.
+        #
+        # It overwrites a client-supplied `params.model` deliberately: otherwise any caller
+        # could name a stronger model on a cheaper tier and `min_ability` would enforce
+        # nothing at all.
+        params = dict(body.params or {})
+        params["model"] = selection.artifact
+
+        if selection.on_a_guess:
+            # Served on an anchored placeholder, not a measurement. The job still runs —
+            # seeds exist so a fresh fleet routes at all — but this is the one place that
+            # knows, and saying nothing is how a guess comes to look like evidence.
+            _log.info(
+                "job routed on a SEEDED ability for %s/%s (score %s) — not yet measured",
+                selection.artifact, body.task_class, selection.score)
         job_id, result_key = new_ids()
         now = datetime.now(UTC)
         created_at = now.isoformat().replace("+00:00", "Z")
@@ -553,7 +576,7 @@ def create_app(
             capability=capability,
             messages=body.messages,
             prompt=body.prompt,
-            params=body.params,
+            params=params,
             urgency=body.urgency,
             escalate_after_min=body.escalate_after_min,
             privacy=body.privacy,

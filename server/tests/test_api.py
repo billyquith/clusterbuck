@@ -287,3 +287,46 @@ def test_worker_is_reported_before_the_job_finishes(client, redis_url):
     assert got["worker"] == "node-alpha", "known before any result exists"
     assert got["started_at"] is not None
     assert got["queue_position"] is None, "not queued any more"
+
+
+# --- the model that cleared the bar is the model that runs ------------------------------
+
+def _queued_job(redis_url, capability="8b-extract"):
+    conn = redis.from_url(redis_url, decode_responses=True)
+    entries = conn.xrange(stream_key(capability))
+    conn.close()
+    return json.loads(entries[-1][1]["job"])
+
+
+def test_the_resolved_artifact_is_pinned_on_the_job(client, redis_url):
+    """A capability is only a queue name — the worker that drains it answers with its own
+    CBK_MODEL, for every capability it serves. So the model whose ability cleared the
+    floor and the model that ran the job were unrelated, and nothing reconciled them."""
+    assert _submit(client).status_code == 202
+    assert _queued_job(redis_url)["params"]["model"] == "llama3.2:3b"
+
+
+def test_a_need_shaped_job_is_pinned_to_the_artifact_that_qualified(client, redis_url):
+    r = _submit(client, capability=None, task_class="summarize", min_ability=6)
+    assert r.status_code == 202
+    # The chosen capability is not echoed in the response, so read every tier's stream.
+    conn = redis.from_url(redis_url, decode_responses=True)
+    found = [json.loads(e[1]["job"])
+             for cap in ("8b-extract", "32b-reason", "70b-reason")
+             for e in conn.xrange(stream_key(cap))]
+    conn.close()
+    pinned = {j["params"].get("model") for j in found}
+    # 6 clears the 32B seed (6.5) and the 70B (7.0); local-then-cheapest picks the 32B.
+    assert pinned == {"qwen2.5:32b"}
+
+
+def test_a_client_cannot_pin_its_way_past_the_ability_floor(client, redis_url):
+    """`params` is forwarded to the model server verbatim, so a client naming its own
+    `model` would pick any artifact it liked on whatever tier it asked for — and
+    min_ability would enforce nothing at all."""
+    r = _submit(client, capability="8b-extract", params={"model": "llama3.1:70b",
+                                                         "temperature": 0.1})
+    assert r.status_code == 202
+    job = _queued_job(redis_url)
+    assert job["params"]["model"] == "llama3.2:3b", "client pin overrode the router"
+    assert job["params"]["temperature"] == 0.1, "other params must still pass through"

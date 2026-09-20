@@ -15,6 +15,7 @@ import pytest
 
 from cbk_worker.config import WorkerConfig
 from cbk_worker.model_client import ModelClient
+from cbk_worker.models import Job
 from cbk_worker.work_loop import (
     TIER_ORDER,
     URGENT_TIER,
@@ -323,3 +324,57 @@ async def test_a_malformed_urgent_entry_is_acked_on_its_own_tier(redis_client):
     assert pending["pending"] == 0
     await http.aclose()
 
+
+
+# --- the pinned artifact must be the one that answers -----------------------------------
+
+def _job_pinned_to(artifact: str) -> Job:
+    return Job.from_wire({
+        "id": "j1", "created_at": "t", "capability": "8b-extract",
+        "messages": [{"role": "user", "content": "hi"}],
+        "params": {"model": artifact}, "result_key": "r:j1",
+    })
+
+
+def _loop_with(installed, model_name="llama3.2:3b"):
+    cfg = WorkerConfig(redis_url="redis://x", model_name=model_name,
+                       capabilities=("8b-extract",))
+    loop = WorkLoop(redis=None, model=None, cfg=cfg, log=lambda _m: None)
+    loop.set_installed(installed)
+    return loop
+
+
+def test_a_pin_this_node_cannot_serve_is_refused():
+    """The coordinator pins the artifact whose ability cleared the job's floor. Answering
+    with a different model reports success at a quality nobody checked — the silent
+    under-serve the pin exists to end."""
+    loop = _loop_with(["llama3.2:3b"])
+    reason = loop._refuse_reason(_job_pinned_to("qwen2.5:32b"))
+    assert reason and "qwen2.5:32b" in reason
+
+
+def test_a_pin_this_node_holds_is_served():
+    loop = _loop_with(["llama3.2:3b", "qwen2.5:32b"])
+    assert loop._refuse_reason(_job_pinned_to("qwen2.5:32b")) is None
+
+
+def test_an_implicit_latest_tag_still_matches():
+    """Must agree with the coordinator's own normalisation, or a pin it believes valid is
+    refused here and the job fails for no real reason."""
+    assert _loop_with(["llama3.2:latest"])._refuse_reason(_job_pinned_to("llama3.2")) is None
+    assert _loop_with(["llama3.2"])._refuse_reason(_job_pinned_to("llama3.2:latest")) is None
+
+
+def test_an_unknown_inventory_refuses_nothing():
+    """An empty inventory means the model server did not answer, not that it holds
+    nothing. Refusing on that would take the node offline over a transient blip."""
+    assert _loop_with([])._refuse_reason(_job_pinned_to("anything:9b")) is None
+
+
+def test_an_unpinned_job_is_never_refused():
+    """Jobs submitted before the coordinator pinned artifacts, and any other client that
+    does not pin, still run on the node's configured model."""
+    loop = _loop_with(["llama3.2:3b"])
+    job = Job.from_wire({"id": "j", "created_at": "t", "capability": "8b-extract",
+                         "prompt": "hi", "result_key": "r"})
+    assert loop._refuse_reason(job) is None

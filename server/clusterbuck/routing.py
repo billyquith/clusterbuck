@@ -13,14 +13,47 @@ If nothing clears the bar the request **fails explicitly** (`NoCapableArtifact` 
 than quietly running on a weaker model. Silently under-serving defeats the whole point of
 need-shaped addressing: the client stated a floor and would have no way to learn it was missed.
 Anchored seed scores (`provenance='seed'`) keep this workable before anything is measured.
+
+**The result names an artifact, not just a capability.** Selection is made on an artifact's
+measured ability, but a capability is only a queue name: the worker that drains it answers
+with whatever `CBK_MODEL` says, for every capability it serves. Returning the artifact lets
+the submit path pin it on the job (`params.model`) exactly as the eval harness already does,
+so the model that clears the bar is the model that runs. Without the pin, `min_ability` was
+enforced against a name in `fleet.yaml` that nothing reconciled with reality.
+
+The provenance travels with it for the same reason: a job served on a `seed` placeholder has
+not been served on a measurement, and only the caller can decide whether that matters.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from .budget import BudgetDecision, check_cloud_budget
 from .evaluation import SCALE_VERSION
 from .fleet import Fleet
 from .store import Store
+
+
+@dataclass(frozen=True)
+class Selection:
+    """What routing chose, and on what evidence.
+
+    `artifact` is the model that must actually run the job — pinned onto it downstream so
+    the worker cannot substitute its own. `score`/`provenance` are None for explicit
+    `capability` addressing, which names a supply-side tier rather than clearing a bar.
+    """
+
+    capability: str
+    artifact: str
+    cloud: bool
+    score: float | None = None
+    provenance: str | None = None
+
+    @property
+    def on_a_guess(self) -> bool:
+        """True when the bar was cleared by a seeded placeholder, not a measurement."""
+        return self.provenance == "seed"
 
 
 class NoCapableArtifact(Exception):
@@ -54,7 +87,7 @@ def _cloud_gate(
     return None
 
 
-def resolve_capability(
+def resolve(
     fleet: Fleet | None,
     store: Store,
     *,
@@ -67,7 +100,8 @@ def resolve_capability(
     cloud_budget_reserve_fraction: float = 0.2,
     now: float | None = None,
     scale_version: str = SCALE_VERSION,
-) -> str:
+) -> Selection:
+    """The capability to enqueue on AND the artifact that must run the job."""
     budget = check_cloud_budget(
         store, monthly_cap=cloud_budget_monthly, urgency=urgency,
         reserve_fraction=cloud_budget_reserve_fraction, now=now,
@@ -93,7 +127,10 @@ def resolve_capability(
             raise NoCapableArtifact(
                 f"capability {capability!r} is cloud-backed and excluded: {excluded}"
             )
-        return capability
+        # Explicit addressing names a tier, and the tier's registered model is the artifact
+        # it means. Pinning it here is what stops the tier's meaning being decided by
+        # whatever CBK_MODEL happens to say on the node that claims the job.
+        return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud)
 
     if fleet is None or task_class is None or min_ability is None:
         raise NoCapableArtifact(
@@ -102,7 +139,8 @@ def resolve_capability(
 
     # Candidates whose artifact clears the ability bar for this task class, within privacy,
     # urgency's wake rights, and (for a cloud candidate) budget.
-    candidates: list[tuple[bool, float, str]] = []  # (is_cloud, price, capability)
+    # (is_cloud, price, capability, artifact, score, provenance)
+    candidates: list[tuple[bool, float, str, str, float, str | None]] = []
     excluded_by_privacy = 0
     excluded_by_budget = 0
     best_available: float | None = None
@@ -119,11 +157,17 @@ def resolve_capability(
             continue
         best_available = score if best_available is None else max(best_available, score)
         if score >= min_ability:
-            candidates.append((spec.cloud, spec.price_in_per_1k + spec.price_out_per_1k, cap))
+            candidates.append((
+                spec.cloud, spec.price_in_per_1k + spec.price_out_per_1k, cap,
+                spec.model, score,
+                store.ability_provenance(spec.model, task_class, scale_version),
+            ))
 
     if candidates:
         candidates.sort()  # prefer local (False < True) → cheapest
-        return candidates[0][2]
+        cloud, _price, cap, artifact, score, provenance = candidates[0]
+        return Selection(capability=cap, artifact=artifact, cloud=cloud,
+                         score=score, provenance=provenance)
 
     detail = (
         f"no artifact reaches ability {min_ability} for task_class {task_class!r}"
@@ -134,3 +178,8 @@ def resolve_capability(
     if excluded_by_budget:
         detail += f"; {excluded_by_budget} cloud artifact(s) excluded by budget ({budget.reason})"
     raise NoCapableArtifact(detail)
+
+
+def resolve_capability(*args, **kwargs) -> str:
+    """Just the capability. Callers that also need the artifact use `resolve` directly."""
+    return resolve(*args, **kwargs).capability

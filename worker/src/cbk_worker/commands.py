@@ -112,6 +112,11 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 installed = await inventory.installed()
                 loaded = await inventory.loaded()
                 digests = await inventory.digests()
+                # The work loop needs the same inventory: a job carries the artifact whose
+                # ability cleared its bar, and answering with a different model would report
+                # success at a quality nobody checked. Fed from here rather than probed per
+                # job so inference never waits on the model server's catalogue.
+                loop.set_installed(installed)
 
                 # `stats.tps` is typed `number` in the contract with no null allowed,
                 # so omit it entirely until this worker has actually measured something
