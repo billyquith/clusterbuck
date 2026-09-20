@@ -734,3 +734,45 @@ primitives ADR 20 adopted); reordering inside the worker (it cannot see the whol
 cheaply); gating the rollout on `agent_version` (weaker than the worker's own declaration of
 what it reads); deferring again (the documentation would have stayed false).
 
+
+## 35. Joining a worker costs one password; the operator key stays on the coordinator
+**Decision:** a new machine clones the repo and runs `install/worker/join.sh` (or
+`join.ps1`) with the coordinator URL and a model name. It prompts for a **join password**
+(`CBK_JOIN_PASSWORD`, 16 characters minimum) and exchanges it at `POST /nodes/bootstrap` for
+a **single-use join token**, the broker URL, and the coordinator's capability registry; then
+downloads the coordinator's blessed `cbk.pyz` from `GET /worker/artifact` and hands off to
+the existing platform installer for service creation and enrolment. Both routes are exempt
+from the ADR 26 operator key — a joining machine has none, which is the premise. Unset or
+under-length password ⇒ both routes **404**, so no surface is added by default.
+**Why:** onboarding previously hand-carried **two** secrets onto every new machine — an
+operator-key-minted join token and the Redis URL *including its password*, passed as a
+command-line argument and therefore into shell history. The operator key is the one secret a
+worker must never hold: it mints tokens, approves model installs and deletes other owners'
+model files (ADR 26's finding). One password, held in a password manager and typed at a
+prompt rather than in argv, replaces both, and leaves the destructive key on the one box that
+needs it. Serving the artifact from the coordinator rather than building locally means every
+node runs the same build instead of whatever its checkout happened to contain — the same
+reasoning as ADR 13's signed update, applied to the first install.
+**Consequences:** the coordinator gains three settings the installer does not write
+(`CBK_JOIN_PASSWORD`, `CBK_WORKER_ARTIFACT`, `CBK_BROKER_ADVERTISE_URL`), so joining is
+opt-in and a fresh coordinator answers 404 until an operator turns it on. The third exists
+because Redis normally runs on the coordinator, so its own `CBK_REDIS_URL` is loopback, and
+advertising that points each worker at its **own** localhost — a failure invisible at join
+time, since install, enrolment and service start all succeed. The coordinator therefore
+**refuses** to advertise a loopback broker, answering 503 and naming the variable. The join
+also warns when the node's probed capabilities are absent from the coordinator's registry:
+enrolment and heartbeats look healthy while no job can ever route. The password is a weaker
+secret than the operator key by design and guards a narrower thing; rotating it is an edit
+and a restart, and already-joined nodes are unaffected because they authenticate with their
+own per-node key.
+**Considered:** recognising a machine by **LAN subnet** and letting the operator acknowledge
+it from the dashboard (a same-subnet check authenticates the network, not the machine, and
+any guest device or compromised IoT box on a home LAN passes it); a **per-machine API key**
+(multiplies the thing that must be distributed, and ADR 26 settled that there is one
+operator); leaning on the **existing VPN** so every node shares one embedded key (a hard
+dependency on a third-party overlay for what is meant to be plain-LAN infrastructure, and it
+still distributes the operator key); `curl | bash` **without a repo clone** (the platform
+installers need sibling files — `deploy/systemd/cbk-worker.service` — so the checkout is
+required anyway, and piping a script from a private repo does not work); and
+reimplementing service installation inside the join script (two proven installers already do
+it per platform; new logic belongs in one place, OS plumbing stays where it works).

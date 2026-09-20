@@ -11,12 +11,16 @@ is the **worker agent** (worker + probe + updater). This document is about nodes
 
 ## Node lifecycle: install → enroll → serve
 
-1. **Install** the worker agent (self-contained binary per platform — see
-   [deployment.md](deployment.md)).
-2. **Discover** the coordinator: mDNS/DNS-SD (`_clusterbuck._tcp`) on the LAN, with a
-   manual URL fallback for networks where multicast is blocked.
-3. **Enroll**: present a **one-time join token** (minted by the coordinator's admin);
-   receive a node identity + per-node key used for all subsequent auth.
+1. **Install** the worker agent — one `py3-none-any` zipapp for every platform (ADR 29).
+   `install/worker/join.sh` (or `join.ps1`) does steps 1–3 in one command: see
+   [installation.md](installation.md).
+2. **Discover** the coordinator: in practice its URL is the one argument joining takes.
+   mDNS/DNS-SD (`_clusterbuck._tcp`) autodiscovery is designed but not built, so the manual
+   URL is the only path today.
+3. **Enroll**: present a **one-time join token**, receive a node identity + per-node key
+   used for all subsequent auth. The token is minted by the operator's key, but a joining
+   machine never holds that key — it trades a **join password** for a single-use token at
+   `POST /nodes/bootstrap`, along with the broker URL and the worker artifact (ADR 35).
 4. **Probe** the hardware: RAM (and unified-memory/VRAM), CPU arch, OS, accelerator
    (Metal / CUDA / CPU-only), free disk, and an optional micro-benchmark (tokens/sec on
    a tiny model) to calibrate real throughput rather than guessing from specs.

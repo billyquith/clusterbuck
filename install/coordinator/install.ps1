@@ -22,7 +22,7 @@
     Installation root directory. Default: C:\clusterbuck
 
 .PARAMETER WorkerVersion
-    CBK_WORKER_CURRENT_VERSION written to server config. Default: 0.7.0
+    CBK_WORKER_CURRENT_VERSION written to server config. Default: 0.8.0
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1
@@ -33,7 +33,7 @@ param(
     [string]$Branch        = 'main',
     [string]$Port          = '8018',
     [string]$DeployDir     = 'C:\clusterbuck',
-    [string]$WorkerVersion = '0.7.0'
+    [string]$WorkerVersion = '0.8.0'
 )
 
 Set-StrictMode -Version Latest
@@ -226,9 +226,21 @@ Write-Host "  Secrets:  $SecretsFile  (keep safe)"
 Write-Host "  Config:   $ServerEnv"
 Write-Host "  Logs:     $LogDir\coordinator.log"
 Write-Host ''
-Write-Host '  Next steps:'
-Write-Host '    1. Run install\worker\install.ps1 on each worker machine'
-Write-Host '    2. Mint a join token:'
-Write-Host "       Invoke-RestMethod http://localhost:$Port/nodes/tokens -Method Post \\"
-Write-Host "         -Headers @{'X-CBK-Api-Key'='<api-key from server.env>'}"
+Write-Host '  Next steps - turn on worker joining (three settings this script does not'
+Write-Host '  write, and the server config is never overwritten, so add them by hand):'
+Write-Host ''
+Write-Host '    1. Generate a join password and keep it in a password manager:'
+Write-Host "         [guid]::NewGuid().ToString('N')      # 32 hex chars"
+Write-Host '    2. Build the worker artifact joiners will download:'
+Write-Host "         cd $DeployDir\worker; python build.py"
+Write-Host "    3. Add to $ServerEnv, then restart the coordinator:"
+Write-Host '         CBK_JOIN_PASSWORD=<from step 1>            # 16 chars minimum'
+Write-Host "         CBK_WORKER_ARTIFACT=$DeployDir\worker\dist\cbk.pyz"
+Write-Host '         CBK_BROKER_ADVERTISE_URL=redis://:<redis-pw>@<THIS-HOST-LAN-IP>:6379/0'
+Write-Host '       The last one is the Redis address OTHER machines use. Loopback is'
+Write-Host '       refused (503): advertising it points every worker at its own localhost.'
+Write-Host '    4. On each worker: clone the repo and run'
+Write-Host "         .\install\worker\join.ps1 --coordinator http://<this-host>:$Port --model <model>"
+Write-Host '       (join.sh on Linux/macOS). It asks for the join password and fetches the'
+Write-Host '       token, broker URL and artifact itself; the operator API key stays here.'
 Write-Host '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━' -ForegroundColor Green

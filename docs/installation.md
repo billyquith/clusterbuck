@@ -238,7 +238,7 @@ CBK_DB_PATH=/var/lib/clusterbuck/cbk.db
 CBK_FLEET_PATH=/etc/clusterbuck/fleet.yaml
 CBK_HOST=0.0.0.0
 CBK_PORT=8018
-CBK_WORKER_CURRENT_VERSION=0.7.0
+CBK_WORKER_CURRENT_VERSION=0.8.0
 HOME=/var/lib/clusterbuck
 XDG_CACHE_HOME=/var/lib/clusterbuck/cache
 HF_HOME=/var/lib/clusterbuck/cache/huggingface
@@ -246,6 +246,30 @@ TIKTOKEN_CACHE_DIR=/var/lib/clusterbuck/cache/tiktoken
 EOF
 chown root:root /etc/clusterbuck/server.env
 chmod 600 /etc/clusterbuck/server.env
+```
+
+Then the three settings that let a worker join with `install/worker/join.sh` (ADR 35).
+Without them `POST /nodes/bootstrap` answers **404** and joining is switched off:
+
+```bash
+# A join password, 16 characters minimum — the only thing in front of the Redis
+# credential that bootstrap hands out. Keep it in a password manager.
+JOIN_PW=$(openssl rand -hex 24)
+
+# The build joiners download, so every node runs the same one.
+( cd /opt/clusterbuck/worker && python3 build.py )     # -> dist/cbk.pyz
+
+# LAN_IP is this host's address as OTHER machines see it. The coordinator refuses to
+# advertise a loopback broker (503), because doing so points each worker at its own
+# localhost — and that failure is silent: install, enrolment and start all succeed.
+LAN_IP=$(hostname -I | awk '{print $1}')
+
+cat >> /etc/clusterbuck/server.env <<EOF
+CBK_JOIN_PASSWORD=${JOIN_PW}
+CBK_WORKER_ARTIFACT=/opt/clusterbuck/worker/dist/cbk.pyz
+CBK_BROKER_ADVERTISE_URL=redis://:${REDIS_PW}@${LAN_IP}:6379/0
+EOF
+echo "join password: $JOIN_PW"      # store it, then clear your scrollback
 ```
 
 Write a minimal fleet seed (workers join dynamically via enrollment):

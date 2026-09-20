@@ -224,7 +224,9 @@ crash-loop rollback (the signed-update path, the binary swap, `cbk.prev` retenti
 rollback are all built and proven end-to-end — what is missing is *deciding* a release is
 crash-looping, which needs multi-node observation), real multi-GB weight downloads (the pull
 path is stub-proven), true Wake-on-LAN to real MACs across machines, OS presence detection
-(presence is set manually), attached-endpoint proxy workers, async-plane cloud overflow and
+(presence is set manually), mDNS coordinator autodiscovery (`_clusterbuck._tcp` is
+designed but unimplemented — joining takes the coordinator URL as an argument),
+attached-endpoint proxy workers, async-plane cloud overflow and
 budget *enforcement* (the budget figure is display-only), and callbacks (`callback_url` is
 accepted but ignored — poll instead).
 

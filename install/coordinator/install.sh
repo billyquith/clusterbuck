@@ -16,7 +16,7 @@
 #   --branch BRANCH  Branch or tag to install (default: main)
 #   --port PORT      Coordinator API port     (default: 8018)
 #   --lan-redis      Bind Redis on all interfaces so remote workers can reach it
-#   --worker-version VER  CBK_WORKER_CURRENT_VERSION to write to server.env (default: 0.7.0)
+#   --worker-version VER  CBK_WORKER_CURRENT_VERSION to write to server.env (default: 0.8.0)
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ REPO_URL="https://github.com/billyquith/clusterbuck"
 BRANCH="main"
 PORT="8018"
 LAN_REDIS=0
-WORKER_VERSION="0.7.0"
+WORKER_VERSION="0.8.0"
 DEPLOY_DIR="/opt/clusterbuck"
 SECRETS_FILE="/root/.cbk-secrets"
 
@@ -228,11 +228,22 @@ printf '  API:      http://<this-host>:%s/\n' "$PORT"
 printf '  Secrets:  %s  (keep safe — holds Redis password + API key)\n' "$SECRETS_FILE"
 printf '  Config:   /etc/clusterbuck/server.env\n'
 echo
-printf '  Next steps:\n'
+printf '  Next steps — turn on worker joining (three settings this script does not write,\n'
+printf '  and server.env is never overwritten, so add them by hand):\n'
+printf '\n'
 printf '    1. If workers are on other machines, re-run with --lan-redis\n'
-printf '    2. Mint a join token for each worker:\n'
-printf '       APIKEY=$(grep -Po '"'"'(?<=CBK_API_KEY=)\S+'"'"' /etc/clusterbuck/server.env)\n'
-printf '       curl -fsS -X POST http://localhost:%s/nodes/tokens \\\n' "$PORT"
-printf '            -H "X-CBK-Api-Key: $APIKEY"\n'
-printf '    3. Run install/worker/install.sh on each worker node\n'
+printf '    2. Generate a join password and keep it in a password manager:\n'
+printf '         openssl rand -hex 24\n'
+printf '    3. Build the worker artifact joiners will download:\n'
+printf '         cd %s/worker && python3 build.py\n' "$DEPLOY_DIR"
+printf '    4. Add to /etc/clusterbuck/server.env, then: systemctl restart cbk-server\n'
+printf '         CBK_JOIN_PASSWORD=<from step 2>            # 16 chars minimum\n'
+printf '         CBK_WORKER_ARTIFACT=%s/worker/dist/cbk.pyz\n' "$DEPLOY_DIR"
+printf '         CBK_BROKER_ADVERTISE_URL=redis://:<redis-pw>@<THIS-HOST-LAN-IP>:6379/0\n'
+printf '       The last one is the Redis address OTHER machines use. Loopback is refused\n'
+printf '       (503), because advertising it points every worker at its own localhost.\n'
+printf '    5. On each worker: clone the repo and run\n'
+printf '         sudo bash install/worker/join.sh --coordinator http://<this-host>:%s --model <model>\n' "$PORT"
+printf '       It asks for the join password and fetches the token, broker URL and artifact\n'
+printf '       itself. The operator API key never leaves this machine.\n'
 printf '\033[32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n'
