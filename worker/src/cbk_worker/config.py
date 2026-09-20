@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlparse
 # `py3-none-any` build, never a .NET runtime id. It is a constant rather than a setting
 # because a worker that misreports it would install a foreign executable over its own
 # entrypoint — the coordinator verifies nothing about our runtime, it trusts this.
-AGENT_VERSION = "0.8.0"
+AGENT_VERSION = "0.9.0"
 AGENT_FLAVOUR = "python"
 
 # The queue-contract protocol version this worker speaks (protocols.md §7).

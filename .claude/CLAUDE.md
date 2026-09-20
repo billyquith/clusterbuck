@@ -53,6 +53,19 @@ fleet from measurement; `min_ability` under-serving instead of failing explicitl
 unenforced `privacy` filter. CI plus a contract validator now gate all of it, and Redis-backed
 tests **fail** rather than skip when `CBK_TEST_REDIS_URL` is set.
 
+**Addressing pass (ADR 36/37).** A second audit found the *quality* half of the system
+resting on three identities nothing reconciled — the **tier** (`fleet.yaml`, what routing
+scores), the **artifact** (what ability measures), and the **node** (what `stats.tps`
+measures). Since fixed: the resolved artifact is **pinned on the job** and a worker refuses a
+pin it cannot serve, so `min_ability` is no longer enforced against a name unrelated to what
+runs; the tier-1 suite went from 6 items to 40 and is **capped at ability 7**, because
+compliance checks cannot certify the frontier band and a 3B scoring 10 made the cloud
+fallback permanently unreachable; `embed` is gone (seeded, unmeasurable, unservable);
+throughput is addressable as **`min_tps`**, judged by the node that actually knows; artifact
+**capabilities** (`requires`: context window, tools, JSON schema, vision) are a hard filter,
+since no 1–10 score can express a yes/no fact; and hardware fitness now reads **VRAM**, with
+`fits()` distinguishing "runs" from "runs well".
+
 A single coordinator loop runs the escalation / reservation / attention / usage / eval /
 reaper / planner ticks. Deliberately deferred (needs real hardware, a judge model, real usage data,
 or multi-node — documented in code + ADRs): true Wake-on-LAN to real MACs, canary rings +
@@ -172,7 +185,7 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
 # --- worker (one py3-none-any zipapp, ADR 29) ---
 cd worker
 uv venv && uv pip install -e ".[dev]"
-uv run pytest                 # contract conformance + loop/update/ladder/probe (82 tests)
+uv run pytest                 # contract conformance + loop/update/ladder/probe (131 tests)
 uv run ruff check src tests build.py
 uv run cbk work               # start the worker loop
 uv run python build.py        # → dist/cbk.pyz (~2.8 MB, py3-none-any) — the shipped artifact
