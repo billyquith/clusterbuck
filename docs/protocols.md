@@ -32,6 +32,13 @@ POST /jobs
   "min_ability": 6,                     // …and the coordinator resolves an artifact
                                         //   (see model-evaluation.md for the 1-10 scale)
   "capability":  "32b-reason",          // OR name a supply-side tier explicitly (advanced)
+  "min_tps":     15,                    // optional SPEED floor, output tokens/sec. Ability
+                                        //   scores an ARTIFACT and is machine-independent
+                                        //   by design, so it cannot say the same model is
+                                        //   quick on an accelerator and unusable without
+                                        //   one. Checked against each node's MEASURED
+                                        //   stats.tps, and again by the node before it
+                                        //   answers (ADR 36).
   "messages":    [ {role, content}, … ],// OpenAI-style; or "prompt"
   "params":      { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
   "urgency":     "waitable",            // urgent | necessary | waitable — a trajectory:
@@ -60,9 +67,24 @@ POST /jobs
 
 Both addressing forms **fail explicitly** (`422`) at submit time rather than queuing a job
 nothing will ever serve: `task_class`/`min_ability` when no artifact clears the ability bar
-(model-evaluation.md), and `capability` when the name isn't in the fleet registry — a typo'd
-capability would otherwise sit on a stream no worker consumes, with no error and no expiry
-short of `deadline`.
+(model-evaluation.md), `min_tps` when no node serving a qualifying capability has ever
+measured that throughput, and `capability` when the name isn't in the fleet registry — a
+typo'd capability would otherwise sit on a stream no worker consumes, with no error and no
+expiry short of `deadline`.
+
+A speed miss is reported **separately** from an ability miss: "your fleet is not good enough"
+and "your fleet is not fast enough" call for completely different fixes, and a caller told
+only the first would go hunting for a better model it already has. A capability whose nodes
+have measured *nothing* is never excluded — unknown is not slow, and a fresh fleet has
+finished no jobs.
+
+**The resolved artifact is pinned on the job** (`params.model`). A capability is only a queue
+name: the worker draining it answers with its own `CBK_MODEL`, for every capability it
+serves, so without the pin the model whose ability cleared the bar and the model that ran the
+job were unrelated. A client-supplied `params.model` is overwritten — otherwise any caller
+could name a stronger model on a cheaper tier and `min_ability` would enforce nothing. A node
+that lacks the pinned artifact, or cannot meet `min_tps`, returns a **failed** result naming
+the shortfall rather than answering with something else.
 
 **Caller provenance (`submitter`).** A queue holding N byte-identical payloads cannot say
 whether it is one logical call retried N times (a client retry loop) or N genuinely repeated

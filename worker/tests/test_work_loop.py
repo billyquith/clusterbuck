@@ -378,3 +378,49 @@ def test_an_unpinned_job_is_never_refused():
     job = Job.from_wire({"id": "j", "created_at": "t", "capability": "8b-extract",
                          "prompt": "hi", "result_key": "r"})
     assert loop._refuse_reason(job) is None
+
+
+# --- throughput floor: the node is the one that knows how fast it is --------------------
+
+def _job_needing(tps: float) -> Job:
+    return Job.from_wire({
+        "id": "j2", "created_at": "t", "capability": "8b-extract",
+        "prompt": "hi", "min_tps": tps, "result_key": "r:j2",
+    })
+
+
+def _loop_measuring(samples):
+    loop = _loop_with([])
+    for s in samples:
+        loop._tps_samples.append(s)
+    return loop
+
+
+def test_a_node_slower_than_the_floor_refuses():
+    """Ability scores an ARTIFACT and is machine-independent by design, so it cannot say
+    the same model is quick on an accelerator and unusable without one. Only the node can."""
+    reason = _loop_measuring([5.0, 5.0, 5.0])._refuse_reason(_job_needing(20))
+    assert reason and "20" in reason and "5" in reason
+
+
+def test_a_node_fast_enough_takes_the_job():
+    assert _loop_measuring([40.0, 42.0])._refuse_reason(_job_needing(20)) is None
+
+
+def test_a_node_that_has_measured_nothing_never_refuses_on_speed():
+    """No measurement is not the same as slow. A worker that has finished no jobs would
+    otherwise reject every speed-sensitive request on a healthy fresh install."""
+    assert _loop_measuring([])._refuse_reason(_job_needing(20)) is None
+
+
+def test_a_job_with_no_floor_is_never_refused_on_speed():
+    loop = _loop_measuring([1.0])
+    job = Job.from_wire({"id": "j", "created_at": "t", "capability": "8b-extract",
+                         "prompt": "hi", "result_key": "r"})
+    assert loop._refuse_reason(job) is None
+
+
+def test_min_tps_survives_the_wire():
+    assert Job.from_wire({"id": "j", "created_at": "t", "capability": "c",
+                          "prompt": "p", "result_key": "r",
+                          "min_tps": 12.5}).min_tps == 12.5

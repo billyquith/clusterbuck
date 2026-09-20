@@ -192,6 +192,7 @@ bash deploy/e2e/enroll.sh         # M4b: enroll → registry → heartbeat → p
 bash deploy/e2e/join.sh           # one password joins a node; operator key stays home
 bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} routing
 bash deploy/e2e/pinning.sh        # the model that cleared the bar is the model that runs
+bash deploy/e2e/speed.sh          # ADR 36: min_tps measured from real work, and addressable
 bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not config
 bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval
 bash deploy/e2e/eval.sh           # M7: unmeasured model → eval jobs → scored → routable

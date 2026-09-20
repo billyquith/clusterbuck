@@ -833,6 +833,26 @@ class Store:
                 (limit,),
             ).fetchall()
 
+    def best_tps_for(self, capability: str) -> float | None:
+        """Fastest MEASURED throughput among enrolled nodes serving `capability`.
+
+        None means no node serving it has measured anything yet — which is not the same as
+        slow, and callers must not treat it as a failure. A node reports `stats.tps` only
+        after finishing real jobs, so a freshly joined fleet legitimately knows nothing.
+
+        Enrolled nodes, not live ones: the machine that will wake up and claim a patient
+        job is exactly the one that is asleep right now (the same reasoning as ADR 34's
+        tiering gate).
+        """
+        best: float | None = None
+        for n in self.list_nodes():
+            if capability not in json.loads(n.capabilities or "[]"):
+                continue
+            if n.tps is None:
+                continue
+            best = n.tps if best is None else max(best, n.tps)
+        return best
+
     def installed_artifacts(self) -> list[tuple[str, str, list[str]]]:
         """(node_id, artifact, node_capabilities) for every artifact observed on a node."""
         out: list[tuple[str, str, list[str]]] = []

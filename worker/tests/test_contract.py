@@ -128,6 +128,23 @@ def test_committed_job_fixture_parses_without_loss():
     # params must survive verbatim: the eval harness pins the artifact to run in there, and
     # a dropped key would silently score the wrong model.
     assert job.params == (raw.get("params") or {})
+    # A dropped throughput floor is invisible: the job runs, slowly, and reports success.
+    assert job.min_tps == raw.get("min_tps")
+
+
+def test_every_job_field_the_contract_defines_is_read():
+    """A field the schema carries and this worker ignores fails SILENTLY — the job runs,
+    just not the way it was addressed. Cheaper to catch here than in production."""
+    import dataclasses
+
+    schema = json.loads((CONTRACT / "job.schema.json").read_text(encoding="utf-8"))
+    # `submitter` is caller provenance for the coordinator's own accounting — identification
+    # only, and deliberately nothing the worker acts on.
+    coordinator_only = {"submitter"}
+    expected = set(schema["properties"]) - coordinator_only
+    have = {f.name for f in dataclasses.fields(Job)}
+    assert not (expected - have), \
+        f"contract fields the worker never reads: {sorted(expected - have)}"
 
 
 def test_committed_enroll_response_shapes_node_state():

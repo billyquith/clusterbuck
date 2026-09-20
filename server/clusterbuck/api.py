@@ -535,6 +535,7 @@ def create_app(
                 capability=body.capability,
                 task_class=body.task_class,
                 min_ability=body.min_ability,
+                min_tps=body.min_tps,
                 privacy=body.privacy.value,
                 urgency=body.urgency.value,
                 cloud_budget_monthly=settings.cloud_budget_monthly,
@@ -581,6 +582,11 @@ def create_app(
             escalate_after_min=body.escalate_after_min,
             privacy=body.privacy,
             deadline=body.deadline,
+            # Carried to the executor so it can refuse rather than under-serve: the
+            # coordinator knows which nodes serve a capability, but only the node knows how
+            # fast it is right now, with this model loaded and the owner's machine as busy
+            # as it happens to be.
+            min_tps=body.min_tps,
             result_key=result_key,
             submitter=body.submitter,
         )

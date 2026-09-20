@@ -23,6 +23,18 @@ enforced against a name in `fleet.yaml` that nothing reconciled with reality.
 
 The provenance travels with it for the same reason: a job served on a `seed` placeholder has
 not been served on a measurement, and only the caller can decide whether that matters.
+
+**Speed is a second, independent filter (`min_tps`).** Ability scores an *artifact* and is
+machine-independent by design, so it structurally cannot say that the same model is quick on
+an accelerator and unusable without one. That question is answered by `stats.tps`, which each
+node measures from its own real jobs. A capability whose serving nodes have never reached the
+requested throughput is excluded here, exactly as an artifact below `min_ability` is — and for
+the same reason: a floor the caller stated and cannot otherwise learn was missed.
+
+A capability with no measurement at all is NOT excluded. A fresh fleet has finished no jobs,
+and treating "unknown" as "too slow" would make every speed-sensitive request fail on a
+healthy new install. The worker checks again before answering, so an unknown node that turns
+out to be too slow refuses the job rather than under-serving it.
 """
 
 from __future__ import annotations
@@ -49,6 +61,9 @@ class Selection:
     cloud: bool
     score: float | None = None
     provenance: str | None = None
+    # Fastest measured throughput among the nodes serving this capability, or None if none
+    # of them has measured anything yet.
+    tps: float | None = None
 
     @property
     def on_a_guess(self) -> bool:
@@ -87,6 +102,22 @@ def _cloud_gate(
     return None
 
 
+def _too_slow(store: Store, capability: str, min_tps: float | None,
+              cloud: bool) -> tuple[bool, float | None]:
+    """(excluded, measured) for a capability against a throughput floor.
+
+    A cloud capability is never excluded on speed: it has no node, its throughput is the
+    provider's, and nothing here measures it. Neither is a capability whose nodes have not
+    measured anything — unknown is not slow.
+    """
+    if not min_tps or cloud:
+        return False, None
+    measured = store.best_tps_for(capability)
+    if measured is None:
+        return False, None
+    return measured < min_tps, measured
+
+
 def resolve(
     fleet: Fleet | None,
     store: Store,
@@ -94,6 +125,7 @@ def resolve(
     capability: str | None,
     task_class: str | None,
     min_ability: int | None,
+    min_tps: float | None = None,
     privacy: str = "local_only",
     urgency: str = "waitable",
     cloud_budget_monthly: float | None = None,
@@ -127,10 +159,17 @@ def resolve(
             raise NoCapableArtifact(
                 f"capability {capability!r} is cloud-backed and excluded: {excluded}"
             )
+        slow, measured = _too_slow(store, capability, min_tps, spec.cloud)
+        if slow:
+            raise NoCapableArtifact(
+                f"capability {capability!r} is served at {measured:g} tok/s, below the "
+                f"requested {min_tps:g}"
+            )
         # Explicit addressing names a tier, and the tier's registered model is the artifact
         # it means. Pinning it here is what stops the tier's meaning being decided by
         # whatever CBK_MODEL happens to say on the node that claims the job.
-        return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud)
+        return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud,
+                         tps=measured)
 
     if fleet is None or task_class is None or min_ability is None:
         raise NoCapableArtifact(
@@ -140,10 +179,12 @@ def resolve(
     # Candidates whose artifact clears the ability bar for this task class, within privacy,
     # urgency's wake rights, and (for a cloud candidate) budget.
     # (is_cloud, price, capability, artifact, score, provenance)
-    candidates: list[tuple[bool, float, str, str, float, str | None]] = []
+    candidates: list[tuple[bool, float, str, str, float, str | None, float | None]] = []
     excluded_by_privacy = 0
     excluded_by_budget = 0
+    excluded_by_speed = 0
     best_available: float | None = None
+    fastest_seen: float | None = None
     for cap, spec in fleet.capabilities.items():
         excluded = _cloud_gate(spec.cloud, privacy=privacy, urgency=urgency, budget=budget)
         if excluded is not None:
@@ -156,18 +197,26 @@ def resolve(
         if score is None:
             continue
         best_available = score if best_available is None else max(best_available, score)
-        if score >= min_ability:
-            candidates.append((
-                spec.cloud, spec.price_in_per_1k + spec.price_out_per_1k, cap,
-                spec.model, score,
-                store.ability_provenance(spec.model, task_class, scale_version),
-            ))
+        if score < min_ability:
+            continue
+        slow, measured = _too_slow(store, cap, min_tps, spec.cloud)
+        if measured is not None:
+            fastest_seen = measured if fastest_seen is None else max(fastest_seen, measured)
+        if slow:
+            excluded_by_speed += 1
+            continue
+        candidates.append((
+            spec.cloud, spec.price_in_per_1k + spec.price_out_per_1k, cap,
+            spec.model, score,
+            store.ability_provenance(spec.model, task_class, scale_version),
+            measured,
+        ))
 
     if candidates:
         candidates.sort()  # prefer local (False < True) → cheapest
-        cloud, _price, cap, artifact, score, provenance = candidates[0]
+        cloud, _price, cap, artifact, score, provenance, measured = candidates[0]
         return Selection(capability=cap, artifact=artifact, cloud=cloud,
-                         score=score, provenance=provenance)
+                         score=score, provenance=provenance, tps=measured)
 
     detail = (
         f"no artifact reaches ability {min_ability} for task_class {task_class!r}"
@@ -177,6 +226,12 @@ def resolve(
         detail += f"; {excluded_by_privacy} cloud artifact(s) excluded by privacy=local_only"
     if excluded_by_budget:
         detail += f"; {excluded_by_budget} cloud artifact(s) excluded by budget ({budget.reason})"
+    if excluded_by_speed:
+        # Named separately from the ability miss: "your fleet is not good enough" and "your
+        # fleet is not fast enough" call for completely different fixes, and a caller told
+        # only the first would go looking for a better model it already has.
+        detail += (f"; {excluded_by_speed} capable artifact(s) excluded by min_tps "
+                   f"{min_tps:g} (fastest measured: {fastest_seen:g} tok/s)")
     raise NoCapableArtifact(detail)
 
 

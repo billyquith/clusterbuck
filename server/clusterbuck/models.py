@@ -91,6 +91,13 @@ class JobSubmit(BaseModel):
     urgency: Urgency = Urgency.waitable
     escalate_after_min: int | None = Field(default=None, ge=0)
     privacy: Privacy = Privacy.local_only
+    # The SPEED half of need-shaped addressing. `min_ability` says how good the model must
+    # be; this says how fast the machine running it must be. They are different questions
+    # and neither can answer the other: ability scores an artifact and is deliberately
+    # machine-independent, so the same model scores identically on a GPU box and a CPU one
+    # and performs nothing alike. Output tokens/sec, matched against `stats.tps` — which
+    # every node measures from its own real jobs.
+    min_tps: float | None = Field(default=None, ge=0)
     deadline: str | None = None
     callback_url: str | None = None
     reservation: str | None = None  # opt-in reservation id to queue against (§8)
@@ -292,6 +299,8 @@ class JobRecord(BaseModel):
     escalate_after_min: int | None = None
     privacy: Privacy
     deadline: str | None = None
+    # Carried to the worker so it can refuse rather than under-serve (contract §job).
+    min_tps: float | None = None
     result_key: str
     attempts: int = 0
     max_attempts: int = 3

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from clusterbuck.evaluation import SCALE_VERSION, seed_ability
@@ -248,3 +250,52 @@ def test_clearing_twice_keeps_advancing_the_generation(client):
     for expected in (2, 3, 4):
         body = client.post("/ability/clear", params={"artifact": "llama3.2:3b"}).json()
         assert body["generation"] == expected
+
+
+# --- speed: the half of "need-shaped" that ability structurally cannot express ----------
+
+def _node_row(node_id: str, caps: list[str], tps: float | None):
+    from clusterbuck.orm.node import Node
+    return Node(node_id=node_id, node_key="k", profile="shared",
+                capabilities=json.dumps(caps), tps=tps, enrolled_at="t")
+
+
+@pytest.fixture()
+def seeded_with_nodes(seeded, monkeypatch):
+    """Ability seeds plus measured speeds on every tier: a slow small-model box and a
+    faster one carrying both larger tiers."""
+    rows = [_node_row("slow", ["8b-extract"], 4.0),
+            _node_row("fast", ["32b-reason", "70b-reason"], 55.0)]
+    monkeypatch.setattr(seeded, "list_nodes", lambda: rows)
+    return seeded
+
+
+def test_a_capability_too_slow_for_the_floor_is_excluded(seeded_with_nodes):
+    """The 3B clears ability 4 and is cheapest, but the only node serving it measures
+    4 tok/s. A caller that asked for 20 would otherwise be silently handed it."""
+    got = resolve_capability(_fleet(), seeded_with_nodes, capability=None,
+                             task_class="summarize", min_ability=4, min_tps=20)
+    assert got == "32b-reason", "fell back to the slow-but-cheap tier"
+
+
+def test_the_failure_names_speed_separately_from_ability(seeded_with_nodes):
+    """'not good enough' and 'not fast enough' need completely different fixes. A caller
+    told only the first would go hunting for a better model it already has."""
+    with pytest.raises(NoCapableArtifact, match="min_tps"):
+        resolve_capability(_fleet(), seeded_with_nodes, capability=None,
+                           task_class="summarize", min_ability=4, min_tps=500)
+
+
+def test_an_unmeasured_fleet_is_not_treated_as_slow(seeded):
+    """A fresh fleet has finished no jobs. Reading unknown as too slow would fail every
+    speed-sensitive request on a healthy new install."""
+    assert resolve_capability(_fleet(), seeded, capability=None, task_class="summarize",
+                              min_ability=4, min_tps=999) == "8b-extract"
+
+
+def test_explicit_addressing_is_checked_for_speed_too(seeded_with_nodes):
+    """Naming a capability directly is a power-user shortcut, not a bypass — the same rule
+    privacy and budget already follow there."""
+    with pytest.raises(NoCapableArtifact, match="below the requested"):
+        resolve_capability(_fleet(), seeded_with_nodes, capability="8b-extract",
+                           task_class=None, min_ability=None, min_tps=20)

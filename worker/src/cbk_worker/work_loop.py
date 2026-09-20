@@ -102,7 +102,7 @@ class WorkLoop:
         self.installed = frozenset(seen)
 
     def _refuse_reason(self, job: Job) -> str | None:
-        """Why this job's pinned artifact cannot be honoured here, or None.
+        """Why this job cannot be honoured here, or None.
 
         The coordinator pins the artifact whose ability cleared the job's `min_ability`
         bar. Running it on a different model would answer the job at a quality nobody
@@ -113,6 +113,18 @@ class WorkLoop:
         Silent when the inventory is unknown: a model server that did not answer must not
         take the whole node offline.
         """
+        # Throughput floor. The coordinator excluded capabilities whose nodes are known to
+        # be too slow, but "known" is the operative word: a node that had measured nothing
+        # at submit time passes that gate and may still be the wrong machine for the job.
+        # This is the node that actually knows, so it is the one that says no.
+        #
+        # Only ever refuses on a MEASUREMENT. A worker that has finished no jobs has no
+        # speed — which is not the same as being slow — and must not reject work over it.
+        measured = self.tps
+        if job.min_tps and measured is not None and measured < job.min_tps:
+            return (f"job needs {job.min_tps:g} tok/s; this node measures {measured:g}. "
+                    f"Refusing rather than returning a slow answer nobody asked for.")
+
         pinned = (job.params or {}).get("model")
         if not pinned or not self.installed:
             return None

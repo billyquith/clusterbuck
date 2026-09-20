@@ -776,3 +776,56 @@ installers need sibling files — `deploy/systemd/cbk-worker.service` — so the
 required anyway, and piping a script from a private repo does not work); and
 reimplementing service installation inside the join script (two proven installers already do
 it per platform; new logic belongs in one place, OS plumbing stays where it works).
+
+## 36. Speed is a job-level floor the node enforces, not a routing sort key
+
+**Decision:** speed enters addressing as **`min_tps`** — an output-tokens/sec floor the client
+states alongside `min_ability` — filtered at submit against the measured `stats.tps` of the
+nodes serving each capability, and **checked again by the node itself** before it answers.
+A node that cannot meet the floor returns a `failed` result naming the shortfall rather than
+a slow answer.
+
+**Why a second axis at all.** Ability scores an *artifact* and is machine-independent by
+design (ADR 15): the same model scores identically on a 12 GB GPU and a CPU-only box and
+performs nothing alike. That is a deliberate property — quality belongs to the artifact,
+throughput to artifact × node — and it means the ability matrix structurally *cannot* answer
+"will this come back quickly here". `stats.tps` is the measurement that can, and until now
+nothing consumed it: `resolve` sorted on `(is_cloud, price)`, while
+model-evaluation.md's stated order is local → cheapest → **fastest**.
+
+**Why not simply add it to the sort.** Because it does not fit there. Routing selects a
+**capability**, which is a queue name; `tps` belongs to a **node**, and a capability is
+drained by whichever subscribed node claims first. By the time a tier is chosen the ability
+to choose a machine is already gone. The same gap is why the heartbeat's `loaded` field —
+documented as enabling "model-affinity routing" — has never routed anything.
+
+**Why the node decides.** Only the node knows how fast it is *right now*: which model is
+resident, how busy its owner's machine is, whether the last job was a cold start. The
+coordinator's view is a rolling median reported seconds ago, good enough to exclude a
+capability wholesale and not good enough to be the last word. So the coordinator filters on
+what it knows and the node refuses what it cannot serve — the same division of labour as the
+artifact pin, and the same failure mode as every other unmet floor in this system: explicit,
+not silent.
+
+**Unknown is never slow.** A node that has finished no jobs has no measurement, and both
+gates let it through. Reading absence as slowness would fail every speed-sensitive request on
+a healthy new install, and the worker-side check catches the case where it does turn out to
+be too slow.
+
+**Considered — per-node streams** (`q:<cap>:<node>`, the coordinator picking a node on
+`tps` × `loaded` × presence). It gives real speed- and warmth-aware dispatch, and it gives up
+the self-balancing property that made the pull model worth choosing (ADR 2): the coordinator
+must then model which node is free, and a node that sleeps between the choice and the pickup
+strands the job. **Considered — XACK-and-requeue declining**, so a slow node hands the job
+back: re-adding changes the stream entry id, which breaks delivery bookkeeping, the reaper's
+view, and queue-position estimates, and a single-worker fleet hot-loops on the job forever.
+**Considered — a `:fast` stream tier** alongside `:urgent` (ADR 34): jobs carry many
+different floors, so one threshold cannot express them, and a second tier axis multiplies
+streams per capability combinatorially with urgency.
+
+**Known limitation, accepted.** Two nodes of *different* speed serving the *same* capability
+can still race: the slow one may claim a job the fast one could have served, and refuse it.
+The job fails rather than being under-served, which is the correct half; getting it to the
+fast node instead needs node-addressed dispatch, and that is the design above whose costs are
+not yet worth paying at home-fleet scale. On the common shape — a small always-on box and a
+large workstation serving *different* tiers — the race does not arise.
