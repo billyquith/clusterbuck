@@ -108,7 +108,7 @@ async def ui_queues(request: Request) -> HTMLResponse:
 async def ui_fleet(request: Request) -> HTMLResponse:
     fleet = request.app.state.fleet
     caps = (
-        [{"name": n, "queue": s.queue, "model": s.model,
+        [{"name": n, "queue": fleet.stream_for(n), "model": s.model,
           "nodes": ", ".join(nd.id for nd in fleet.nodes_for(n)) or "—"}
          for n, s in fleet.capabilities.items()]
         if fleet else []

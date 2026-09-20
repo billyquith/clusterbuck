@@ -15,7 +15,7 @@ def test_seed_loads():
     fleet = load_fleet(SEED)
     assert "8b-extract" in fleet.capabilities
     cap = fleet.capabilities["8b-extract"]
-    assert cap.queue == "q:8b-extract"
+    assert fleet.stream_for("8b-extract") == "q:8b-extract"
     assert cap.model_server.startswith("http")
     assert cap.model
 
@@ -84,3 +84,18 @@ def test_hosted_cloud_capability_can_still_be_assigned_to_a_node():
             model="m", cloud=True)},
     )
     assert fleet.nodes_for("hosted-cloud") == fleet.nodes
+
+
+def test_a_declared_queue_that_disagrees_with_the_contract_is_rejected():
+    """Workers derive `q:<capability>` and never read this file, so a declared name that
+    differs configures nothing — it just makes the file lie. Fail at load instead."""
+    with pytest.raises(ValueError, match="workers derive it"):
+        Fleet(capabilities={"8b-extract": CapabilitySpec(
+            queue="q:something-else", model="m", model_server="http://x/v1")})
+
+
+def test_a_declared_queue_that_matches_still_loads():
+    """Older files that spell out the derived name keep working."""
+    f = Fleet(capabilities={"8b-extract": CapabilitySpec(
+        queue="q:8b-extract", model="m", model_server="http://x/v1")})
+    assert f.stream_for("8b-extract") == "q:8b-extract"

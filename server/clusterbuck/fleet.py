@@ -15,11 +15,19 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, model_validator
 
+from .queue import stream_key
+
 
 class CapabilitySpec(BaseModel):
     model_config = {"extra": "forbid"}
 
-    queue: str
+    # The stream a worker actually reads is DERIVED from the capability name
+    # (`q:<capability>`, protocols.md §5) — workers never see fleet.yaml, so they cannot be
+    # told a different one. Declaring it here therefore configures nothing; it is accepted
+    # only so existing files keep loading, and validated below so a value that disagrees
+    # with the contract fails at load instead of silently publishing to a stream nothing
+    # drains. Use `stream_for()` to get the real name.
+    queue: str | None = None
     # OpenAI-compatible base URL the sync plane (LiteLLM) calls directly. None for a
     # registered provider account (ADR 30): those have no host — the coordinator calls the
     # provider natively via LiteLLM, keyed by `model`'s "<provider>/<model>" form.
@@ -64,6 +72,30 @@ class Fleet(BaseModel):
         """(input, output) cloud-equivalent price per 1k tokens; (0, 0) if unpriced."""
         spec = self.capabilities.get(capability)
         return (spec.price_in_per_1k, spec.price_out_per_1k) if spec else (0.0, 0.0)
+
+    def stream_for(self, capability: str) -> str:
+        """The base stream for a capability — the contract, not whatever was declared."""
+        return stream_key(capability)
+
+    @model_validator(mode="after")
+    def _declared_queues_match_the_contract(self) -> "Fleet":
+        """A declared `queue:` that disagrees with `q:<capability>` is a silent trap.
+
+        The server would keep publishing to the derived stream while the file claims
+        otherwise — or, if it were ever honoured, publish where no worker reads, since a
+        worker derives its streams from its own capability list and never loads this file.
+        Neither failure surfaces anywhere, so reject the mismatch at load.
+        """
+        for name, spec in self.capabilities.items():
+            expected = stream_key(name)
+            if spec.queue is not None and spec.queue != expected:
+                raise ValueError(
+                    f"capability {name!r} declares queue {spec.queue!r}, but the stream is "
+                    f"always {expected!r} (protocols.md §5) — workers derive it from the "
+                    f"capability name and never read this file. Remove the line, or rename "
+                    f"the capability."
+                )
+        return self
 
     @model_validator(mode="after")
     def _no_host_cloud_capabilities_have_no_node(self) -> "Fleet":

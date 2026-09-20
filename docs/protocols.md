@@ -343,16 +343,20 @@ nodes:
     wake: opportunistic
     capabilities: [8b-extract, 32b-reason, 70b-reason]
 capabilities:
-  8b-extract:  { queue: "q:8b",  model_server: "http://localhost:11434/v1", model: "…" }
-  32b-reason:  { queue: "q:32b", model_server: "http://localhost:11434/v1", model: "…" }
-  70b-reason:  { queue: "q:70b", model_server: "http://localhost:11434/v1", model: "…" }
+  # No `queue:` — the stream is DERIVED from the capability name (`q:<capability>`, above).
+  # A worker builds its stream names from its own capability list and never reads this
+  # file, so a name declared here could only disagree with the one actually in use. A
+  # declared value is still accepted for older files, but it must match or the fleet
+  # refuses to load.
+  8b-extract:  { model_server: "http://localhost:11434/v1", model: "…" }   # → q:8b-extract
+  32b-reason:  { model_server: "http://localhost:11434/v1", model: "…" }   # → q:32b-reason
+  70b-reason:  { model_server: "http://localhost:11434/v1", model: "…" }   # → q:70b-reason
 
   # A registered provider account (ADR 30): no `model_server` — it has no host node, so
   # the coordinator calls it directly instead of dispatching to a worker. `model` is a
   # LiteLLM "<provider>/<model>" id; `api_key_env` NAMES the env var holding the key (never
   # the key itself). Enters the ability matrix unscored, like any new artifact (ADR 15).
   claude-sonnet:
-    queue: "q:claude-sonnet"
     model: "anthropic/claude-3-5-sonnet-20241022"
     api_key_env: CBK_ANTHROPIC_API_KEY
     cloud: true
