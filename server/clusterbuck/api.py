@@ -1007,6 +1007,50 @@ def create_app(
             "capabilities": sorted(fleet.capabilities) if fleet else [],
         }
 
+    @app.get("/releases/{filename}")
+    async def serve_release_artifact(filename: str) -> FileResponse:
+        """A signed release artifact, for a worker updating itself (ADR 13/38).
+
+        UNAUTHENTICATED, deliberately, and this is not the same judgement as
+        `/worker/artifact` below. That one is the bootstrap path for a machine with no
+        identity yet, gated by the join password its installer already holds — gating costs
+        nothing there. This one is fetched by a worker already in the field, which holds a
+        node key and must never be given the operator key. Requiring a credential would
+        break every worker already deployed, which is precisely the fleet auto-update
+        exists to serve.
+
+        It buys nothing, either: the worker verifies an ECDSA signature over
+        (version, rid, sha256, channel, url, protocol_version) and then the digest of what
+        it downloaded, both before writing a byte. The channel is untrusted by design — an
+        attacker who can serve this file still cannot make a worker install it.
+
+        Only files named by the CURRENT release manifest are served, matched on basename.
+        That is an allowlist, not a path join: `filename` never reaches the filesystem as a
+        path, so `..` and absolute paths cannot escape the release directory, and the
+        coordinator cannot be made to serve a file the operator did not bless.
+        """
+        release_path = app.state.update_release
+        if not release_path:
+            raise HTTPException(status_code=404, detail="no release channel configured")
+        try:
+            release = json.loads(Path(release_path).read_text())
+            blessed = {
+                Path(urlsplit(a["url"]).path).name
+                for a in (release.get("artifacts") or {}).values() if a.get("url")
+            }
+        except Exception:
+            _log.exception("could not read the release manifest at %s", release_path)
+            raise HTTPException(status_code=404, detail="release manifest unreadable") from None
+        if filename not in blessed:
+            raise HTTPException(status_code=404, detail="not a released artifact")
+        path = Path(release_path).parent / filename
+        if not path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"{filename} is in the release manifest but missing on disk")
+        return FileResponse(path, media_type="application/octet-stream",
+                            filename=filename)
+
     @app.get("/worker/artifact")
     async def serve_worker_artifact(
         x_cbk_join_password: str | None = Header(default=None),

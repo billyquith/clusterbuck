@@ -17,8 +17,9 @@ Two paths are exempt because they carry their own credential and are how a node 
 * `POST /nodes/{id}/heartbeat` — authenticated by that node's `node_key`.
 
 `GET /healthz` is exempt so liveness probes work, and `/static/*` because it is vendored
-CSS/JS. Everything else — including the dashboard, job submission, and every
-model-management endpoint — requires the key.
+CSS/JS. `GET /releases/*` is exempt because the update channel is untrusted BY DESIGN
+(ADR 13/38) — see the route. Everything else — including the dashboard, job submission,
+and every model-management endpoint — requires the key.
 """
 
 from __future__ import annotations
@@ -47,6 +48,15 @@ def _is_exempt(path: str) -> bool:
     if path in ("/nodes/bootstrap", "/worker/artifact"):
         return True
     if path.startswith("/static/"):
+        return True
+    # Signed release artifacts. Unlike `/worker/artifact` — the BOOTSTRAP path, gated by
+    # the join password the joining script already holds — this one is fetched by a worker
+    # already in the field, which has no operator key and must never be given one. The
+    # security boundary here is the ECDSA signature over (version, rid, sha256, channel,
+    # url, protocol_version) plus the digest check, both applied before a byte is written.
+    # An attacker who can serve this file cannot make a worker install it, so requiring a
+    # credential would buy nothing and would break every worker already deployed (ADR 38).
+    if path.startswith("/releases/"):
         return True
     # A node's own heartbeat is authenticated by its node_key, not the shared secret.
     if path.startswith("/nodes/") and path.endswith("/heartbeat"):

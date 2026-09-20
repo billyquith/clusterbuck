@@ -872,3 +872,42 @@ enforcing `context_tokens` **worker-side** against the running server's configur
 right long-term check, since a runtime started with a smaller window than the model supports
 will still truncate — but it needs a per-server adapter, and the catalog's published figure is
 the useful first cut).
+
+## 38. The update channel serves its artifact unauthenticated, because the signature is the boundary
+
+**Decision:** `GET /releases/{filename}` is exempt from the operator key and serves only the
+files named by the current release manifest. This is the URL a worker's signed update
+manifest points at.
+
+**Why this is not a reversal of `/worker/artifact`'s rule.** That route's comment — *"this
+coordinator serves files to no unauthenticated caller"* — is about the **bootstrap** path: a
+machine with no identity yet, whose installer already holds the join password, so gating
+costs nothing. `/releases/` is fetched by a worker **already in the field**. It holds a node
+key and must never be given the operator key (ADR 26), and the join password is an install-
+time secret it has no reason to keep. Requiring a credential here would mean distributing a
+second secret to every node, and would break every worker already deployed — precisely the
+fleet that auto-update exists to serve.
+
+**Why it costs nothing.** ADR 13 makes the channel untrusted by construction: the worker
+verifies an ECDSA P-256 signature over `(version, rid, sha256, channel, url,
+protocol_version)` and then the digest of what it downloaded, both **before writing a byte**.
+`url` is inside the signed payload precisely so an on-path attacker cannot redirect the
+fetch. An attacker who can serve this file cannot make a worker install it; one who cannot
+forge a signature gains nothing from reading it, since it is Apache-2.0 code.
+
+**Why the coordinator rather than a separate file server.** A second service would be simpler
+to add and worse to keep: it has no idea what the coordinator considers current, so the file
+it serves and the manifest the coordinator signs can drift apart silently — and it is another
+unit to install, secure and restart on every coordinator. Serving from the process that signs
+the manifest makes drift impossible: the same `CBK_UPDATE_RELEASE` file defines both.
+
+**The allowlist matters more than the auth would have.** `filename` is matched against the
+basenames the manifest blesses and is **never joined as a caller-controlled path**, so there
+is nothing for `..` to traverse and the release directory is not a web root. A file sitting
+beside the artifacts — including the manifest itself — is not served.
+
+**Considered:** a **separate static server** (drift, and an extra unit per coordinator);
+teaching the worker to **authenticate the download with its node key** (cleanest in the
+abstract, but a manifest `url` may point anywhere, so the worker would have to decide which
+hosts deserve a credential — a leak hazard invented to solve a problem the signature already
+solves — and it cannot bootstrap a fleet already in the field).

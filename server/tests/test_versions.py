@@ -184,3 +184,71 @@ def test_quarantined_worker_is_told_to_stop_and_gets_no_install(client, monkeypa
     me = next(n for n in client.get("/nodes").json()["nodes"]
               if n["node_id"] == node["node_id"])
     assert me["fitness"] == "quarantine"
+
+
+# --- serving the signed artifact (ADR 38) ----------------------------------------------
+
+import json as _json
+from pathlib import Path as _Path
+
+import pytest as _pytest
+
+from fastapi.testclient import TestClient
+
+from clusterbuck.api import create_app as _create_app
+
+
+@_pytest.fixture()
+def release_client(tmp_path, redis_url):
+    """A coordinator with a release channel configured and one real artifact on disk."""
+    rel = tmp_path / "releases"
+    rel.mkdir()
+    (rel / "cbk-0.9.0.pyz").write_bytes(b"PK\x03\x04 pretend zipapp")
+    (rel / "secret.txt").write_bytes(b"not part of any release")
+    (rel / "release.json").write_text(_json.dumps({
+        "version": "0.9.0", "channel": "stable", "protocol_version": 1,
+        "artifacts": {"py3-none-any": {
+            "url": "http://coordinator:8018/releases/cbk-0.9.0.pyz", "sha256": "0" * 64}},
+    }))
+    app = _create_app(redis_url=redis_url, db_path=str(tmp_path / "r.db"),
+                      start_scheduler=False, update_release=str(rel / "release.json"))
+    with TestClient(app) as c:
+        yield c
+
+
+def test_a_released_artifact_is_served_without_a_credential(release_client):
+    """The worker fetching this has a node key and must never be given the operator key.
+    The signature and digest are the security boundary — an attacker who can serve this
+    file still cannot make a worker install it."""
+    r = release_client.get("/releases/cbk-0.9.0.pyz")
+    assert r.status_code == 200
+    assert r.content.startswith(b"PK")
+
+
+def test_a_file_beside_the_release_is_not_served(release_client):
+    """Only what the manifest names. The release directory is not a web root."""
+    assert release_client.get("/releases/secret.txt").status_code == 404
+
+
+def test_the_manifest_itself_is_not_served(release_client):
+    assert release_client.get("/releases/release.json").status_code == 404
+
+
+@_pytest.mark.parametrize("attempt", [
+    "..%2f..%2fetc%2fpasswd", "....//etc/passwd", "%2e%2e%2fsecret.txt",
+])
+def test_traversal_cannot_escape_the_release_directory(release_client, attempt):
+    """`filename` is matched against an allowlist and never joined as a caller-controlled
+    path, so there is nothing for `..` to traverse."""
+    assert release_client.get(f"/releases/{attempt}").status_code == 404
+
+
+def test_no_release_channel_means_no_route(client):
+    assert client.get("/releases/anything.pyz").status_code == 404
+
+
+def test_a_manifest_entry_missing_on_disk_says_so(release_client, tmp_path):
+    rel = _Path(release_client.app.state.update_release).parent
+    (rel / "cbk-0.9.0.pyz").unlink()
+    r = release_client.get("/releases/cbk-0.9.0.pyz")
+    assert r.status_code == 404 and "missing on disk" in r.json()["detail"]

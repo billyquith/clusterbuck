@@ -438,6 +438,14 @@ X-CBK-Join-Password: …
         "capabilities": [ … ] }   // what the registry knows, for the caller to check
 
 GET /worker/artifact              // same header; the blessed cbk.pyz
+GET /releases/{filename}          // NO credential — the signed update artifact (ADR 38).
+                                  //   Only files the current release manifest names, and
+                                  //   `filename` is matched against that allowlist rather
+                                  //   than joined as a path. A worker already in the field
+                                  //   holds no operator key and no join password; the
+                                  //   signature over (version, rid, sha256, channel, url,
+                                  //   protocol_version) plus the digest are the boundary,
+                                  //   both checked before a byte is written.
 ```
 
 The point is that **the operator key never leaves the coordinator**. A worker has no
