@@ -72,3 +72,68 @@ def test_samples_it_cannot_trust_are_dropped():
     loop._record_tps({"completion_tokens": 10}, 0.0)   # clock gave us no interval
     loop._record_tps({"completion_tokens": True}, 1.0)  # bool is an int subclass in Python
     assert loop.tps is None
+
+
+# --- cold-load time: the number DEFAULT_WARM_LEAD_S was standing in for ----------------
+
+def _loop():
+    cfg = WorkerConfig(redis_url="redis://x", model_name="m:7b", capabilities=("c",))
+    return WorkLoop(redis=None, model=None, cfg=cfg, log=lambda _m: None)
+
+
+def test_unknown_residency_is_never_read_as_a_cold_start():
+    """A model server whose adapter cannot say what is resident reports an empty list.
+    Treating that as "nothing loaded" would record EVERY job as a cold start and report a
+    load time equal to a whole inference."""
+    loop = _loop()
+    loop.set_resident([])
+    assert loop._was_cold("m:7b") is False
+
+
+def test_a_model_absent_from_a_known_residency_list_is_cold():
+    loop = _loop()
+    loop.set_resident(["other:3b"])
+    assert loop._was_cold("m:7b") is True
+    assert loop._was_cold("other:3b") is False
+
+
+def test_load_time_subtracts_the_generation_the_node_can_account_for():
+    """A cold completion is load plus generation on one clock. With 10 tok/s measured and
+    a 30s job producing 100 tokens, 10s was generation and 20s was the model coming up."""
+    loop = _loop()
+    for _ in range(5):
+        loop._tps_samples.append(10.0)
+    loop._record_load({"completion_tokens": 100}, elapsed_s=30.0)
+    assert loop.load_s == 20.0
+
+
+def test_no_throughput_yet_means_no_load_sample():
+    """Without a measured rate there is nothing to subtract, and using the PREVIOUS
+    model's rate would attribute its speed to a different artifact — precisely the case
+    this measurement exists for."""
+    loop = _loop()
+    loop._record_load({"completion_tokens": 100}, elapsed_s=30.0)
+    assert loop.load_s is None
+
+
+def test_a_cold_job_faster_than_steady_state_is_dropped():
+    """It means the model was already warm and the inventory was stale. Recording ~0 would
+    drag the median toward 'instant' and under-warm every future reservation."""
+    loop = _loop()
+    for _ in range(5):
+        loop._tps_samples.append(10.0)
+    loop._record_load({"completion_tokens": 100}, elapsed_s=5.0)
+    assert loop.load_s is None
+
+
+def test_load_is_a_median_not_a_mean():
+    loop = _loop()
+    for _ in range(5):
+        loop._tps_samples.append(100.0)
+    for elapsed in (11.0, 12.0, 90.0):        # one pathological cold start
+        loop._record_load({"completion_tokens": 100}, elapsed_s=elapsed)
+    assert loop.load_s == 11.0
+
+
+def test_load_time_is_omitted_until_measured():
+    assert _loop().load_s is None

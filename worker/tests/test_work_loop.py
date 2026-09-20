@@ -424,3 +424,32 @@ def test_min_tps_survives_the_wire():
     assert Job.from_wire({"id": "j", "created_at": "t", "capability": "c",
                           "prompt": "p", "result_key": "r",
                           "min_tps": 12.5}).min_tps == 12.5
+
+
+async def test_a_model_swap_clears_the_throughput_window(redis_client):
+    """A window that survives a swap reports the OLD model's speed as the new one's —
+    flattering a big model that just landed, libelling a small one that replaced it, and
+    poisoning the load estimate that subtracts it."""
+    cfg = WorkerConfig(redis_url="redis://x", model_name="small:1b", capabilities=("c",),
+                       consumer_group="g", worker_id="w")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=_OK))) as http:
+        loop = WorkLoop(redis_client, ModelClient(http, cfg), cfg, log=lambda _m: None)
+        await loop.ensure_groups()
+
+        async def run(pinned: str | None) -> None:
+            params = {"model": pinned} if pinned else {}
+            await redis_client.xadd(stream_key("c"), {"job": json.dumps({
+                "id": f"j-{pinned}", "created_at": "t", "capability": "c",
+                "prompt": "hi", "params": params, "result_key": f"r-{pinned}"})})
+            await loop.poll_once()
+
+        await run(None)
+        await run(None)
+        assert len(loop._tps_samples) == 2, "no baseline measured"
+
+        await run("big:70b")          # a job pinned to a different artifact
+        # One sample, belonging to the new artifact — the window was emptied, not appended
+        # to. It measures the new model immediately rather than after 20 jobs of drift.
+        assert len(loop._tps_samples) == 1
+        assert loop._tps_model == "big:70b"

@@ -63,8 +63,11 @@ compliance checks cannot certify the frontier band and a 3B scoring 10 made the 
 fallback permanently unreachable; `embed` is gone (seeded, unmeasurable, unservable);
 throughput is addressable as **`min_tps`**, judged by the node that actually knows; artifact
 **capabilities** (`requires`: context window, tools, JSON schema, vision) are a hard filter,
-since no 1–10 score can express a yes/no fact; and hardware fitness now reads **VRAM**, with
-`fits()` distinguishing "runs" from "runs well".
+since no 1–10 score can express a yes/no fact; hardware fitness now reads **VRAM**, with
+`fits()` distinguishing "runs" from "runs well" and capability proposals budgeting against
+it; and the reservation pre-warm lead comes from each node's **measured cold-load time**
+(`stats.load_s`) rather than a hardcoded five minutes. `bench_tps_small` — declared in the
+contract, carried through four layers, never computed or read — is gone.
 
 A single coordinator loop runs the escalation / reservation / attention / usage / eval /
 reaper / planner ticks. Deliberately deferred (needs real hardware, a judge model, real usage data,

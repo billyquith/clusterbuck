@@ -202,6 +202,7 @@ async def ui_nodes(request: Request) -> HTMLResponse:
             "ram_gb": n.ram_gb,
             "accelerator": n.accelerator,
             "vram_gb": n.vram_gb,
+            "load_s": n.load_s,
             "disk_free_gb": n.disk_free_gb,
             "profile": n.profile,
             # Measured, unlike everything above it on this line, which the node asserted

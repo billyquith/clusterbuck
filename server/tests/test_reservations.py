@@ -226,3 +226,47 @@ def test_job_can_reference_confirmed_reservation(rsv_client):
         "reservation": "rsv_nope",
     })
     assert bad.status_code == 400
+
+
+# --- the warm lead is measured, not a constant -----------------------------------------
+
+def test_warm_lead_uses_the_slowest_measured_cold_load(tmp_path):
+    """A reservation does not get to pick which node takes its window, so the lead has to
+    cover the slowest one. `DEFAULT_WARM_LEAD_S` was a hardcoded five minutes standing in
+    for exactly this number."""
+    import json as _json
+
+    from clusterbuck.orm.node import Node
+    from clusterbuck.reservations import DEFAULT_WARM_LEAD_S
+
+    s = Store(str(tmp_path / "lead.db"))
+    rows = [Node(node_id="quick", node_key="k", capabilities=_json.dumps(["c"]),
+                 load_s=8.0, enrolled_at="t"),
+            Node(node_id="slow", node_key="k", capabilities=_json.dumps(["c"]),
+                 load_s=90.0, enrolled_at="t")]
+    s.list_nodes = lambda: rows          # type: ignore[method-assign]
+    assert s.warm_lead_for("c", DEFAULT_WARM_LEAD_S) == 90.0
+
+
+def test_warm_lead_falls_back_when_nothing_measured(tmp_path):
+    """A model server that cannot report which models are resident yields no samples at
+    all — coldness has to be proven — so such a fleet keeps the constant."""
+    from clusterbuck.reservations import DEFAULT_WARM_LEAD_S
+
+    s = Store(str(tmp_path / "lead2.db"))
+    assert s.warm_lead_for("c", DEFAULT_WARM_LEAD_S) == DEFAULT_WARM_LEAD_S
+
+
+def test_a_measured_fleet_warms_earlier_than_its_load_time(tmp_path):
+    """A window that opens onto a model still loading has failed at the one thing
+    pre-warming exists to do, so the measured median is padded."""
+    import json as _json
+
+    from clusterbuck.orm.node import Node
+    from clusterbuck.reservations import WARM_LEAD_SAFETY
+
+    s = Store(str(tmp_path / "lead3.db"))
+    s.list_nodes = lambda: [Node(node_id="n", node_key="k",  # type: ignore[method-assign]
+                                 capabilities=_json.dumps(["c"]), load_s=40.0,
+                                 enrolled_at="t")]
+    assert WARM_LEAD_SAFETY * s.warm_lead_for("c", 300) > 40.0

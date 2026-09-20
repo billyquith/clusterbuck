@@ -2,30 +2,77 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clusterbuck.dev/contract/enroll-request.schema.json",
   "title": "EnrollRequest",
-  "description": "A worker agent's one-time enrollment request (protocols.md §6). Produced by the C# worker, consumed by the Python coordinator.",
+  "description": "A worker agent's one-time enrollment request (protocols.md \u00a76). Produced by the C# worker, consumed by the Python coordinator.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["join_token", "hostname", "os", "arch", "hw", "profile"],
+  "required": [
+    "join_token",
+    "hostname",
+    "os",
+    "arch",
+    "hw",
+    "profile"
+  ],
   "properties": {
-    "join_token": { "type": "string", "minLength": 1, "description": "One-time; burned on use." },
-    "hostname": { "type": "string", "minLength": 1 },
-    "os": { "type": "string", "minLength": 1 },
-    "arch": { "type": "string", "minLength": 1 },
+    "join_token": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One-time; burned on use."
+    },
+    "hostname": {
+      "type": "string",
+      "minLength": 1
+    },
+    "os": {
+      "type": "string",
+      "minLength": 1
+    },
+    "arch": {
+      "type": "string",
+      "minLength": 1
+    },
     "hw": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ram_gb", "accelerator", "disk_free_gb"],
+      "required": [
+        "ram_gb",
+        "accelerator",
+        "disk_free_gb"
+      ],
       "properties": {
-        "ram_gb": { "type": "number", "minimum": 0 },
-        "accelerator": { "type": "string", "enum": ["metal", "cuda", "cpu"] },
-        "vram_gb": { "type": ["number", "null"], "minimum": 0 },
-        "disk_free_gb": { "type": "number", "minimum": 0 },
-        "bench_tps_small": {
-          "type": ["number", "null"], "minimum": 0,
-          "description": "Optional micro-benchmark: tokens/sec on a tiny model."
+        "ram_gb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "accelerator": {
+          "type": "string",
+          "enum": [
+            "metal",
+            "cuda",
+            "cpu"
+          ]
+        },
+        "vram_gb": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Memory an artifact must fit into to run at accelerator speed: the card's total on CUDA, the share of unified memory macOS lets the GPU wire down on Metal. null means no accelerator or not measurable \u2014 NOT zero, which the fits gate reads differently. System RAM is the fallback budget, and a model that fits it but not this one runs from system RAM at a fraction of the speed."
+        },
+        "disk_free_gb": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },
-    "profile": { "type": "string", "enum": ["dedicated", "shared", "background"] }
+    "profile": {
+      "type": "string",
+      "enum": [
+        "dedicated",
+        "shared",
+        "background"
+      ]
+    }
   }
 }

@@ -21,11 +21,22 @@ is the **worker agent** (worker + probe + updater). This document is about nodes
    used for all subsequent auth. The token is minted by the operator's key, but a joining
    machine never holds that key — it trades a **join password** for a single-use token at
    `POST /nodes/bootstrap`, along with the broker URL and the worker artifact (ADR 35).
-4. **Probe** the hardware: RAM (and unified-memory/VRAM), CPU arch, OS, accelerator
-   (Metal / CUDA / CPU-only), free disk, and an optional micro-benchmark (tokens/sec on
-   a tiny model) to calibrate real throughput rather than guessing from specs.
+4. **Probe** the hardware: RAM, **VRAM** (the card's total on CUDA; the share of unified
+   memory macOS lets the GPU wire down on Metal), CPU arch, OS, accelerator
+   (Metal / CUDA / CPU-only), and free disk **on the volume the model server actually
+   writes weights to** — not the filesystem root, which on many machines is a different
+   disk entirely.
+
+   Throughput is deliberately **not** probed here. A benchmark at enrollment times a cold
+   model on an idle machine, once; the worker instead samples real jobs and reports
+   `stats.tps` (output tokens/sec, median over a window) and `stats.load_s` (seconds to
+   bring a model up from cold) on its heartbeat. Both are omitted until measured — a node
+   that has served nothing has no speed, which is not the same as being slow.
 5. **Propose capabilities**: the coordinator maps probe + profile (below) to a suggested
-   model set and capability queues. The owner confirms or edits — the proposal is a
+   model set and capability queues, budgeting against **VRAM where it is known** rather
+   than system RAM — a workstation with 64 GB of RAM behind an 8 GB card can hold a 70B
+   only by spilling it across the bus every token, so proposing that tier advertises a
+   capability it cannot honour. The owner confirms or edits — the proposal is a
    default, not a mandate.
 6. **Serve**: subscribe to the agreed queues, start heartbeating.
 

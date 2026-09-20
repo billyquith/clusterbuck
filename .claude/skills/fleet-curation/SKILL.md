@@ -160,10 +160,13 @@ to be worth a separate address? If ability is unmeasured and usage is empty, the
 nothing to refine *from* — say so plainly rather than producing plausible-looking tiers.
 A single-node fleet with no eval history does not need tier work; it needs measurements.
 
-Note that node capability *proposals* are currently RAM thresholds only
-(`coordinator.py` → `propose_capabilities`), an acknowledged M4 stub that ignores the
-accelerator entirely. Treat a proposed tier set as a starting default, not a judgement —
-a GPU node and a CPU node with equal RAM get identical proposals today.
+Node capability *proposals* (`coordinator.py` → `propose_capabilities`) budget against
+**VRAM where the node reports it**, falling back to system RAM where it does not, and stop
+one tier short on a CPU-only node. So a 64 GB Mac reporting 48 GB of wired-down unified
+memory is proposed two tiers, not three — the correction, not a regression: the third tier
+was a capability it could only serve by swapping. A pre-0.9.0 worker sends no `vram_gb` and
+still gets the old RAM-based proposal. It remains a starting default the owner edits, not a
+judgement; measured throughput and the catalog are still not weighed.
 
 ## When a node enrols but never gets work
 

@@ -108,7 +108,6 @@ class HwProbe:
     accelerator: str = "cpu"
     disk_free_gb: float = 0.0
     vram_gb: float | None = None
-    bench_tps_small: float | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return _prune({
@@ -116,7 +115,6 @@ class HwProbe:
             "accelerator": self.accelerator,
             "disk_free_gb": self.disk_free_gb,
             "vram_gb": self.vram_gb,
-            "bench_tps_small": self.bench_tps_small,
         })
 
 

@@ -269,7 +269,6 @@ class HwProbe(BaseModel):
     accelerator: Literal["metal", "cuda", "cpu"]
     vram_gb: float | None = Field(default=None, ge=0)
     disk_free_gb: float = Field(ge=0)
-    bench_tps_small: float | None = Field(default=None, ge=0)
 
 
 class EnrollRequest(BaseModel):

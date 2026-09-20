@@ -6,9 +6,8 @@
   "hw": {
     "ram_gb": 64,
     "accelerator": "metal",
-    "vram_gb": null,
-    "disk_free_gb": 512,
-    "bench_tps_small": 42.5
+    "vram_gb": 48.0,
+    "disk_free_gb": 512
   },
   "profile": "shared"
 }

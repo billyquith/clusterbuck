@@ -117,6 +117,10 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 # success at a quality nobody checked. Fed from here rather than probed per
                 # job so inference never waits on the model server's catalogue.
                 loop.set_installed(installed)
+                # Which models are warm right now. The work loop needs it to tell a COLD
+                # job from a warm one, which is the only way to measure how long this
+                # machine takes to bring a model up.
+                loop.set_resident(loaded)
 
                 # `stats.tps` is typed `number` in the contract with no null allowed,
                 # so omit it entirely until this worker has actually measured something
@@ -124,6 +128,11 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 stats: dict[str, object] = {"jobs_done": loop.jobs_done}
                 if loop.tps is not None:
                     stats["tps"] = loop.tps
+                # Same rule as tps: omitted until measured, never asserted as zero. A node
+                # that has never observed a cold start has no load time, and reporting 0
+                # would tell the coordinator it can warm instantly.
+                if loop.load_s is not None:
+                    stats["load_s"] = loop.load_s
 
                 resp = await registry.heartbeat(state.node_id, state.node_key,
                     HeartbeatRequest(

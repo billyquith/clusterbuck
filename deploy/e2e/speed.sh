@@ -79,14 +79,18 @@ done
 [[ -n "$TPS" ]] || fail "node never reported a measured tps"
 log "node measured its own throughput from real jobs: $TPS tok/s"
 
-# 3. A floor far above what this fleet has ever achieved is refused AT SUBMIT, and the
+# 3. A floor far above what this node has ever achieved is refused AT SUBMIT, and the
 #    reason names speed rather than ability — they need completely different fixes.
+#
+#    Addressed explicitly, deliberately: a need-shaped request would also consider tiers
+#    NO node serves, and those have no measurement to exclude them on. Unknown is not slow
+#    (that is the rule tested in step 1), so the fleet would legitimately route there.
 HIGH=$(python3 -c "print(int(float('$TPS') * 1000) + 1000)")
 RESP=$(curl -s -X POST "$URL/jobs" -H 'content-type: application/json' \
-  -d "{\"task_class\": \"extract\", \"min_ability\": 4, \"min_tps\": $HIGH,
+  -d "{\"capability\": \"8b-extract\", \"min_tps\": $HIGH,
        \"messages\": [{\"role\":\"user\",\"content\":\"too fast for this fleet\"}],
        \"urgency\": \"necessary\", \"privacy\": \"local_only\"}")
-grep -q "min_tps" <<<"$RESP" || fail "refusal does not name the speed floor: $RESP"
+grep -qi "below the requested" <<<"$RESP" || fail "refusal does not name the speed floor: $RESP"
 log "min_tps $HIGH refused at submit, naming speed not ability ✓"
 
 # 4. A floor this node DOES meet still routes and runs.

@@ -416,8 +416,11 @@ POST /nodes/enroll
   "join_token": "…",                    // one-time; burned on use
   "hostname": "…", "os": "…", "arch": "arm64",
   "hw": { "ram_gb": 64, "accelerator": "metal|cuda|cpu",
-          "vram_gb": null, "disk_free_gb": 512,
-          "bench_tps_small": 42.0 },    // optional micro-benchmark
+          "vram_gb": 48.0,              // what a model must fit into to run at device
+                                        //   speed. null = no accelerator or not
+                                        //   measurable, which is NOT zero. Capability
+                                        //   proposals budget against THIS, not ram_gb.
+          "disk_free_gb": 512 },        // on the MODEL STORE's volume, not the fs root
   "profile": "shared"                   // dedicated | shared | background
 }
 → 201 { "node_id": "…", "node_key": "…",   // per-node auth key from here on
@@ -475,9 +478,19 @@ POST /nodes/{id}/heartbeat
 {
   "mode": "active|away|paused",
   "installed": ["model-a", "model-b"],
-  "loaded":    ["model-a"],             // warm right now — enables model-affinity routing
+  "loaded":    ["model-a"],             // warm right now. Empty means the model server
+                                        //   could not say, NOT that nothing is loaded —
+                                        //   which is why a cold-start measurement needs
+                                        //   positive evidence before it samples.
   "queues":    ["q:8b"],                // current subscriptions (follow the ladder)
-  "stats":     { "jobs_done": 12, "tps": 38.5 }
+  "stats":     { "jobs_done": 12,       // MEASURED from real work, never benchmarked:
+                 "tps": 38.5,           //   median output tokens/sec — the artifact x node
+                                        //   pairing no ability score can express (ADR 36)
+                 "load_s": 24.5 }       //   median seconds to bring a model up from cold,
+                                        //   which is what the reservation pre-warm lead is
+                                        //   computed from. Both are OMITTED until
+                                        //   measured; a node that has served nothing has
+                                        //   no speed, and 0 would claim it is instant.
 }
 → 200 { "update": null | { …manifest, see §7… }, "planner_notes": [ … ] }
 ```

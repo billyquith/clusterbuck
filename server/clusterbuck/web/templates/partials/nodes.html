@@ -17,6 +17,7 @@
            assert about itself. Shown only once observed — a node that has served nothing
            has no speed, which is different from being slow. #}
         {% if n.tps %}<br><span title="median output tokens/sec over recent jobs, measured on this machine">{{ "%g"|format(n.tps) }} tok/s measured</span>{% endif %}
+        {% if n.load_s %}<span title="median seconds to bring a model up from cold on this machine — what the reservation pre-warm lead is computed from"> &middot; {{ "%g"|format(n.load_s) }}s cold load</span>{% endif %}
       </span>
     </td>
     <td>

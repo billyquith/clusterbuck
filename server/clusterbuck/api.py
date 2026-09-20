@@ -1043,7 +1043,8 @@ def create_app(
         if not app.state.store.claim_token(body.join_token, used_by=node_id):
             raise HTTPException(status_code=401, detail="invalid or already-used join token")
         node_key = new_node_key()
-        caps, ladder = propose_capabilities(body.hw.ram_gb)
+        caps, ladder = propose_capabilities(
+            body.hw.ram_gb, body.hw.accelerator, body.hw.vram_gb)
         app.state.store.enroll_node(
             node_id=node_id, node_key=node_key, req=body,
             capabilities=json.dumps(caps), enrolled_at=_now_iso(),
@@ -1083,6 +1084,7 @@ def create_app(
             installed=json.dumps(body.installed), loaded=json.dumps(body.loaded),
             queues=json.dumps(body.queues),
             jobs_done=body.stats.get("jobs_done"), tps=body.stats.get("tps"),
+            load_s=body.stats.get("load_s"),
             last_heartbeat=now,
             agent_version=body.agent_version,
             agent_flavour=body.agent_flavour,
@@ -1265,6 +1267,10 @@ def create_app(
                 # pairing — the same model is identical on ability and nothing alike in
                 # speed on a GPU box versus a CPU one. null until the node finishes a job.
                 "tps": n.tps, "jobs_done": n.jobs_done,
+                # Measured seconds to bring a model up from cold — what the reservation
+                # pre-warm lead is computed from, in place of a hardcoded five minutes.
+                # null where the model server cannot report what is resident.
+                "load_s": n.load_s,
                 "capabilities": json.loads(n.capabilities or "[]"),
                 # Tiers this node advertises but cannot actually honour, because the
                 # registry's model for them is not among its installed artifacts. Empty is

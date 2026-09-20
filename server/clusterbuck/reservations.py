@@ -32,8 +32,18 @@ from .wake import WakeCoordinator
 _log = logging.getLogger("clusterbuck.reservations")
 
 # Lead time: wake + pre-load this long before the window opens, so the cold-load cost is
-# paid off the critical path.
+# paid off the critical path. A FALLBACK, not the rule — the real figure is each node's
+# measured `load_s` (heartbeat `stats.load_s`), because bringing a model up is storage
+# speed times model size and runs from a few seconds on NVMe to minutes on a slow disk.
+# This constant stood in for that measurement while nothing took it, and it still applies
+# to a node whose model server cannot report which models are resident, where coldness
+# cannot be proven and so is never sampled.
 DEFAULT_WARM_LEAD_S = 300
+
+# Measured load times are a median of a handful of cold starts, and a window that opens
+# onto a model still loading has failed at the one thing pre-warming exists to do. Erring
+# early costs a node some idle time; erring late costs the reservation.
+WARM_LEAD_SAFETY = 1.5
 
 
 @dataclass(frozen=True)
@@ -70,7 +80,7 @@ def admit(
     duration_min: int,
     privacy: str = "local_only",
     now: float | None = None,
-    lead_s: int = DEFAULT_WARM_LEAD_S,
+    lead_s: float | None = None,
 ) -> Admission:
     """Feasibility check: can some node clear this need in the requested window?"""
     now = time.time() if now is None else now
@@ -97,6 +107,11 @@ def admit(
         return Admission("declined", reason=f"no node serves {capability}")
 
     starts = window_start_epoch(window_start, now)
+    # An explicit lead wins; otherwise take the slowest cold load measured among the nodes
+    # serving this capability, since the reservation does not get to choose which one takes
+    # the window.
+    if lead_s is None:
+        lead_s = WARM_LEAD_SAFETY * store.warm_lead_for(capability, DEFAULT_WARM_LEAD_S)
     warm_by = max(now, starts - lead_s)
     ends = starts + duration_min * 60
     return Admission(

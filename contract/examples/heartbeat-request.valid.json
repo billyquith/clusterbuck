@@ -17,7 +17,8 @@
   ],
   "stats": {
     "jobs_done": 12,
-    "tps": 38.5
+    "tps": 38.5,
+    "load_s": 24.5
   },
   "protocol_version": 1,
   "action_result": {

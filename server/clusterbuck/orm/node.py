@@ -25,8 +25,12 @@ class Node(SQLModel, table=True):
     ram_gb: float | None = None
     accelerator: str | None = None
     vram_gb: float | None = None
+    # Measured seconds to bring this node's model up from cold (heartbeat `stats.load_s`).
+    # Storage speed times model size, which no probe of either alone can predict, and the
+    # number `DEFAULT_WARM_LEAD_S` was standing in for. None where the model server cannot
+    # report what is resident, so coldness is unprovable.
+    load_s: float | None = None
     disk_free_gb: float | None = None
-    bench_tps_small: float | None = None
     profile: str | None = None
     capabilities: str | None = None  # json array
     disk_quota_gb: float | None = None  # owner's contract for model storage (profile-derived)

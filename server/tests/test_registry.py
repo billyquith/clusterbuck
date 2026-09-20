@@ -100,3 +100,44 @@ def test_the_mismatch_is_not_pushed_back_to_the_worker(client):
                      json={"mode": "active", "installed": ["llama3.2:3b"]},
                      headers={"x-cbk-node-key": node_key})
     assert hb.json()["planner_notes"] == []
+
+
+# --- capability proposals read the memory that will actually hold the model ------------
+
+def _enroll_hw(client, **hw):
+    token = client.post("/nodes/tokens").json()["join_token"]
+    body = _enroll_body(token)
+    body["hw"].update(hw)
+    return client.post("/nodes/enroll", json=body).json()["proposed"]["capabilities"]
+
+
+def test_a_measured_vram_budget_wins_over_system_ram(client):
+    """A 64 GB Mac offers ~48 GB to the GPU, not 64 — so it is proposed two tiers, not
+    three. That is the CORRECTION, not a regression: the old proposal advertised a 70B
+    tier on a machine that would have to swap to serve it."""
+    assert _enroll_hw(client, ram_gb=64, accelerator="metal", vram_gb=48.0) == [
+        "8b-extract", "32b-reason"]
+
+
+def test_a_big_card_still_earns_the_top_tier(client):
+    assert _enroll_hw(client, ram_gb=128, accelerator="cuda", vram_gb=80.0) == [
+        "8b-extract", "32b-reason", "70b-reason"]
+
+
+def test_plenty_of_ram_behind_a_small_card_does_not(client):
+    """The case a RAM-only gate could not see: a workstation that can HOLD a 70B only by
+    spilling it across the bus every token."""
+    assert _enroll_hw(client, ram_gb=128, accelerator="cuda", vram_gb=8.0) == ["8b-extract"]
+
+
+def test_a_cpu_node_is_not_proposed_the_largest_tier(client):
+    """It would run, at a speed that makes the tier a promise the node cannot keep."""
+    assert _enroll_hw(client, ram_gb=256, accelerator="cpu", vram_gb=None) == [
+        "8b-extract", "32b-reason"]
+
+
+def test_unknown_vram_falls_back_to_system_ram(client):
+    """A pre-0.9.0 worker sends no vram_gb. RAM is the honest budget then — it genuinely
+    is the memory the model will live in."""
+    assert _enroll_hw(client, ram_gb=64, accelerator="metal") == [
+        "8b-extract", "32b-reason", "70b-reason"]

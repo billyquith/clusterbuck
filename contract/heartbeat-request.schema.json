@@ -57,6 +57,11 @@
         "tps": {
           "type": "number",
           "minimum": 0
+        },
+        "load_s": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Median seconds to bring a model up from cold on this node, measured by subtracting the generation the node's own `tps` accounts for from a cold job's wall time. Storage speed times model size, which no probe of either alone can predict. Omitted until measured \u2014 a node that has never observed a cold start has no load time, and 0 would claim it warms instantly. Absent on model servers that cannot report which models are resident, since coldness must be proven rather than assumed."
         }
       }
     },
@@ -98,7 +103,7 @@
     },
     "agent_flavour": {
       "type": "string",
-      "description": "Which worker implementation this is, and therefore which release artifact it can actually EXECUTE: 'dotnet' selects a .NET runtime id (osx-arm64, linux-x64, …), 'python' selects the single platform-independent py3-none-any artifact. Deliberately an open string rather than an enum so a new worker language needs no contract change (the C# worker is a reference implementation, not a constraint — ADR 7). Absent ⇒ 'dotnet', the only implementation predating this field. The coordinator FAILS CLOSED: a flavour it has no artifact mapping for is offered no update at all, because handing a worker a binary it cannot run — or worse, one it would install over its own entrypoint — is far worse than leaving it on an old version."
+      "description": "Which worker implementation this is, and therefore which release artifact it can actually EXECUTE: 'dotnet' selects a .NET runtime id (osx-arm64, linux-x64, \u2026), 'python' selects the single platform-independent py3-none-any artifact. Deliberately an open string rather than an enum so a new worker language needs no contract change (the C# worker is a reference implementation, not a constraint \u2014 ADR 7). Absent \u21d2 'dotnet', the only implementation predating this field. The coordinator FAILS CLOSED: a flavour it has no artifact mapping for is offered no update at all, because handing a worker a binary it cannot run \u2014 or worse, one it would install over its own entrypoint \u2014 is far worse than leaving it on an old version."
     }
   }
 }

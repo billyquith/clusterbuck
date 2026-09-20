@@ -37,6 +37,10 @@ TIER_ORDER: tuple[str | None, ...] = (URGENT_TIER, None)
 # off one slow generation, short enough to track a model swap or a machine under load.
 _TPS_WINDOW = 20
 
+# Cold loads are rare by nature — a model comes up once and serves many jobs — so the
+# window is short, and a median of three still beats one unlucky sample.
+_LOAD_WINDOW = 5
+
 
 def stream_key(capability: str, tier: str | None = None) -> str:
     return f"q:{capability}:{URGENT_TIER}" if tier == URGENT_TIER else f"q:{capability}"
@@ -79,6 +83,16 @@ class WorkLoop:
         # lifetime mean: the first job after a cold model load runs dramatically slower
         # than steady state, and an average would carry that outlier forever.
         self._tps_samples: deque[float] = deque(maxlen=_TPS_WINDOW)
+        # Which model those samples describe. A window that survives a model swap reports
+        # the OLD model's speed as the new one's, which is wrong in both directions: it
+        # flatters a big model that just landed and libels a small one that replaced it.
+        self._tps_model: str | None = None
+        # Seconds to bring a model up from cold, recovered from a cold job's wall time.
+        self._load_samples: deque[float] = deque(maxlen=_LOAD_WINDOW)
+        # Models the inventory last reported RESIDENT. Empty means the adapter could not
+        # say (LM Studio, llama.cpp), which is unknown, not "nothing loaded" — and unknown
+        # is never evidence that a job was a cold start.
+        self._resident: frozenset[str] | None = None
 
     @property
     def tps(self) -> float | None:
@@ -93,6 +107,56 @@ class WorkLoop:
         if not self._tps_samples:
             return None
         return round(statistics.median(self._tps_samples), 1)
+
+    @property
+    def load_s(self) -> float | None:
+        """Median seconds to bring this node's model up from cold; None until sampled.
+
+        Reported as `stats.load_s`, and what the coordinator's reservation pre-warm needs:
+        the lead time before a window is storage speed times model size, which no probe of
+        either alone can predict. Absent on any model server that cannot report what is
+        resident — coldness has to be PROVEN, not assumed, or every job on such a node
+        would be recorded as a cold start.
+        """
+        if not self._load_samples:
+            return None
+        return round(statistics.median(self._load_samples), 1)
+
+    def set_resident(self, loaded: Iterable[str]) -> None:
+        """Record which models the inventory reports warm. Empty stays `unknown`."""
+        seen: set[str] = set()
+        for artifact in loaded:
+            seen |= artifact_aliases(artifact)
+        self._resident = frozenset(seen) if seen else None
+
+    def _was_cold(self, model: str) -> bool:
+        """Positive evidence this model was NOT resident when the job arrived."""
+        if self._resident is None:
+            return False  # the adapter cannot say; absence of evidence is not evidence
+        return not (artifact_aliases(model) & self._resident)
+
+    def _record_load(self, usage: dict | None, elapsed_s: float) -> None:
+        """Recover the load share of a cold job's wall time.
+
+        A cold completion is load plus generation on one clock, and the API gives no way
+        to separate them — so subtract the generation this node's own measured throughput
+        accounts for. That needs an EXISTING tps for the same model: the very first job
+        after a swap has none, and using the previous model's median would attribute its
+        speed to a different artifact, which is precisely the case this measurement exists
+        for. Such a sample is skipped rather than guessed.
+        """
+        steady = self.tps
+        if steady is None or not usage or elapsed_s <= 0:
+            return
+        out = usage.get("completion_tokens")
+        if not isinstance(out, (int, float)) or isinstance(out, bool) or out <= 0:
+            return
+        load = elapsed_s - (out / steady)
+        # A cold job faster than steady state means the model was already warm and the
+        # inventory was stale. Recording ~0 would drag the median toward "instant" and
+        # under-warm every future reservation, so drop it.
+        if load > 0:
+            self._load_samples.append(load)
 
     def set_installed(self, artifacts: Iterable[str]) -> None:
         """Record the local inventory, expanded to every spelling of each artifact."""
@@ -231,16 +295,33 @@ class WorkLoop:
         # Monotonic: wall-clock strings would be corrupted by an NTP step or a DST change
         # mid-inference, and a negative elapsed would poison the sample.
         t0 = time.monotonic()
+        # Which artifact this job actually runs on — the pin if it carries one, else this
+        # node's configured model. Decided BEFORE the call, because both measurements below
+        # belong to that artifact and the answer changes when a job pins something else.
+        served = str((job.params or {}).get("model") or self._cfg.model_name)
+        cold = self._was_cold(served)
+        if served != self._tps_model:
+            # A throughput window that survives a model swap reports the old model's speed
+            # as the new one's — flattering a big model that just landed, libelling a small
+            # one that replaced it, and poisoning the load estimate that subtracts it.
+            self._tps_samples.clear()
+            self._tps_model = served
         try:
             refusal = self._refuse_reason(job)
             if refusal is not None:
                 raise RuntimeError(refusal)
             completion, usage = await self._model.complete(job)
+            elapsed = time.monotonic() - t0
             result = Result(job_id=job.id, status="done", worker=self._cfg.worker_id,
                             started_at=started_at, finished_at=_now_iso(),
                             completion=completion, usage=usage)
             self.jobs_done += 1
-            self._record_tps(usage, time.monotonic() - t0)
+            # Load first: it needs the throughput measured BEFORE this job, since this
+            # job's own rate includes the load it is trying to isolate.
+            if cold:
+                self._record_load(usage, elapsed)
+            else:
+                self._record_tps(usage, elapsed)
             self._log(f"done  {job.id} [{capability}]")
         # Any failure becomes a terminal `failed` result rather than an exception that kills
         # the loop: the caller is waiting on a result key and deserves an answer either way.

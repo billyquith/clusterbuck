@@ -836,6 +836,24 @@ class Store:
         with self._session() as s:
             return s.get(CatalogEntry, artifact)
 
+    def warm_lead_for(self, capability: str, default_s: float) -> float:
+        """Seconds of pre-warm a reservation on `capability` should allow.
+
+        The SLOWEST measured cold load among the nodes serving it, because the lead has to
+        cover whichever machine actually takes the window — the reservation does not get to
+        pick. Falls back to `default_s` when nothing has measured: a model server that
+        cannot report which models are resident yields no samples at all (coldness has to be
+        proven), so on such a fleet this is always the constant.
+        """
+        worst: float | None = None
+        for n in self.list_nodes():
+            if capability not in json.loads(n.capabilities or "[]"):
+                continue
+            if n.load_s is None:
+                continue
+            worst = n.load_s if worst is None else max(worst, n.load_s)
+        return worst if worst is not None else default_s
+
     def best_tps_for(self, capability: str) -> float | None:
         """Fastest MEASURED throughput among enrolled nodes serving `capability`.
 
@@ -1054,7 +1072,7 @@ class Store:
                 node_id=node_id, node_key=node_key, hostname=req.hostname, os=req.os,
                 arch=req.arch, ram_gb=req.hw.ram_gb, accelerator=req.hw.accelerator,
                 vram_gb=req.hw.vram_gb, disk_free_gb=req.hw.disk_free_gb,
-                bench_tps_small=req.hw.bench_tps_small, profile=req.profile,
+                profile=req.profile,
                 capabilities=capabilities, mode="active", enrolled_at=enrolled_at,
             ))
             s.commit()
@@ -1070,7 +1088,8 @@ class Store:
 
     def record_heartbeat(self, *, node_id: str, mode: str, installed: str, loaded: str,
                          queues: str, jobs_done: int | None, tps: float | None,
-                         last_heartbeat: str, agent_version: str | None = None,
+                         last_heartbeat: str, load_s: float | None = None,
+                         agent_version: str | None = None,
                          agent_flavour: str | None = None,
                          protocol_version: int | None = None,
                          fitness: str | None = None,
@@ -1095,6 +1114,10 @@ class Store:
                 node.jobs_done = jobs_done
             if tps is not None:
                 node.tps = tps
+            # Both are omitted until measured, never sent as zero, so `is not None` is the
+            # whole test — a heartbeat that carries neither must not erase what is stored.
+            if load_s is not None:
+                node.load_s = load_s
             node.last_heartbeat = last_heartbeat
             s.add(node)
             s.commit()
