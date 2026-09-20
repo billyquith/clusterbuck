@@ -106,7 +106,13 @@ class WorkLoop:
         """
         if not self._tps_samples:
             return None
-        return round(statistics.median(self._tps_samples), 1)
+        median = statistics.median(self._tps_samples)
+        # Two decimals, and never a zero. Rounding a genuinely slow node's rate to one
+        # decimal produced 0.0 on a live fleet — which every consumer then reads as a
+        # MEASUREMENT of zero rather than the absence of one, excluding that node from
+        # every min_tps job and making it refuse the ones it claimed anyway. A node that
+        # cannot be shown to generate anything has no rate, which is the None case.
+        return round(median, 2) or None
 
     @property
     def load_s(self) -> float | None:
@@ -185,7 +191,7 @@ class WorkLoop:
         # Only ever refuses on a MEASUREMENT. A worker that has finished no jobs has no
         # speed — which is not the same as being slow — and must not reject work over it.
         measured = self.tps
-        if job.min_tps and measured is not None and measured < job.min_tps:
+        if job.min_tps and measured and measured < job.min_tps:
             return (f"job needs {job.min_tps:g} tok/s; this node measures {measured:g}. "
                     f"Refusing rather than returning a slow answer nobody asked for.")
 

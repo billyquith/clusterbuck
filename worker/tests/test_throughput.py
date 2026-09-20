@@ -137,3 +137,30 @@ def test_load_is_a_median_not_a_mean():
 
 def test_load_time_is_omitted_until_measured():
     assert _loop().load_s is None
+
+
+def test_a_rate_that_rounds_to_zero_is_reported_as_unmeasured():
+    """Found on a live fleet: a node stored `tps: 0.0`. Every consumer reads that as a
+    MEASUREMENT of zero rather than the absence of one — excluding the node from every
+    min_tps job, and making it refuse the ones it claimed anyway. A node that cannot be
+    shown to generate anything has no rate."""
+    loop = _loop()
+    loop._tps_samples.append(0.001)
+    assert loop.tps is None
+
+
+def test_a_slow_but_real_rate_survives_rounding():
+    loop = _loop()
+    loop._tps_samples.append(0.4)
+    assert loop.tps == 0.4
+
+
+def test_a_zero_rate_never_refuses_a_speed_floor():
+    """Unknown is not slow — the same rule the coordinator's gate follows."""
+    from cbk_worker.models import Job
+
+    loop = _loop()
+    loop._tps_samples.append(0.001)
+    job = Job.from_wire({"id": "j", "created_at": "t", "capability": "c",
+                         "prompt": "hi", "min_tps": 20, "result_key": "r"})
+    assert loop._refuse_reason(job) is None

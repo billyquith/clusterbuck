@@ -849,7 +849,7 @@ class Store:
         for n in self.list_nodes():
             if capability not in json.loads(n.capabilities or "[]"):
                 continue
-            if n.load_s is None:
+            if not n.load_s:
                 continue
             worst = n.load_s if worst is None else max(worst, n.load_s)
         return worst if worst is not None else default_s
@@ -869,7 +869,11 @@ class Store:
         for n in self.list_nodes():
             if capability not in json.loads(n.capabilities or "[]"):
                 continue
-            if n.tps is None:
+            # `not n.tps` rather than `is None`: a stored 0.0 is not a node that generates
+            # nothing, it is a node whose rate was never really measured (older workers
+            # rounded a slow median down to zero). Reading it as a measurement excluded
+            # that node from every min_tps job.
+            if not n.tps:
                 continue
             best = n.tps if best is None else max(best, n.tps)
         return best
