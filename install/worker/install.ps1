@@ -206,6 +206,17 @@ if ($Token) {
     Write-Warn 'Mint a token on the coordinator, then re-run with -Token <value>'
 }
 
+# node.json carries node_key, this node's credential for authenticating its heartbeats.
+# `cbk enroll` creates it fresh, so it inherits the directory ACL and lands readable by
+# every local account. Protected OUTSIDE the enrol branch so an already-enrolled node is
+# repaired too, for the same reason worker.env is.
+#
+# Safe against the worker's own writes: save_state truncates the file in place rather than
+# replacing it, so the ACL survives every mode change. The cost is that `cbk pause` now
+# needs an elevated shell here — which matches Linux, where the file belongs to the
+# service account and a human owner pauses through sudo.
+if (Test-Path $NodeState) { Protect-SecretFile $NodeState }
+
 # ── start ─────────────────────────────────────────────────────────────────────
 if (Test-Path $NodeState) {
     Write-Step 'Starting worker'

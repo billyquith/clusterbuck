@@ -220,6 +220,23 @@ else
   warn "  sudo bash install.sh --coordinator $COORDINATOR_URL --redis-url '...' --model $MODEL_NAME --token TOKEN"
 fi
 
+# node_key lives in node.json, and the default umask leaves it world-readable. Applied
+# outside the branches above so an already-enrolled node is repaired on any re-run, not
+# only on the one that enrols — the same reason worker.env is re-secured every time.
+#
+# Ownership has to be set before the mode is narrowed, because `cbk enroll` ran under sudo
+# and left the file owned by root. On Linux the service is the `clusterbuck` user; on
+# macOS launchd runs it as the invoking user (see UserName in the plist above). Get this
+# wrong and 0600 locks the worker out of its own identity file.
+if [[ -f "$NODE_STATE" ]]; then
+  if [[ "$(os_type)" == "linux" ]]; then
+    chown clusterbuck:clusterbuck "$NODE_STATE"
+  else
+    chown "$INVOKING_USER" "$NODE_STATE"
+  fi
+  chmod 0600 "$NODE_STATE"
+fi
+
 # ── start ─────────────────────────────────────────────────────────────────────
 if [[ -f "$NODE_STATE" ]]; then
   info "starting worker service"
