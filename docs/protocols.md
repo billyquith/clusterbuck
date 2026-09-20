@@ -543,6 +543,7 @@ the operator shared secret (ADR 26) except where noted.
 | `GET /eval` | Eval-harness state: artifacts still needing measurement, and per-batch progress. |
 | `POST /eval/run` | Run one harness pass now instead of waiting for the coordinator cadence. |
 | `GET /catalog` | Known-good artifacts with the metadata the "fits" gate needs (ADR 25). |
+| `POST /catalog` | Add or update a catalog candidate; upsert by `artifact`. The seed list only writes into an empty table, so without this the catalog froze at whatever shipped and no newer model could ever be proposed. `expected_ability` is a ranking **hint** on the 1-10 scale, never a score: an approved install is still measured before anything routes to it (ADR 15). |
 | `GET /proposals` | Planner proposals (`upgrade` / `reeval` / `reclaim`), filterable by status. |
 | `POST /proposals/scan` | Re-run the planner immediately. |
 | `POST /proposals/{id}/approve` \| `/deny` | The human gate. Single-shot: deciding twice is a conflict, not a silent overwrite. |

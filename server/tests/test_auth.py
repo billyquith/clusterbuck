@@ -50,6 +50,7 @@ def open_app(tmp_path):
     ("get", "/eval"),
     ("post", "/eval/run"),
     ("get", "/catalog"),
+    ("post", "/catalog"),
     ("get", "/proposals"),
     ("post", "/proposals/scan"),
     ("get", "/queues"),

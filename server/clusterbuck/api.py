@@ -39,6 +39,7 @@ from .models import (
     RESULT_STATUSES,
     TERMINAL_STATUSES,
     AttentionRequest,
+    CatalogEntrySubmit,
     EnrollRequest,
     HeartbeatRequest,
     JobRecord,
@@ -1104,6 +1105,18 @@ def create_app(
              "source": r.source, "registry_ref": r.registry_ref,
              "expected_ability": r.expected_ability}
             for r in app.state.store.list_catalog()]}
+
+    @app.post("/catalog", status_code=201)
+    async def post_catalog(entry: CatalogEntrySubmit) -> dict:
+        """Add or update a catalog candidate.
+
+        Upsert by `artifact`, so correcting a wrong size_gb is a re-POST rather than a
+        delete-and-recreate. Editing an entry never touches measured ability: that is held
+        per artifact+digest and is only ever earned by evaluation (ADR 15), so curating the
+        catalog cannot promote anything into routing on its own.
+        """
+        app.state.store.upsert_catalog(added_at=_now_iso(), **entry.model_dump())
+        return {"artifact": entry.artifact}
 
     @app.get("/proposals")
     async def get_proposals(status: str | None = None) -> dict:

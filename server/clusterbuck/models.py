@@ -189,6 +189,35 @@ class NodePolicy(BaseModel):
     auto_update: bool | None = None
 
 
+class CatalogEntrySubmit(BaseModel):
+    """A catalog candidate the planner may propose installing (POST /catalog).
+
+    `seed_catalog` only writes when the table is empty, so without a write path the
+    catalog froze at whatever shipped and no newer model could ever be proposed. Curating
+    it is an operator job, so this sits behind the operator key like the rest of the admin
+    surface (ADR 26).
+
+    `expected_ability` stays an admin ranking HINT (ADR 15): it orders candidates for the
+    planner and is never the score routing uses. An approved install is measured by the
+    eval harness before anything routes to it, so a wrong hint costs an eval, not a bad
+    route.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    artifact: str = Field(min_length=1)       # primary key; re-POSTing edits in place
+    registry_ref: str = Field(min_length=1)   # what the model-manager adapter pulls
+    size_gb: float = Field(ge=0)
+    min_ram_gb: float = Field(ge=0)
+    source: str = "ollama"
+    family: str | None = None
+    params_b: float | None = Field(default=None, ge=0)
+    quant: str | None = None
+    # The 1-10 anchored scale (model-evaluation.md). Out-of-range hints are a typo, not a
+    # preference, and would silently distort every ranking they took part in.
+    expected_ability: float | None = Field(default=None, ge=1, le=10)
+
+
 class HwProbe(BaseModel):
     """Hardware probe (contract/enroll-request.schema.json → hw)."""
 

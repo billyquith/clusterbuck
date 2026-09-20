@@ -178,6 +178,42 @@ def test_catalog_endpoint_lists_seeded_artifacts(client):
     assert "qwen2.5:32b" in arts and "llama3.2:3b" in arts
 
 
+def test_post_catalog_adds_a_candidate_the_planner_can_see(client):
+    """The seed only writes into an empty table, so without this the catalog froze at
+    whatever shipped and no newer model could ever be proposed."""
+    body = {"artifact": "newmodel:14b", "registry_ref": "newmodel:14b", "size_gb": 9.0,
+            "min_ram_gb": 24.0, "family": "newmodel", "params_b": 14.0,
+            "quant": "Q4_K_M", "expected_ability": 6.5}
+    assert client.post("/catalog", json=body).status_code == 201
+    entry = next(a for a in client.get("/catalog").json()["artifacts"]
+                 if a["artifact"] == "newmodel:14b")
+    assert entry["expected_ability"] == 6.5 and entry["min_ram_gb"] == 24.0
+
+
+def test_post_catalog_upserts_rather_than_duplicating(client):
+    body = {"artifact": "dupe:7b", "registry_ref": "dupe:7b",
+            "size_gb": 4.0, "min_ram_gb": 16.0}
+    client.post("/catalog", json=body)
+    client.post("/catalog", json={**body, "size_gb": 5.5})
+    rows = [a for a in client.get("/catalog").json()["artifacts"]
+            if a["artifact"] == "dupe:7b"]
+    assert len(rows) == 1 and rows[0]["size_gb"] == 5.5
+
+
+def test_post_catalog_rejects_an_out_of_scale_ability_hint(client):
+    """1-10 is the anchored scale; anything else is a typo that would distort every
+    ranking it took part in."""
+    body = {"artifact": "bad:7b", "registry_ref": "bad:7b", "size_gb": 4.0,
+            "min_ram_gb": 16.0, "expected_ability": 99}
+    assert client.post("/catalog", json=body).status_code == 422
+
+
+def test_post_catalog_rejects_unknown_fields(client):
+    body = {"artifact": "typo:7b", "registry_ref": "typo:7b", "size_gb": 4.0,
+            "min_ram_gb": 16.0, "min_ram": 16.0}
+    assert client.post("/catalog", json=body).status_code == 422
+
+
 def test_scan_then_approve_and_deny(client):
     node = _enroll(client)
     # Report an installed model so there's an incumbent to beat.
