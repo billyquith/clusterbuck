@@ -9,16 +9,36 @@ Automated scripts live in [`install/`](../install/):
 | `install/worker/install.sh` | Linux / macOS | Worker — binary, config, service, enrollment |
 | `install/worker/install.ps1` | Windows | Worker |
 
-**Coordinator quick-start (Linux):**
+**Coordinator quick-start (Linux)** — the repo is private, so clone rather than curl:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/billyquith/clusterbuck/main/install/coordinator/install.sh \
-  | sudo bash -s -- --lan-redis
+git clone git@github.com:billyquith/clusterbuck.git
+sudo bash clusterbuck/install/coordinator/install.sh --lan-redis
 ```
 
-**Worker quick-start (Linux/macOS) — after the coordinator is up:**
+Then set `CBK_JOIN_PASSWORD`, `CBK_WORKER_ARTIFACT` and `CBK_BROKER_ADVERTISE_URL` in
+`/etc/clusterbuck/server.env` and restart — the installer does not write them, and joining
+does not work without them. See the README's *Install the coordinator* for what each one is
+for, and *Coordinator setup* below for the manual equivalent of every other step.
+
+**Worker quick-start — after the coordinator is up:**
 ```bash
-# Build the zipapp on the coordinator first:
-#   cd /opt/clusterbuck/worker && python3 build.py   → dist/cbk.pyz
+git clone git@github.com:billyquith/clusterbuck.git && cd clusterbuck
+sudo bash install/worker/join.sh \
+  --coordinator http://COORDINATOR_HOST:8018 \
+  --model       qwen2.5:7b
+```
+
+It prompts for the join password and fetches everything else from the coordinator: a
+single-use join token, the broker URL, and the `cbk.pyz` to install. Windows is
+`.\install\worker\join.ps1` with the same flags, from an Administrator PowerShell.
+
+`install/worker/install.sh` is what joining hands off to. Call it directly only when
+bootstrap is switched off on the coordinator, in which case you supply what joining would
+have fetched:
+
+```bash
+# Build the zipapp on the coordinator and copy it over first:
+#   cd /opt/clusterbuck/worker && python3 build.py   -> dist/cbk.pyz
 #   scp dist/cbk.pyz worker-host:/tmp/
 
 sudo bash install/worker/install.sh \
@@ -276,6 +296,10 @@ not the data.
 ---
 
 ## Worker setup
+
+This is the manual equivalent of `install/worker/join.sh`, kept for troubleshooting and for
+platforms the installers do not cover. On a normal join you do not need any of it — joining
+fetches the token, the broker URL and the artifact for you.
 
 Run the following on each worker node. Steps 1–5 require root; step 6 onward can be done
 as any user with `sudo`.

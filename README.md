@@ -81,41 +81,104 @@ go quiet: an approved install has to be done by hand in LM Studio, and a model u
 won't be spotted by digest change and re-measured automatically. Inference, routing, eval and
 ability scoring are all unaffected.
 
-### Installing
+## Install the coordinator
 
-Scripted installers live in [`install/`](install) for both roles and all three platforms.
-Coordinator first:
+One machine, always on; everything else joins it. The repo is private, so clone it rather
+than piping a URL into a shell:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/billyquith/clusterbuck/main/install/coordinator/install.sh | sudo bash -s -- --lan-redis
+git clone git@github.com:billyquith/clusterbuck.git
+sudo bash clusterbuck/install/coordinator/install.sh --lan-redis
 ```
 
 It creates a `clusterbuck` system user under `/opt/clusterbuck`, installs Redis from apt and
-gives it a `requirepass`, mints the API key, writes `/etc/clusterbuck/server.env`, and enables
-the systemd unit. No Docker involved — Redis runs as an ordinary system service. (The Windows
-coordinator installer is the one exception: it runs Redis in Docker Desktop, for want of a
-native package.)
-`--lan-redis` is what unbinds Redis from loopback — remote workers cannot reach the queue
-without it. The generated secrets land in `/root/.cbk-secrets`.
+gives it a `requirepass`, mints the operator API key, writes `/etc/clusterbuck/server.env`, and
+enables the systemd unit. No Docker involved — Redis runs as an ordinary system service. (The
+Windows coordinator installer is the one exception: it runs Redis in Docker Desktop, for want of
+a native package.) The generated secrets land in `/root/.cbk-secrets`.
 
-Then each worker, once you have built `cbk.pyz` on the coordinator
-(`cd /opt/clusterbuck/worker && python3 build.py`) and copied it over:
+`--lan-redis` is what unbinds Redis from loopback — remote workers cannot reach the queue
+without it. [`cbk-install/`](cbk-install) has the same sequence broken into inspectable
+per-step scripts if you would rather not hand a whole script to `sudo`.
+
+### Three settings that make joining work
+
+The installer does not write these, and until they are set a joining worker gets a **404** on
+its first call. `server.env` is deliberately never overwritten on re-run, so add them by hand:
 
 ```bash
-sudo bash install/worker/install.sh \
-  --coordinator http://COORDINATOR_HOST:8018 \
-  --redis-url   'redis://:REDIS_PW@COORDINATOR_HOST:6379/0' \
-  --model       qwen2.5:7b \
-  --artifact    /tmp/cbk.pyz \
-  --token       JOIN_TOKEN
+openssl rand -hex 24                            # the join password (16 chars minimum)
+cd /opt/clusterbuck/worker && python3 build.py  # the build joiners download → dist/cbk.pyz
+sudoedit /etc/clusterbuck/server.env            # add the three lines below
+sudo systemctl restart cbk-server
 ```
 
-The worker probes its own hardware, enrols itself with the coordinator, reports the models it
-finds, and starts pulling. `install.ps1` equivalents exist for Windows, and
-[`cbk-install/`](cbk-install) has the same coordinator sequence broken into inspectable
-per-step scripts if you would rather not pipe a script into `sudo bash`.
+```ini
+CBK_JOIN_PASSWORD=<what openssl printed>
+CBK_WORKER_ARTIFACT=/opt/clusterbuck/worker/dist/cbk.pyz
+CBK_BROKER_ADVERTISE_URL=redis://:REDIS_PW@192.168.1.10:6379/0
+```
 
-### The two reachability rules
+- **`CBK_JOIN_PASSWORD`** is the one secret you ever carry to a new machine. Generate it *on
+  the coordinator*, keep it in a password manager, and let the operator API key stay here: the
+  key mints join tokens, approves model installs and deletes models, so a worker has no
+  business holding it (ADR 26). Unset — or shorter than 16 characters — and joining is simply
+  switched off; the coordinator still starts.
+- **`CBK_WORKER_ARTIFACT`** is the `cbk.pyz` the coordinator serves to joiners, so every node
+  runs the same blessed build instead of whatever its own checkout happened to contain. Rebuild
+  it and restart to change what future joins get.
+- **`CBK_BROKER_ADVERTISE_URL`** is the Redis address *other machines* use, which is not the
+  loopback one the coordinator uses for itself. Handing out loopback points each worker at its
+  own localhost, and that failure is silent — install, enrolment and service start all succeed,
+  and the worker then waits forever on a broker that isn't there. So the coordinator refuses to
+  advertise a loopback address at all: bootstrap answers **503** and names this variable rather
+  than serving a URL that cannot work. Same password as `CBK_REDIS_URL`, the coordinator's LAN
+  address instead of `127.0.0.1`.
+
+## Join a worker
+
+On the new machine, this is the whole procedure:
+
+```bash
+git clone git@github.com:billyquith/clusterbuck.git
+cd clusterbuck
+sudo bash install/worker/join.sh --coordinator http://COORDINATOR_HOST:8018 --model qwen2.5:7b
+```
+
+Windows is the same flags, from an Administrator PowerShell (the script passes them straight
+through, so they keep their double dashes):
+
+```powershell
+git clone git@github.com:billyquith/clusterbuck.git
+cd clusterbuck
+.\install\worker\join.ps1 --coordinator http://COORDINATOR_HOST:8018 --model qwen2.5:7b
+```
+
+It prompts for the join password, and nothing else. From there it:
+
+1. exchanges that password with the coordinator for a **single-use join token** and the broker
+   URL — so no Redis credential and no operator key is ever typed on the new machine or left in
+   its shell history;
+2. downloads the coordinator's worker build, rather than building one locally;
+3. hands off to the platform installer, which writes the config, creates the service (systemd,
+   launchd or a Scheduled Task), enrols the node and starts it;
+4. checks what it just built: the worker probes its own hardware and reports the models it
+   finds, and the join warns if this machine would serve a capability tier the coordinator's
+   registry does not define — the failure that otherwise looks perfectly healthy while no job
+   ever routes.
+
+`--dry-run` reports what it would do and installs nothing. On a macOS worker add
+`--model-server http://127.0.0.1:1234/v1 --model-manager none` for LM Studio (see above).
+
+Both clones need git access to a private repo. That is the one prerequisite joining cannot
+fetch for you.
+
+`install/worker/install.sh` and `install.ps1` are what step 3 runs; there is normally no reason
+to invoke them yourself. You would only do so to re-point an existing node, or to join a
+coordinator with bootstrap switched off — in which case you supply the `--token` and
+`--redis-url` that joining would otherwise have fetched.
+
+## The two reachability rules
 
 Most setup problems on a real LAN are one of these, and they are easy to miss because the
 two planes take different network paths:
@@ -137,7 +200,7 @@ plane. [docs/installation.md](docs/installation.md) is the full walkthrough — 
 either role, service files, verification and updates — and [docs/deployment.md](docs/deployment.md)
 covers node roles, GPU/Metal notes and wake configuration.
 
-### Security on a home LAN
+## Security on a home LAN
 
 `CBK_API_KEY` is the operator shared secret — **unset means the API is unauthenticated**,
 which is fine on a trusted LAN and warned about at startup. Set it if anything untrusted
@@ -145,6 +208,13 @@ shares the network: without it the admin surface, including model installs and d
 open to anyone who can route to the port. Clients send `X-CBK-Api-Key` or a bearer token; the
 dashboard takes `/?key=…` once and keeps a cookie. `/healthz`, `/static/*`, enrolment (join
 token) and heartbeat (node key) are exempt.
+
+`CBK_JOIN_PASSWORD` is a **second, weaker secret with one job**: letting a new machine ask
+for a join token and the worker build. The two bootstrap routes it guards are exempt from the
+API key — a joining machine has none, which is the whole point — so that password is the only
+thing in front of the Redis credential bootstrap hands out. Keep it 16 characters or more
+(shorter and the routes stay closed), and rotate it by editing `server.env` and restarting;
+already-joined nodes authenticate with their own per-node key and are unaffected.
 
 ## Not yet real
 

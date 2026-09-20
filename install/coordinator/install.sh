@@ -8,7 +8,8 @@
 # Idempotent: safe to re-run; updates an existing installation in place.
 #
 # Usage:  sudo bash install.sh [OPTIONS]
-# Quick:  curl -fsSL https://raw.githubusercontent.com/billyquith/clusterbuck/main/install/coordinator/install.sh | sudo bash
+# Quick:  git clone https://github.com/billyquith/clusterbuck && sudo bash clusterbuck/install/coordinator/install.sh
+#         (clone rather than curl the raw URL: the repo is private, so raw.githubusercontent.com 404s)
 #
 # Options:
 #   --repo URL       Git repository to clone  (default: https://github.com/billyquith/clusterbuck)

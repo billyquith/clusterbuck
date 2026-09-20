@@ -1,6 +1,6 @@
 # Join this machine to a clusterbuck fleet as a worker — Windows.
 #
-#   .\join.ps1 -Coordinator http://coordinator.local:8018 -Model qwen2.5:7b
+#   .\join.ps1 --coordinator http://coordinator.local:8018 --model qwen2.5:7b
 #
 # Deliberately thin: the logic lives in join.py so it is written once rather than twice
 # (see join.sh, its Linux/macOS counterpart). Arguments are passed straight through, so

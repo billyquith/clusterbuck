@@ -43,7 +43,7 @@ YAML
   CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
   CBK_API_KEY="$OPERATOR_KEY" CBK_JOIN_PASSWORD="$PASSWORD" \
   CBK_WORKER_ARTIFACT="$ARTIFACT" CBK_FLEET_PATH="$WORKDIR/fleet.yaml" \
-  CBK_BROKER_ADVERTISE_URL="redis://192.168.50.146:6379/0" \
+  CBK_BROKER_ADVERTISE_URL="redis://192.168.1.10:6379/0" \
   .venv/bin/python -m clusterbuck >"$WORKDIR/server.log" 2>&1 ) & PIDS+=($!)
 wait_for "$URL/healthz" "server"
 log "coordinator up with bootstrap enabled"

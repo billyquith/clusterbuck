@@ -38,7 +38,7 @@ def fleet_file(tmp_path):
 
 def _client(tmp_path, redis_url, fleet_file, *,
             join_password=GOOD_PASSWORD, artifact=None, api_key=None,
-            advertise="redis://:pw@192.168.50.146:6379/0"):
+            advertise="redis://:pw@192.168.1.10:6379/0"):
     """A coordinator with bootstrap configured as the test wants it.
 
     Passed as arguments rather than patched onto `settings`, which is a frozen dataclass —
@@ -65,7 +65,7 @@ def test_a_correct_password_returns_a_token_and_the_broker_url(
     assert r.status_code == 201
     body = r.json()
     assert body["join_token"]
-    assert body["redis_url"] == "redis://:pw@192.168.50.146:6379/0"
+    assert body["redis_url"] == "redis://:pw@192.168.1.10:6379/0"
     assert body["capabilities"] == ["8b-extract"]
 
 
@@ -207,7 +207,7 @@ def test_a_missing_artifact_file_is_404_not_a_crash(
 # --- the broker address a REMOTE worker is given -------------------------------------
 
 
-LAN_BROKER = "redis://:pw@192.168.50.146:6379/0"
+LAN_BROKER = "redis://:pw@192.168.1.10:6379/0"
 
 
 def test_a_loopback_broker_address_is_refused_not_served(
