@@ -108,7 +108,7 @@ def test_update_pubkey_accepts_inline_pem_or_a_path(monkeypatch, tmp_path):
     assert update_public_key_pem() is None          # unset ⇒ self-update refused (ADR 13)
 
     contract = Path(__file__).resolve().parents[2] / "contract" / "examples"
-    pem = (contract / "update-signing.pub.pem").read_text()
+    pem = (contract / "update-signing.pub.pem").read_text(encoding="utf-8")
 
     def _usable(value: str | None) -> bool:
         from cryptography.hazmat.primitives.serialization import load_pem_public_key

@@ -28,8 +28,8 @@ EXAMPLES = CONTRACT / "examples"
 def test_committed_fixture_verifies():
     """The fixture the SERVER signed, verified here (DER / SEC1 / RFC 3279 format)."""
     m = UpdateManifest.from_wire(
-        json.loads((EXAMPLES / "update-manifest.valid.json").read_text()))
-    pem = (EXAMPLES / "update-signing.pub.pem").read_text()
+        json.loads((EXAMPLES / "update-manifest.valid.json").read_text(encoding="utf-8")))
+    pem = (EXAMPLES / "update-signing.pub.pem").read_text(encoding="utf-8")
     assert upd.verify(m, pem)
 
 
@@ -55,8 +55,8 @@ def test_tampering_with_any_signed_field_fails_verification(field, value):
     from dataclasses import replace
 
     m = UpdateManifest.from_wire(
-        json.loads((EXAMPLES / "update-manifest.valid.json").read_text()))
-    pem = (EXAMPLES / "update-signing.pub.pem").read_text()
+        json.loads((EXAMPLES / "update-manifest.valid.json").read_text(encoding="utf-8")))
+    pem = (EXAMPLES / "update-signing.pub.pem").read_text(encoding="utf-8")
     assert upd.verify(m, pem)                             # baseline
     assert not upd.verify(replace(m, **{field: value}), pem)
 
@@ -64,7 +64,8 @@ def test_tampering_with_any_signed_field_fails_verification(field, value):
 def test_malformed_signature_is_rejected_not_raised():
     m = UpdateManifest(version="1.0.0", rid="x", url="u", sha256="a" * 64,
                        channel="stable", signature="not base64 !!", protocol_version=1)
-    assert upd.verify(m, (EXAMPLES / "update-signing.pub.pem").read_text()) is False
+    pub = (EXAMPLES / "update-signing.pub.pem").read_text(encoding="utf-8")
+    assert upd.verify(m, pub) is False
 
 
 def test_skew_gate():

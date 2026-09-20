@@ -19,12 +19,12 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def _agent_version() -> str:
-    text = (REPO / "worker/src/cbk_worker/config.py").read_text()
+    text = (REPO / "worker/src/cbk_worker/config.py").read_text(encoding="utf-8")
     return re.search(r'AGENT_VERSION = "([^"]+)"', text).group(1)
 
 
 def _pyproject_version() -> str:
-    text = (REPO / "worker/pyproject.toml").read_text()
+    text = (REPO / "worker/pyproject.toml").read_text(encoding="utf-8")
     return re.search(r'(?m)^version = "([^"]+)"', text).group(1)
 
 
@@ -39,7 +39,7 @@ def test_agent_version_matches_pyproject():
 
 
 def _coordinator_default_port() -> str:
-    text = (REPO / "server/clusterbuck/__main__.py").read_text()
+    text = (REPO / "server/clusterbuck/__main__.py").read_text(encoding="utf-8")
     return re.search(r"DEFAULT_PORT = (\d+)", text).group(1)
 
 
@@ -65,7 +65,8 @@ def test_default_server_url_matches_the_coordinators_default_port():
 def test_installers_and_docs_agree_on_that_port():
     """The third place the port is written down. All three or none."""
     port = _coordinator_default_port()
-    installer = (REPO / "install/coordinator/install.sh").read_text()
+    installer = (REPO / "install/coordinator/install.sh").read_text(encoding="utf-8")
     assert re.search(rf'^PORT="{port}"', installer, re.M), \
         f"install/coordinator/install.sh does not default to port {port}"
-    assert f"CBK_PORT={port}" in (REPO / "deploy/systemd/server.env.example").read_text()
+    env_example = (REPO / "deploy/systemd/server.env.example").read_text(encoding="utf-8")
+    assert f"CBK_PORT={port}" in env_example

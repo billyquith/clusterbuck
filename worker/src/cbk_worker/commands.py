@@ -113,11 +113,18 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 loaded = await inventory.loaded()
                 digests = await inventory.digests()
 
+                # `stats.tps` is typed `number` in the contract with no null allowed,
+                # so omit it entirely until this worker has actually measured something
+                # rather than asserting a speed of zero it has not observed.
+                stats: dict[str, object] = {"jobs_done": loop.jobs_done}
+                if loop.tps is not None:
+                    stats["tps"] = loop.tps
+
                 resp = await registry.heartbeat(state.node_id, state.node_key,
                     HeartbeatRequest(
                         mode=effective, installed=installed, loaded=loaded,
                         digests=digests or None, queues=queue_names(caps),
-                        stats={"jobs_done": loop.jobs_done},
+                        stats=stats,
                         protocol_version=PROTOCOL_VERSION,
                         agent_version=AGENT_VERSION,
                         agent_flavour=AGENT_FLAVOUR,

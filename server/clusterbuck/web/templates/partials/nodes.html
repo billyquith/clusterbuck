@@ -13,6 +13,10 @@
           {% if n.disk_free_gb %}&middot; {{ "%g"|format(n.disk_free_gb) }} GB free{% endif %}
           {% if n.profile %}&middot; {{ n.profile }}{% endif %}
         {% endif %}
+        {# Measured from real jobs, so it is the one figure here the node did not simply
+           assert about itself. Shown only once observed — a node that has served nothing
+           has no speed, which is different from being slow. #}
+        {% if n.tps %}<br><span title="median output tokens/sec over recent jobs, measured on this machine">{{ "%g"|format(n.tps) }} tok/s measured</span>{% endif %}
       </span>
     </td>
     <td>

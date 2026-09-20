@@ -31,7 +31,7 @@ EXAMPLES = CONTRACT / "examples"
 
 
 def _validator(name: str) -> Draft202012Validator:
-    schema = json.loads((CONTRACT / f"{name}.schema.json").read_text())
+    schema = json.loads((CONTRACT / f"{name}.schema.json").read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
     return Draft202012Validator(schema)
 
@@ -120,7 +120,7 @@ def test_every_presence_mode_is_a_valid_heartbeat(mode):
 
 
 def test_committed_job_fixture_parses_without_loss():
-    raw = json.loads((EXAMPLES / "job.valid.json").read_text())
+    raw = json.loads((EXAMPLES / "job.valid.json").read_text(encoding="utf-8"))
     job = Job.from_wire(raw)
     assert job.id == raw["id"]
     assert job.result_key == raw["result_key"]
@@ -131,7 +131,7 @@ def test_committed_job_fixture_parses_without_loss():
 
 
 def test_committed_enroll_response_shapes_node_state():
-    raw = json.loads((EXAMPLES / "enroll-response.valid.json").read_text())
+    raw = json.loads((EXAMPLES / "enroll-response.valid.json").read_text(encoding="utf-8"))
     proposed = raw["proposed"]
     state = NodeState(node_id=raw["node_id"], node_key=raw["node_key"],
                       server="http://coordinator:8000",
@@ -142,7 +142,7 @@ def test_committed_enroll_response_shapes_node_state():
 
 
 def test_committed_heartbeat_response_fixture_is_understood():
-    raw = json.loads((EXAMPLES / "heartbeat-response.valid.json").read_text())
+    raw = json.loads((EXAMPLES / "heartbeat-response.valid.json").read_text(encoding="utf-8"))
     _assert_valid("heartbeat-response", raw)
     if raw.get("update"):
         m = UpdateManifest.from_wire(raw["update"])
@@ -151,5 +151,5 @@ def test_committed_heartbeat_response_fixture_is_understood():
 
 def test_committed_manifest_fixture_parses():
     m = UpdateManifest.from_wire(
-        json.loads((EXAMPLES / "update-manifest.valid.json").read_text()))
+        json.loads((EXAMPLES / "update-manifest.valid.json").read_text(encoding="utf-8")))
     assert m.version and len(m.sha256) == 64 and m.signature

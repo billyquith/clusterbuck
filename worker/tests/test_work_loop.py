@@ -322,3 +322,4 @@ async def test_a_malformed_urgent_entry_is_acked_on_its_own_tier(redis_client):
         stream_key("8b-extract", URGENT_TIER), cfg.consumer_group)
     assert pending["pending"] == 0
     await http.aclose()
+

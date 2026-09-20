@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import statistics
+import time
+from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 
@@ -28,6 +31,11 @@ from .models import Job, Result
 # does not tier keeps addressing exactly the stream it always did.
 URGENT_TIER = "urgent"
 TIER_ORDER: tuple[str | None, ...] = (URGENT_TIER, None)
+
+
+# How many recent completions the tokens/sec figure is taken over. Long enough to shrug
+# off one slow generation, short enough to track a model swap or a machine under load.
+_TPS_WINDOW = 20
 
 
 def stream_key(capability: str, tier: str | None = None) -> str:
@@ -50,6 +58,38 @@ class WorkLoop:
         # this build. In-flight jobs already claimed still finish; nothing new is claimed.
         self.paused = False
         self.jobs_done = 0
+        # Output tokens/sec, sampled per completed job. A short window rather than a
+        # lifetime mean: the first job after a cold model load runs dramatically slower
+        # than steady state, and an average would carry that outlier forever.
+        self._tps_samples: deque[float] = deque(maxlen=_TPS_WINDOW)
+
+    @property
+    def tps(self) -> float | None:
+        """Median output tokens/sec over recent jobs; None until the first sample.
+
+        Reported on the heartbeat as `stats.tps`, which the coordinator already persists.
+        This measures the (model, machine) PAIRING, which no model-level ability score can
+        express: the same artifact on a GPU box and a CPU box scores identically on
+        ability and performs nothing alike. Median, not mean, so one cold start or one
+        unusually long generation does not define the node.
+        """
+        if not self._tps_samples:
+            return None
+        return round(statistics.median(self._tps_samples), 1)
+
+    def _record_tps(self, usage: dict | None, elapsed_s: float) -> None:
+        """Sample tokens/sec when the model server reported enough to compute it.
+
+        OUTPUT tokens only. Prompt tokens are consumed by a prefill pass whose cost has
+        little to do with generation speed, so counting them would flatter a long-prompt
+        job and make the figure describe the workload rather than the machine.
+        """
+        if not usage or elapsed_s <= 0:
+            return
+        out = usage.get("completion_tokens")
+        if not isinstance(out, (int, float)) or isinstance(out, bool) or out <= 0:
+            return
+        self._tps_samples.append(out / elapsed_s)
 
     @property
     def capabilities(self) -> tuple[str, ...]:
@@ -131,12 +171,16 @@ class WorkLoop:
         # processing-START time — wrong by a whole inference, and the only completion
         # time the system had.
         started_at = _now_iso()
+        # Monotonic: wall-clock strings would be corrupted by an NTP step or a DST change
+        # mid-inference, and a negative elapsed would poison the sample.
+        t0 = time.monotonic()
         try:
             completion, usage = await self._model.complete(job)
             result = Result(job_id=job.id, status="done", worker=self._cfg.worker_id,
                             started_at=started_at, finished_at=_now_iso(),
                             completion=completion, usage=usage)
             self.jobs_done += 1
+            self._record_tps(usage, time.monotonic() - t0)
             self._log(f"done  {job.id} [{capability}]")
         # Any failure becomes a terminal `failed` result rather than an exception that kills
         # the loop: the caller is waiting on a result key and deserves an answer either way.

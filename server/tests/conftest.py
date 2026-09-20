@@ -23,7 +23,7 @@ TEST_REDIS_URL = os.environ.get("CBK_TEST_REDIS_URL", "redis://localhost:6379/15
 
 
 def load_json(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="session")

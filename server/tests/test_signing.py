@@ -34,7 +34,7 @@ def test_sign_verify_roundtrip():
 
 
 def test_committed_fixture_verifies():
-    m = json.loads((CONTRACT / "examples" / "update-manifest.valid.json").read_text())
+    m = json.loads((CONTRACT / "examples" / "update-manifest.valid.json").read_text(encoding="utf-8"))
     pub = load_pem_public_key((CONTRACT / "examples" / "update-signing.pub.pem").read_bytes())
     assert signing.verify_manifest(pub, m)
 

@@ -1179,6 +1179,11 @@ def create_app(
                 "node_id": n.node_id, "hostname": n.hostname,
                 "os": n.os, "arch": n.arch, "profile": n.profile,
                 "ram_gb": n.ram_gb, "accelerator": n.accelerator,
+                # MEASURED on this machine from real jobs (heartbeat `stats.tps`), not
+                # probed and not declared. Ability scores an artifact; this scores the
+                # pairing — the same model is identical on ability and nothing alike in
+                # speed on a GPU box versus a CPU one. null until the node finishes a job.
+                "tps": n.tps, "jobs_done": n.jobs_done,
                 "capabilities": json.loads(n.capabilities or "[]"),
                 "mode": n.mode,
                 # Observed from the node's model server, not configured (M6a).

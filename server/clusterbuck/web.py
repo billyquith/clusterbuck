@@ -204,6 +204,9 @@ async def ui_nodes(request: Request) -> HTMLResponse:
             "vram_gb": n.vram_gb,
             "disk_free_gb": n.disk_free_gb,
             "profile": n.profile,
+            # Measured, unlike everything above it on this line, which the node asserted
+            # about itself at enrollment.
+            "tps": n.tps,
         })
     return templates.TemplateResponse(request, "partials/nodes.html", {"nodes": nodes})
 
