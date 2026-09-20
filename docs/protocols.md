@@ -424,9 +424,10 @@ Notes that matter:
   the feature, not on the service.
 - The password is validated **before** a token is minted, so failed guesses cannot grow the
   token table.
-- `/worker/artifact` is gated too, even though the artifact is public Apache-2.0 code. Not
-  a claim of secrecy: the caller holds the password anyway, so gating costs nothing and
-  keeps one invariant — the coordinator serves files to no unauthenticated caller.
+- `/worker/artifact` is gated too, even though the artifact is Apache-2.0 code carrying no
+  secret of its own. Not a claim of secrecy: the caller holds the password anyway, so gating
+  costs nothing and keeps one invariant — the coordinator serves files to no unauthenticated
+  caller.
 - `capabilities` is returned so the caller can warn when a node is about to serve a tier
   the registry does not contain. That is the failure mode where enrolment succeeds,
   heartbeats report `fitness: ok`, and no job ever routes.

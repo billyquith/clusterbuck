@@ -171,7 +171,7 @@ def test_the_issued_token_actually_enrolls(tmp_path, redis_url, fleet_file):
 def test_the_artifact_is_served_behind_the_same_password(
     tmp_path, redis_url, fleet_file
 ):
-    """Gated even though the artifact is public Apache-2.0 code. Not a claim of secrecy —
+    """Gated even though the artifact carries no secret of its own. Not a claim of secrecy —
     the joining script holds the password anyway, so gating costs nothing and keeps the
     invariant simple: this coordinator serves files to no unauthenticated caller."""
     art = tmp_path / "cbk.pyz"
