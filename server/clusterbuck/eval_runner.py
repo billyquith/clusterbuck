@@ -55,6 +55,10 @@ MAX_FAILED_RUNS = 6
 # enough: 1-of-2 surviving is precisely the case that recorded a perfect 10.0 from a single
 # item, so the comparison is `>` this fraction, not `>=`.
 MIN_SIGNAL_FRACTION = 0.5
+# Output budget for an eval item. Generous on purpose: it must fit a reasoning model's
+# preamble AND its answer, because a reply truncated mid-thought is indistinguishable from
+# a wrong one at the check, and scoring it would rank models by how tersely they think.
+EVAL_MAX_TOKENS = 2048
 
 
 def _suite_classes(suite: list[EvalItem], min_items: int = MIN_ITEMS_FOR_SCORE) -> set[str]:
@@ -166,7 +170,14 @@ async def dispatch(
                 messages=[Message(role="user", content=item.prompt)],
                 # Pin the artifact under test; the executor (worker or cloud, ADR 30)
                 # forwards this to override its capability's own default model.
-                params={"model": artifact, "temperature": 0.0, "max_tokens": 256},
+                # The cap has to clear a REASONING model's preamble. At 256 a qwen3-class
+                # model spends the whole budget thinking and returns empty content, so the
+                # score measured the cap rather than the model: observed live, a 30B
+                # scoring 3.5 at extract against a 9B's 7.0, purely because the 9B had its
+                # thinking suppressed. A cap is not a target — a model that answers in ten
+                # tokens still answers in ten.
+                params={"model": artifact, "temperature": 0.0,
+                        "max_tokens": EVAL_MAX_TOKENS},
                 urgency=Urgency.waitable,   # never wakes a machine for an eval
                 privacy=privacy,
                 result_key=result_key,
@@ -187,6 +198,15 @@ async def dispatch(
         if enqueued:
             _log.info("eval dispatched for %s via %s", artifact, capability)
     return enqueued
+
+
+def _was_truncated(result: dict) -> bool:
+    """Did the model stop because it hit the output cap rather than because it finished?"""
+    completion = result.get("completion")
+    if not isinstance(completion, dict):
+        return False
+    choices = completion.get("choices") or []
+    return bool(choices) and choices[0].get("finish_reason") == "length"
 
 
 def _completion_text(result: dict) -> str | None:
@@ -234,6 +254,16 @@ async def collect(
         if text is None or index >= len(suite):
             store.fail_eval_run(run.job_id)
             touched.add((run.artifact, run.task_class, run.generation))
+            continue
+        if _was_truncated(result):
+            # Ran out of output budget before finishing. That is a fact about the cap, not
+            # about the model, and a truncated reply fails a check for the wrong reason —
+            # so it counts as NO SIGNAL, exactly like an infrastructure failure. Scoring it
+            # would mark a model down for thinking at length.
+            store.fail_eval_run(run.job_id)
+            touched.add((run.artifact, run.task_class, run.generation))
+            _log.info("eval item truncated at the token cap: %s/%s item %d — no signal",
+                      run.artifact, run.task_class, index)
             continue
         store.score_eval_run(run.job_id, bool(suite[index].check(text)))
         scored += 1

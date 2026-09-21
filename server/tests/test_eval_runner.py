@@ -395,3 +395,46 @@ async def test_superseding_retires_runs_still_in_flight(store, queue):
     assert store.pending_eval_runs() == []
     assert ARTIFACT not in store.artifacts_under_eval()
     assert await dispatch(store, queue, now="t2", suite=SUITE, min_items=1) == 2
+
+
+# --- a reply cut off at the token cap is not a wrong answer ----------------------------
+
+async def test_a_truncated_reply_is_no_signal_not_a_failure(store, queue):
+    """Found live: the harness capped output at 256 tokens, and a reasoning model spent all
+    of it thinking and returned empty content. That scored a 30B at 3.5 for extract against
+    a 9B's 7.0 — the 9B only winning because its template suppressed thinking. The number
+    measured the cap, not the model."""
+    _enroll_with(store, [ARTIFACT])
+    single = [SUITE[0], SUITE[0]]
+    await dispatch(store, queue, now="t", suite=single, min_items=1)
+
+    for run in store.pending_eval_runs():
+        await queue.client.set(run.result_key, json.dumps({
+            "job_id": run.job_id, "status": "done", "worker": "w", "completed_at": "t",
+            "completion": {"choices": [{"finish_reason": "length",
+                                        "message": {"role": "a", "content": ""}}]}}))
+    await collect(store, queue, now="t", suite=single, min_items=1)
+
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None, \
+        "scored a model on replies it never got to finish"
+
+
+async def test_a_complete_reply_is_still_scored(store, queue):
+    """The guard must key on finish_reason, not on emptiness — a model that legitimately
+    answers badly still earns its low score."""
+    _enroll_with(store, [ARTIFACT])
+    single = [SUITE[0], SUITE[0]]
+    await dispatch(store, queue, now="t", suite=single, min_items=1)
+    for run in store.pending_eval_runs():
+        await queue.client.set(run.result_key, json.dumps({
+            "job_id": run.job_id, "status": "done", "worker": "w", "completed_at": "t",
+            "completion": {"choices": [{"finish_reason": "stop",
+                                        "message": {"role": "a", "content": "not json"}}]}}))
+    await collect(store, queue, now="t", suite=single, min_items=1)
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == 1.0
+
+
+def test_the_eval_budget_clears_a_reasoning_preamble():
+    """256 was not enough for a single qwen3-class answer, measured on real hardware."""
+    from clusterbuck.eval_runner import EVAL_MAX_TOKENS
+    assert EVAL_MAX_TOKENS >= 1024
