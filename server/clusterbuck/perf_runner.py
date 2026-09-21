@@ -4,10 +4,15 @@ A stream of randomized queries against the coordinator's own real `/jobs` API, s
 for a period long enough that node models actually warm up, with a per-reply adequacy
 check scored the moment each reply lands.
 
-Each category below is a small generator: it produces a fresh prompt with randomized
-values plugged in, plus (derived from those same values) a check the reply is scored
-against — reusing the project's existing deterministic tier-1 checkers (`evaluation.py`).
-No LLM judge: that tier is deferred project-wide, and this doesn't invent a new exception.
+Prompts and checks come from the shared tier-1 suite (`evaluation.SEED_SUITE`), drawn at
+random per query — so a load run measures the same artifacts against the same items the
+ability matrix does, and `pass_rate` here means what `pass_rate` means there. No LLM
+judge: that tier is deferred project-wide, and this does not invent a new exception.
+
+What this module uniquely measures is LOAD: p50/p90 latency, jobs per second, and the
+served-vs-unassigned split. Those only exist when queries are driven concurrently for a
+sustained period, which nothing else here does. Quality it now borrows rather than
+reinvents.
 
 No cloud escalation. Some requests won't be servable by the local fleet at all —
 `routing.resolve_capability` already fails explicitly (HTTP 422) rather than silently
@@ -23,16 +28,15 @@ import dataclasses
 import json
 import logging
 import random
-import string
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Callable
+from datetime import UTC, datetime
 
 import httpx
 
 from .config import settings
-from .evaluation import check_contains, check_json_valid
+from .evaluation import TASK_CLASSES, items_for
 from .ids import new_perf_run_id, new_perf_sample_id
 from .models import PerfRunSubmit
 from .orm.perf_run import PerfRun
@@ -63,185 +67,49 @@ def _wrap(check_fn: Callable[[str], bool], ok_detail: str, fail_detail: str) -> 
     return run
 
 
-# --- category generators (each reusable across many random instantiations) ---
+# --- queries come from the shared tier-1 suite ------------------------------------------
+#
+# These used to be seven bespoke generators with their own prompts, their own checkers
+# (self-described in the code as "deliberately approximate" and "explicitly a weak proxy")
+# and their own hardcoded ability floors. That made a THIRD notion of "did the model get
+# this right", alongside the ability matrix and node throughput — and the weakest of the
+# three, measuring nothing the others measured and feeding nothing.
+#
+# The load driver is worth keeping: p50/p90 latency, jobs/s and the served-vs-unassigned
+# split exist nowhere else, because they only appear when jobs are driven concurrently.
+# The private scoring is not. So the run now draws its prompts from `SEED_SUITE` and
+# scores them with the same checkers the ability matrix uses, which makes the Performance
+# page's `pass_rate` mean the same thing as the matrix's for the same artifact.
 
-_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-_ERROR_CODES = ["db_connect_failed", "timeout", "auth_denied", "disk_full"]
-
-
-def _gen_extract_ticket(rng: random.Random) -> GeneratedQuery:
-    order_id = rng.randint(10000, 99999)
-    amount = f"{rng.uniform(5, 500):.2f}"
-    deadline = rng.choice(_WEEKDAYS)
-    prompt = (
-        f"Here is a snippet of a support ticket: 'Order #{order_id} arrived damaged, "
-        f"customer wants a refund of ${amount} processed by {deadline}.' "
-        "Extract the order number, refund amount, and deadline as JSON with keys "
-        "order_id, refund_amount, deadline."
-    )
-
-    def check(reply: str) -> tuple[bool, str]:
-        if not check_json_valid(reply):
-            return False, "reply is not valid JSON"
-        if str(order_id) not in reply:
-            return False, f"expected order id {order_id} in reply"
-        if amount not in reply:
-            return False, f"expected amount {amount} in reply"
-        return True, "ok"
-
-    return GeneratedQuery("extract-ticket", "extract", 3, prompt, check)
+# Ability floor per task class. Carried over from the retired generators deliberately: a
+# default run has to produce BOTH served and unassigned samples on a fleet whose best
+# local artifact sits around 4, which is what deploy/e2e/perf.sh asserts. Flattening these
+# to one value would make every sample land the same way and the load test stop showing
+# routing gaps at all.
+_ABILITY_FLOOR = {"extract": 3, "summarize": 4, "reason": 6, "code": 6}
 
 
-def _gen_extract_log(rng: random.Random) -> GeneratedQuery:
-    ts = (f"2026-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}T"
-          f"{rng.randint(0, 23):02d}:{rng.randint(0, 59):02d}:00Z")
-    code = rng.choice(_ERROR_CODES)
-    attempt = rng.randint(1, 5)
-    prompt = (
-        "From this log line, extract the timestamp and error code as JSON with keys "
-        f"timestamp, error_code: '{ts} ERROR {code} retrying in 5s (attempt {attempt})'"
-    )
-    check = _wrap(
-        lambda r: check_json_valid(r) and code in r,
-        "ok", f"expected valid JSON containing error code {code!r}",
-    )
-    return GeneratedQuery("extract-log", "extract", 3, prompt, check)
+def _suite_generator(task_class: str) -> Generator:
+    """Draw a random item of this task class from the shared suite."""
+    items = items_for(task_class)
+    if not items:
+        raise ValueError(f"no suite items for task class {task_class!r}")
 
-
-def _random_email(rng: random.Random) -> str:
-    local = "".join(rng.choices(string.ascii_lowercase, k=8))
-    domain = rng.choice(["example.com", "example.org", "example.net"])
-    return f"{local}@{domain}"
-
-
-def _gen_extract_emails(rng: random.Random) -> GeneratedQuery:
-    emails = [_random_email(rng) for _ in range(rng.randint(2, 4))]
-    sentence = "Please contact " + " or ".join(emails) + " for assistance with your order."
-    prompt = f"Extract all email addresses from this text as a JSON array: '{sentence}'"
-
-    def check(reply: str) -> tuple[bool, str]:
-        if not check_json_valid(reply):
-            return False, "reply is not valid JSON"
-        missing = [e for e in emails if e not in reply]
-        if missing:
-            return False, f"missing address(es): {', '.join(missing)}"
-        return True, "ok"
-
-    return GeneratedQuery("extract-emails", "extract", 3, prompt, check)
-
-
-_CHANGELOG_SENTENCES = [
-    "Fixed a crash when opening large files.",
-    "Improved startup time by roughly 15 percent.",
-    "Resolved an issue where settings would not save on the first attempt.",
-]
-
-
-def _gen_summarize(rng: random.Random) -> GeneratedQuery:
-    codename = ("".join(rng.choices(string.ascii_uppercase, k=1))
-                + "".join(rng.choices(string.ascii_lowercase, k=5)))
-    body = (
-        f"Release notes for project {codename}: " + " ".join(_CHANGELOG_SENTENCES)
-        + f" A new feature, {codename} Sync, was also added for offline editing."
-    )
-    prompt = f"Summarize the following paragraph in one sentence: {body}"
-    check = _wrap(
-        check_contains(codename), "ok", f"expected the project name {codename!r} in the summary",
-    )
-    return GeneratedQuery("summarize", "summarize", 4, prompt, check)
-
-
-def _gen_reason_arithmetic(rng: random.Random) -> GeneratedQuery:
-    if rng.random() < 0.5:
-        head_start_h = rng.randint(1, 4)
-        v1 = rng.choice([40, 50, 60, 70, 80, 90])
-        v2 = v1 * 2
-        answer = head_start_h
-        prompt = (
-            f"A train leaves station A at {v1} km/h. {head_start_h} hour(s) later a second "
-            f"train leaves the same station on the same track at {v2} km/h. How many hours "
-            "after the SECOND train departs does it catch up to the first train? Give just "
-            "the number of hours."
+    def generate(rng: random.Random) -> GeneratedQuery:
+        item = rng.choice(items)
+        return GeneratedQuery(
+            category=task_class,
+            task_class=task_class,
+            min_ability=_ABILITY_FLOOR[task_class],
+            prompt=item.prompt,
+            check=_wrap(item.check, "ok", f"failed the tier-1 {task_class} check"),
         )
-    else:
-        b = rng.randint(10, 30)
-        delta = rng.randint(5, 20)
-        a, c = b + delta, 2 * b
-        total = a + b + c
-        answer = b
-        prompt = (
-            f"Three warehouses share a shipment of {total} crates unevenly: warehouse A "
-            f"received {delta} more crates than warehouse B, and warehouse C received "
-            "twice what warehouse B received. How many crates did warehouse B receive? "
-            "Give just the number."
-        )
-    check = _wrap(check_contains(str(answer)), "ok", f"expected {answer} in reply")
-    return GeneratedQuery("reason-arithmetic", "reason", 6, prompt, check)
+    return generate
 
 
-def _gen_reason_logic(rng: random.Random) -> GeneratedQuery:
-    # Item count fixed at 8 (the classic variant where 2 weighings provably suffice) —
-    # randomizing the count would silently change the correct answer. Only the framing
-    # varies, so this is still fresh traffic, not a verbatim-repeated prompt. The check is
-    # deliberately approximate (does the reply mention the right weighing count at all),
-    # not a strict verifier of the reasoning itself.
-    thing = rng.choice(["coins", "marbles", "weights", "balls"])
-    prompt = (
-        f"You have 8 identical-looking {thing}, one of which is heavier than the rest. "
-        "Using a balance scale exactly twice, describe a procedure to find the heavier one. "
-        "Answer in at most 3 short sentences — steps only, no explanation of why it works."
-    )
-    check = _wrap(
-        check_contains("2"), "ok",
-        "expected the reply to reference 2 weighings (approximate check)",
-    )
-    return GeneratedQuery("reason-logic", "reason", 7, prompt, check)
-
-
-def _gen_code_fn(rng: random.Random) -> GeneratedQuery:
-    # Pattern/keyword checks only — a real correctness check would need sandboxed
-    # execution, which doesn't exist anywhere in clusterbuck today. Explicitly a weak
-    # proxy: it can tell you the reply is roughly on-topic, not that the code is right.
-    kind = rng.choice(["palindrome", "sql", "bash"])
-    if kind == "palindrome":
-        fn_name = rng.choice(["is_palindrome", "check_palindrome", "is_palindromic"])
-        prompt = (
-            f"Write a Python function `{fn_name}(s: str) -> bool` that returns True if s "
-            "is a palindrome, ignoring case and non-alphanumeric characters."
-        )
-        check = _wrap(check_contains(f"def {fn_name}"),
-                      "ok", f"expected a `def {fn_name}` in the reply")
-    elif kind == "sql":
-        table = rng.choice(["employees", "staff", "workers"])
-        column = rng.choice(["salary", "wage", "pay"])
-        prompt = (
-            f"Write a SQL query to find the second-highest {column} from a "
-            f"`{table}(id, name, {column})` table."
-        )
-        check = _wrap(
-            lambda r: "select" in r.lower() and column.lower() in r.lower(),
-            "ok", f"expected a SELECT referencing {column!r}",
-        )
-    else:
-        size_mb = rng.choice([50, 100, 200])
-        prompt = (
-            f"Write a bash one-liner that finds all files larger than {size_mb}MB under "
-            "the current directory and lists them sorted by size."
-        )
-        check = _wrap(check_contains("find"), "ok", "expected the reply to use `find`")
-    return GeneratedQuery("code-fn", "code", 6, prompt, check)
-
-
-# `embed` is excluded — no capability in fleet.yaml serves embeddings today.
-CATEGORIES: dict[str, Generator] = {
-    "extract-ticket": _gen_extract_ticket,
-    "extract-log": _gen_extract_log,
-    "extract-emails": _gen_extract_emails,
-    "summarize": _gen_summarize,
-    "reason-arithmetic": _gen_reason_arithmetic,
-    "reason-logic": _gen_reason_logic,
-    "code-fn": _gen_code_fn,
-}
+# One category per task class now, not seven hand-rolled ones. The name is kept because
+# it is the config and UI contract (`PerfConfig.categories`, the form's checkboxes).
+CATEGORIES: dict[str, Generator] = {tc: _suite_generator(tc) for tc in TASK_CLASSES}
 
 
 @dataclass
@@ -393,7 +261,7 @@ async def run_perf_test(app, store: Store, run_id: str, config: PerfConfig) -> N
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class UnknownCategory(ValueError):

@@ -153,30 +153,105 @@ async def ui_decide(request: Request, proposal_id: str, decision: str) -> HTMLRe
     return await ui_proposals(request)
 
 
-@web_routes.get("/ui/ability", response_class=HTMLResponse)
-async def ui_ability(request: Request) -> HTMLResponse:
-    from .evaluation import SCALE_VERSION
+@web_routes.get("/ui/models", response_class=HTMLResponse)
+async def ui_models(request: Request) -> HTMLResponse:
+    """One row per (artifact, node): the join the models page never made.
 
-    rows = request.app.state.store.ability_matrix(SCALE_VERSION)
-    by_artifact: dict[str, list[float]] = {}
-    for r in rows:
-        by_artifact.setdefault(r.artifact, []).append(r.score)
-    arts = sorted(
-        ({"artifact": a, "headline": round(sum(s) / len(s), 1)} for a, s in by_artifact.items()),
-        key=lambda x: x["headline"], reverse=True,
+    The page used to be four panels that shared no key. Ability listed artifacts with a
+    single headline number; Fleet listed tiers and their configured model; Enrolled nodes
+    listed hardware and installed models. The artifact appeared in three of them under
+    three framings and nothing tied them together, so "is this model good, and fast, here,
+    and what can it do" was a manual cross-reference across three tables.
+
+    Three things the API already returned and no template rendered:
+
+      * per-task-class scores. The headline was an equal-weight MEAN, so a model scoring
+        9/9/3/3 and one scoring 6/6/6/6 both displayed 6.0 — the difference between a
+        specialist and a uniformly mediocre model, erased.
+      * provenance and evidence. A `seed` placeholder (a guess shipped in the code) and a
+        measurement over forty items rendered identically.
+      * what a model can DO. `context_tokens`, tools, JSON schema and vision are curated
+        per artifact and were on no page at all.
+    """
+    import json as _json
+
+    from .evaluation import SCALE_VERSION, TASK_CLASSES
+    from .fleet import unservable_capabilities
+
+    store = request.app.state.store
+    fleet = request.app.state.fleet
+
+    scores: dict[tuple[str, str], object] = {
+        (a.artifact, a.task_class): a for a in store.ability_matrix(SCALE_VERSION)
+    }
+    catalog = {c.artifact: c for c in store.list_catalog()}
+    # Which tiers name this artifact as the model they serve.
+    tiers_for: dict[str, list[str]] = {}
+    for name, spec in (fleet.capabilities.items() if fleet else {}.items()):
+        tiers_for.setdefault(spec.model, []).append(name)
+
+    rows = []
+    for n in store.list_nodes():
+        installed = _json.loads(n.installed or "[]")
+        loaded = set(_json.loads(n.loaded or "[]"))
+        caps = _json.loads(n.capabilities or "[]")
+        warnings = unservable_capabilities(fleet, advertised=caps, installed=installed)
+        for artifact in sorted(installed):
+            cells = []
+            for tc in TASK_CLASSES:
+                a = scores.get((artifact, tc))
+                cells.append({
+                    "task_class": tc,
+                    "score": a.score if a else None,
+                    # 'seed' is a guess that shipped in the code; 'measured' came from the
+                    # harness. Rendering them alike is how a placeholder passes for evidence.
+                    "seed": bool(a and a.provenance == "seed"),
+                    "n_items": a.n_items if a else None,
+                    "n_passed": a.n_passed if a else None,
+                })
+            c = catalog.get(artifact)
+            rows.append({
+                "artifact": artifact,
+                "node": n.hostname or n.node_id,
+                "node_id": n.node_id,
+                "tiers": ", ".join(sorted(tiers_for.get(artifact, []))) or "—",
+                "cells": cells,
+                "measured_cells": sum(1 for x in cells if x["score"] is not None
+                                      and not x["seed"]),
+                "tps": n.tps,
+                "warm": artifact in loaded,
+                "mode": n.mode,
+                # Curated facts, not scores: no 1-10 number can answer "does it do vision".
+                "size_gb": getattr(c, "size_gb", None),
+                "params_b": getattr(c, "params_b", None),
+                "quant": getattr(c, "quant", None),
+                "context_tokens": getattr(c, "context_tokens", None),
+                "tools": getattr(c, "supports_tools", None),
+                "json_schema": getattr(c, "supports_json_schema", None),
+                "vision": getattr(c, "supports_vision", None),
+                "in_catalog": c is not None,
+                "warnings": warnings,
+            })
+
+    rows.sort(key=lambda r: (r["artifact"], r["node"]))
+
+    # Artifacts the fleet knows about but no node has installed — otherwise a tier whose
+    # model is nowhere simply vanishes from a page about models.
+    on_a_node = {r["artifact"] for r in rows}
+    orphan_tiers = sorted(
+        {m for m in tiers_for if m not in on_a_node}
     )
-    # In-flight / outstanding measurement, so an unscored model is visibly *being* handled
-    # rather than silently absent.
-    from .eval_runner import artifacts_needing_eval
 
     measuring = sorted(
-        {r["artifact"] for r in request.app.state.store.eval_runs_summary() if r["pending"]}
-    )
-    unmeasured = [a for a, _caps in artifacts_needing_eval(request.app.state.store)]
+        {r["artifact"] for r in store.eval_runs_summary() if r["pending"]})
+    from .eval_runner import artifacts_needing_eval
+    unmeasured = [a for a, _caps in artifacts_needing_eval(store)]
+
     return templates.TemplateResponse(
-        request, "partials/ability.html",
-        {"arts": arts, "scale": SCALE_VERSION,
-         "measuring": measuring, "unmeasured": unmeasured})
+        request, "partials/models.html",
+        {"rows": rows, "task_classes": TASK_CLASSES, "scale": SCALE_VERSION,
+         "measuring": measuring, "unmeasured": unmeasured,
+         "orphan_tiers": orphan_tiers})
 
 
 @web_routes.get("/ui/nodes", response_class=HTMLResponse)

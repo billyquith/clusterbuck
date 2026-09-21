@@ -1,0 +1,68 @@
+<h2>Models</h2>
+{% if rows %}
+<div class="table-scroll">
+<table>
+  <tr>
+    <th>artifact</th><th>node</th><th>serves</th>
+    {% for tc in task_classes %}<th class="n">{{ tc }}</th>{% endfor %}
+    <th class="n">tok/s</th><th>size</th><th class="n">context</th>
+    <th>can do</th><th>state</th>
+  </tr>
+  {% for r in rows %}
+  <tr>
+    <td><strong>{{ r.artifact }}</strong>
+      {% if not r.in_catalog %}<br><span class="pill warn" title="No catalog entry, so its size and capabilities are unknown and the planner cannot propose it">uncurated</span>{% endif %}
+    </td>
+    <td>{{ r.node }}<br><span style="color:var(--muted);font-size:.75rem">{{ r.mode }}</span></td>
+    <td>{{ r.tiers }}
+      {% if r.warnings %}<br><span class="pill warn" title="This node advertises {{ r.warnings|join(', ') }} but does not have the model that tier is registered to serve">advertises {{ r.warnings|length }} it lacks</span>{% endif %}
+    </td>
+
+    {# One cell per task class, never a mean: a 9/9/3/3 specialist and a uniform 6 both
+       averaged to 6.0 on the old page, which is the distinction you most need. #}
+    {% for c in r.cells %}
+    <td class="n">
+      {% if c.score is none %}<span style="color:var(--muted)">—</span>
+      {% else %}
+        {{ "%.1f"|format(c.score) }}
+        {% if c.seed %}<br><span class="pill warn" title="A placeholder that shipped in the code, not a measurement">seed</span>
+        {% elif c.n_items %}<br><span style="color:var(--muted);font-size:.7rem"
+             title="{{ c.n_passed }} of {{ c.n_items }} suite items passed">{{ c.n_passed }}/{{ c.n_items }}</span>
+        {% endif %}
+      {% endif %}
+    </td>
+    {% endfor %}
+
+    <td class="n">{% if r.tps %}<span title="Median output tokens/sec measured on this node from real jobs">{{ "%g"|format(r.tps) }}</span>{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+    <td>{% if r.size_gb %}{{ "%g"|format(r.size_gb) }} GB{% if r.params_b %}<br><span style="color:var(--muted);font-size:.75rem">{{ "%g"|format(r.params_b) }}B{% if r.quant %} {{ r.quant }}{% endif %}</span>{% endif %}{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+    <td class="n">{% if r.context_tokens %}{{ "{:,}".format(r.context_tokens) }}{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+
+    {# Yes/no facts, deliberately not scored — no 1-10 number can express them. #}
+    <td style="white-space:nowrap">
+      {% for label, val in [("tools", r.tools), ("json", r.json_schema), ("vision", r.vision)] %}
+        {% if val %}<span class="pill ok">{{ label }}</span>{% endif %}
+      {% endfor %}
+      {% if not (r.tools or r.json_schema or r.vision) %}<span style="color:var(--muted)">—</span>{% endif %}
+    </td>
+    <td>{% if r.warm %}<span class="pill ok">warm</span>{% else %}<span class="pill">installed</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+
+<p class="empty" style="margin-top:.6rem">
+  scale {{ scale }} &middot; one row per model per node &middot; a
+  <span class="pill warn">seed</span> score is a shipped guess, not a measurement
+  {%- if measuring %} &middot; <span class="pill">measuring</span> {{ measuring|join(", ") }}{% endif %}
+  {%- if unmeasured %} &middot; <span class="pill warn">queued for eval</span> {{ unmeasured|join(", ") }}{% endif %}
+</p>
+{% if orphan_tiers %}
+<p class="empty">
+  <span class="pill warn">nowhere installed</span>
+  {{ orphan_tiers|join(", ") }} &middot; a tier names these, but no enrolled node has one
+</p>
+{% endif %}
+
+{% else %}
+<p class="empty">no models on any enrolled node yet</p>
+{% endif %}

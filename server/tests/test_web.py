@@ -204,8 +204,95 @@ def test_nodes_fragment_shows_hardware(client):
     assert "shared" in r.text
 
 
-def test_ability_fragment(client):
-    r = client.get("/ui/ability")
-    assert r.status_code == 200
-    assert "ability" in r.text.lower()
-    assert "llama3.1:70b" in r.text  # seeded artifact
+# --- the models page: one joined table, not four panels sharing no key -----------------
+
+@pytest.fixture()
+def models_client(redis_url, tmp_path):
+    """A fleet with one tier, one enrolled node holding two artifacts, a seeded score and
+    a measured one, and a catalog entry with capability facts — enough for every column
+    of the joined row to be exercised at once."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from clusterbuck.api import create_app
+    from clusterbuck.evaluation import SCALE_VERSION
+    from clusterbuck.orm.node import Node
+    from clusterbuck.store import Store
+
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "capabilities:\n"
+        "  8b-extract:\n"
+        "    model_server: 'http://127.0.0.1:1/v1'\n"
+        "    model: 'good:8b'\n"
+    )
+    db = str(tmp_path / "models.db")
+    s = Store(db)
+    # A specialist: strong at extract, weak at reason. The old page averaged this away.
+    s.set_ability(artifact="good:8b", task_class="extract", score=9.0,
+                  scale_version=SCALE_VERSION, updated_at="t", n_items=10, n_passed=9)
+    s.set_ability(artifact="good:8b", task_class="reason", score=3.0,
+                  scale_version=SCALE_VERSION, updated_at="t", n_items=10, n_passed=3)
+    # A shipped guess, which must never look like the measurement above.
+    s.set_ability(artifact="guess:3b", task_class="extract", score=4.0,
+                  scale_version=SCALE_VERSION, updated_at="t", provenance="seed")
+    s.upsert_catalog(artifact="good:8b", family="x", params_b=8.0, quant="q4",
+                     size_gb=4.5, min_ram_gb=11.0, source="ollama",
+                     registry_ref="good:8b", expected_ability=None, added_at="t",
+                     context_tokens=128000, supports_tools=True, supports_vision=False)
+    with s._session() as sess:  # noqa: SLF001 — fixture seeding, no enroll round-trip
+        sess.add(Node(node_id="node-1", node_key="k", hostname="box", os="linux",
+                      arch="x64", mode="active", enrolled_at="t", tps=42.0,
+                      capabilities=json.dumps(["8b-extract"]),
+                      installed=json.dumps(["good:8b", "guess:3b"]),
+                      loaded=json.dumps(["good:8b"])))
+        sess.commit()
+
+    app = create_app(redis_url=redis_url, db_path=db, fleet_path=str(fleet),
+                     start_scheduler=False)
+    with TestClient(app) as c:
+        yield c
+
+
+def test_models_shows_one_row_per_artifact_per_node(models_client):
+    html = models_client.get("/ui/models").text
+    assert html.count("<tr>") == 3, "header + one row per (artifact, node)"
+    assert "good:8b" in html and "guess:3b" in html
+    assert "box" in html, "the node must be named on the row, not in a separate panel"
+
+
+def test_models_shows_each_task_class_not_a_mean(models_client):
+    """The single change that makes models comparable.
+
+    `web.py` used to render `sum(scores)/len(scores)`, so a 9-at-extract/3-at-reason
+    specialist displayed as 6.0 — identical to a model that is a flat 6 at everything.
+    """
+    html = models_client.get("/ui/models").text
+    assert "9.0" in html and "3.0" in html
+    assert "6.0" not in html, "the mean of 9 and 3 must not appear anywhere"
+
+
+def test_models_distinguishes_a_seed_from_a_measurement(models_client):
+    """A placeholder shipped in the code and a 10-item measurement rendered identically."""
+    html = models_client.get("/ui/models").text
+    assert "seed" in html
+    assert "9/10" in html, "evidence count must be shown for a measured score"
+
+
+def test_models_shows_what_a_model_can_do(models_client):
+    """context_tokens / tools / vision are curated per artifact and were on no page."""
+    html = models_client.get("/ui/models").text
+    assert "128,000" in html
+    assert "tools" in html
+    assert "4.5 GB" in html
+
+
+def test_models_flags_an_uncurated_artifact(models_client):
+    """guess:3b has no catalog entry, so its size and capabilities are unknown — which
+    is a curation prompt, not a blank."""
+    assert "uncurated" in models_client.get("/ui/models").text
+
+
+def test_the_models_page_loads_the_joined_table(client):
+    assert "/ui/models" in client.get("/models").text

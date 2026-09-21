@@ -347,6 +347,9 @@ def create_app(
                    "n_items": r.n_items, "n_passed": r.n_passed} for r in rows]
         # Headline scalar per artifact = mean over its measured task classes (equal-weight
         # for now; a workload-weighted headline is the documented refinement).
+        # The dashboard no longer shows this mean at all — /ui/models renders the
+        # per-task-class scores, because averaging a 9/9/3/3 specialist and a flat 6
+        # to the same 6.0 erased the distinction the page existed to show.
         by_artifact: dict[str, list[float]] = {}
         for r in rows:
             by_artifact.setdefault(r.artifact, []).append(r.score)

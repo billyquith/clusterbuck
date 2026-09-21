@@ -15,76 +15,55 @@ import redis
 
 from clusterbuck.perf_runner import CATEGORIES
 
-# --- category generators: pure unit tests, no fixtures ---
+# --- queries come from the shared suite: pure unit tests, no fixtures ---
+
+def _long_reply(n: int = 120) -> str:
+    return " ".join(["word"] * n)
+
 
 @pytest.mark.parametrize("name", sorted(CATEGORIES))
-def test_category_shape_and_negative_case(name):
-    """Every category, across many seeds, yields a well-shaped query whose check rejects
-    an obviously-wrong reply (proves the check isn't trivially always-true)."""
-    gen = CATEGORIES[name]
+def test_every_category_is_a_task_class_drawn_from_the_shared_suite(name):
+    """One category per task class now, each drawing prompts from `SEED_SUITE`.
+
+    The seven bespoke generators are gone: they carried a parallel set of prompts and
+    "deliberately approximate" checkers, which made a third notion of correctness that
+    agreed with nothing. A load run and an ability measurement now ask the same questions.
+    """
+    from clusterbuck.evaluation import TASK_CLASSES, items_for
+
+    assert name in TASK_CLASSES
+    prompts = {it.prompt for it in items_for(name)}
+    seen = set()
     for seed in range(20):
-        gq = gen(random.Random(seed))
-        assert gq.category == name
-        assert gq.task_class in {"extract", "summarize", "reason", "code"}
+        gq = CATEGORIES[name](random.Random(seed))
+        assert gq.category == name and gq.task_class == name
         assert 1 <= gq.min_ability <= 10
-        assert gq.prompt and isinstance(gq.prompt, str)
-        ok, detail = gq.check("completely unrelated filler text")
+        assert gq.prompt in prompts, "a load query must come from the shared suite"
+        seen.add(gq.prompt)
+    assert len(seen) > 1, "20 draws should not all land on the same item"
+
+
+@pytest.mark.parametrize("name", sorted(CATEGORIES))
+def test_a_categorys_check_rejects_a_bad_reply(name):
+    """Proves the check is not trivially always-true, and that it still returns the
+    (ok, detail) pair the sample rows record."""
+    for seed in range(20):
+        gq = CATEGORIES[name](random.Random(seed))
+        # A long reply fails every class: the extract/reason/code items want a specific
+        # value, and the summarize items impose a word limit.
+        ok, detail = gq.check(_long_reply())
         assert ok is False
         assert isinstance(detail, str) and detail
 
 
-def test_extract_ticket_positive_case():
-    gq = CATEGORIES["extract-ticket"](random.Random(1))
-    order_id = re.search(r"Order #(\d+)", gq.prompt).group(1)
-    amount = re.search(r"\$([\d.]+)", gq.prompt).group(1)
-    reply = json.dumps({"order_id": order_id, "refund_amount": amount, "deadline": "x"})
-    assert gq.check(reply) == (True, "ok")
-
-
-def test_extract_log_positive_case():
-    gq = CATEGORIES["extract-log"](random.Random(2))
-    code = re.search(r"ERROR (\w+) retrying", gq.prompt).group(1)
-    ok, _ = gq.check(json.dumps({"timestamp": "t", "error_code": code}))
-    assert ok is True
-
-
-def test_extract_emails_positive_case():
-    gq = CATEGORIES["extract-emails"](random.Random(3))
-    emails = re.findall(r"[\w.]+@[\w.]+\.\w+", gq.prompt)
-    assert emails
-    ok, _ = gq.check(json.dumps(emails))
-    assert ok is True
-    ok, _ = gq.check(json.dumps(emails[:-1]))  # missing one address
-    assert ok is False
-
-
-def test_summarize_positive_case():
-    gq = CATEGORIES["summarize"](random.Random(4))
-    codename = re.search(r"project (\w+):", gq.prompt).group(1)
-    ok, _ = gq.check(f"The {codename} release fixes bugs and adds a sync feature.")
-    assert ok is True
-
-
-def test_reason_arithmetic_positive_case():
-    # Both branches: force each by patching random.random via a controlled seed search.
-    seen_branches = set()
-    for seed in range(50):
-        rng = random.Random(seed)
-        first_draw = rng.random()
-        gq = CATEGORIES["reason-arithmetic"](random.Random(seed))
-        if first_draw < 0.5:
-            m = re.search(r"^A train.*?(\d+) hour\(s\) later", gq.prompt)
-            answer = m.group(1)
-            seen_branches.add("catchup")
-        else:
-            total = int(re.search(r"shipment of (\d+) crates", gq.prompt).group(1))
-            delta = int(re.search(r"received (\d+) more crates", gq.prompt).group(1))
-            b = (total - delta) // 4
-            answer = str(b)
-            seen_branches.add("split")
-        ok, _ = gq.check(f"The answer is {answer}.")
-        assert ok is True
-    assert seen_branches == {"catchup", "split"}  # both branches actually exercised
+def test_the_ability_floors_still_separate_served_from_unassigned():
+    """`deploy/e2e/perf.sh` depends on these: a default run must produce BOTH served and
+    unassigned samples on a fleet whose best local artifact sits around 4. Flattening the
+    floors would make every sample land the same way and the load test stop showing
+    routing gaps at all."""
+    floors = {name: CATEGORIES[name](random.Random(0)).min_ability for name in CATEGORIES}
+    assert floors["extract"] <= 4 and floors["summarize"] <= 4, "these must be servable"
+    assert floors["reason"] > 4 and floors["code"] > 4, "these must outrun a 4-ability fleet"
 
 
 # --- integration: real HTTP + SQLite, jobs answered directly via Redis ---
@@ -135,7 +114,11 @@ def _wait_for_run(client, run_id: str, *, redis_url: str, store, timeout_s: floa
 def test_run_served_jobs_recorded(app_client, redis_url):
     app, client = app_client
     r = client.post("/perf/runs", json={
+        # Pinned to `extract`: its suite items check for a specific extracted value, so a
+        # canned reply fails all of them. `summarize` cannot be used here — see
+        # test_three_summarize_items_pass_any_short_reply below.
         "label": "served", "n_jobs": 3, "duration_s": 10, "warmup_s": 0, "concurrency": 1,
+        "categories": ["extract"],
     })
     assert r.status_code == 201
     run_id = r.json()["id"]
@@ -145,7 +128,7 @@ def test_run_served_jobs_recorded(app_client, redis_url):
     assert got["n_measured"] == 3
     assert got["n_served"] == 3
     assert got["n_unassigned"] == 0
-    # A generic canned reply matches none of the categories' checks — real discrimination,
+    # A generic canned reply matches none of the extract checks — real discrimination,
     # not a rigged all-pass (mirrors eval.sh's own stub-server philosophy).
     assert got["pass_rate"] == 0.0
     assert got["jobs_per_s"] is not None
@@ -216,12 +199,32 @@ def test_unknown_category_rejected(app_client):
     assert r.status_code == 422
 
 
+def test_three_summarize_items_pass_any_short_reply():
+    """A weakness in the SHARED tier-1 suite, recorded here because this is where it
+    first bit: three of the ten `summarize` items check only a word limit, so any short
+    string clears them.
+
+    That is not a load-driver problem — it means a model can bank roughly 30% of the
+    summarize class by emitting anything brief, which inflates its measured ability. Left
+    as-is deliberately: tightening the suite changes what every existing score means and
+    needs a `SUITE_VERSION` bump, which is a decision about the instrument, not about
+    this page. Locked down so it stays a known quantity rather than a surprise.
+    """
+    from clusterbuck.evaluation import items_for
+
+    lenient = [i for i, it in enumerate(items_for("summarize"))
+               if it.check("completely unrelated filler text")]
+    assert lenient == [4, 6, 9], (
+        f"the lenient summarize items moved to {lenient}; if the suite was tightened on "
+        "purpose, bump SUITE_VERSION so existing scores are re-measured")
+
+
 def test_ui_start_form_creates_a_run(app_client):
     """The htmx form posts application/x-www-form-urlencoded, not JSON — a real gap the
     JSON-API tests above don't exercise (this caught a missing python-multipart dep)."""
     _app, client = app_client
     r = client.post("/ui/perf/start", data={
-        "label": "from-the-form", "categories": ["extract-ticket"],
+        "label": "from-the-form", "categories": ["extract"],
         "concurrency": "1", "duration_s": "10", "warmup_s": "0",
         "n_jobs": "1", "min_ability_override": "10",
     })
