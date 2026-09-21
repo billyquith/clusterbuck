@@ -71,7 +71,7 @@ def _json_list(raw: str | None) -> list[str]:
 async def move_to_urgent_tier(store: Store, queue, row, *, group: str) -> bool:
     """Move a promoted job's queued entry onto the urgent tier. True if it moved.
 
-    Escalation and attention change a job's urgency in SQLite only, so without this a
+    Escalation changes a job's urgency in SQLite only, so without this a
     promoted job keeps its place on the base stream and the promotion buys it nothing on a
     worker that is already awake — the exact complaint that reopened ADR 24.
 

@@ -2,7 +2,7 @@
 
 Urgency is a trajectory: a `waitable(N)` job that is still unserved N minutes after
 submission promotes to `necessary` and thereby gains wake rights. This module is the
-age-based trigger; backlog-watermark and client-attention triggers are later work.
+age-based trigger; a backlog-watermark trigger is later work.
 
 Doneness is judged against the Redis result blob, never SQLite's `status` (which is
 refreshed lazily on poll) — otherwise a completed-but-unpolled job would be wrongly

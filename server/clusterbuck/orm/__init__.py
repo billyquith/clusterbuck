@@ -7,7 +7,6 @@ Alembic autogenerate, see `server/migrations/env.py`) knows about its table.
 from __future__ import annotations
 
 from .ability import Ability
-from .attention_lease import AttentionLease
 from .catalog_entry import CatalogEntry
 from .eval_generation import EvalGeneration
 from .eval_run import EvalRun
@@ -20,7 +19,7 @@ from .reservation import Reservation
 from .usage import Usage
 
 __all__ = [
-    "Ability", "AttentionLease", "CatalogEntry", "EvalGeneration", "EvalRun", "Job",
+    "Ability", "CatalogEntry", "EvalGeneration", "EvalRun", "Job",
     "JoinToken",
     "Node", "NodeModel", "Proposal", "Reservation", "Usage",
 ]

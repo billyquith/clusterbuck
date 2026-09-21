@@ -68,18 +68,18 @@ def test_update_endpoint_404_when_unconfigured(client):
     assert client.get("/updates/manifest", params={"rid": "osx-arm64"}).status_code == 404
 
 
-def test_artifact_key_is_chosen_by_flavour_not_just_platform():
-    """os+arch alone cannot name the artifact: two workers share a box, not a runtime."""
+def test_artifact_key_is_chosen_by_flavour_and_fails_closed():
+    """Flavour, not platform, names the artifact — and an unknown flavour names nothing."""
     from clusterbuck.api import PY_ARTIFACT, artifact_key_for
 
-    # Same darwin/arm64 machine, two implementations, two different downloads.
-    assert artifact_key_for("dotnet", "darwin", "arm64") == "osx-arm64"
-    assert artifact_key_for("python", "darwin", "arm64") == PY_ARTIFACT
     # One Python artifact covers every platform — that is what collapses the build matrix.
+    assert artifact_key_for("python", "darwin", "arm64") == PY_ARTIFACT
     assert artifact_key_for("python", "windows", "x64") == PY_ARTIFACT
     assert artifact_key_for("python", "linux", "arm64") == PY_ARTIFACT
-    # Absent flavour ⇒ dotnet, the only implementation that predates the field.
-    assert artifact_key_for(None, "linux", "x64") == "linux-x64"
+    # Absent flavour ⇒ python, the only implementation there is. This used to read as
+    # a retired flavour and hand such a node a platform-specific id — see the test below
+    # for why that mattered; a worker old enough to omit the field is a Python one.
+    assert artifact_key_for(None, "linux", "x64") == PY_ARTIFACT
     # Fails closed: no artifact named for a flavour we do not know, so no update is offered.
     assert artifact_key_for("rust", "linux", "x64") is None
     assert artifact_key_for("pyhton", "darwin", "arm64") is None   # typo, not a coin flip
@@ -126,24 +126,27 @@ def _flavour_heartbeat(tmp_path, redis_url, monkeypatch, flavour, artifacts):
         return hb.json()
 
 
-def test_python_worker_is_never_offered_the_dotnet_binary(tmp_path, redis_url, monkeypatch):
+def test_a_worker_is_never_offered_an_artifact_it_cannot_execute(tmp_path, redis_url, monkeypatch):
     """The hazard this field exists to close.
 
-    A Python worker on darwin/arm64 used to be handed the osx-arm64 .NET single-file binary,
+    A Python worker on darwin/arm64 used to be handed the osx-arm64 single-file binary,
     because the artifact was keyed off os+arch alone. It would verify a perfectly valid
     signature, download ~73 MB, and install a managed executable over its own entrypoint.
     A release with no Python artifact must offer that worker nothing at all.
     """
-    sha = hashlib.sha256(b"dotnet-binary").hexdigest()
-    dotnet_only = {"osx-arm64": {"url": "https://x/cbk", "sha256": sha}}
+    sha = hashlib.sha256(b"not-a-zipapp").hexdigest()
+    # A release that names only a platform-specific key no current flavour maps to.
+    unrunnable_only = {"osx-arm64": {"url": "https://x/cbk", "sha256": sha}}
 
-    body = _flavour_heartbeat(tmp_path, redis_url, monkeypatch, "python", dotnet_only)
-    assert body["update"] is None, "a Python worker was offered a .NET artifact"
+    body = _flavour_heartbeat(tmp_path, redis_url, monkeypatch, "python", unrunnable_only)
+    assert body["update"] is None, "a Python worker was offered an artifact it cannot run"
     assert body["fitness"]["status"] == "stale"   # still told to update, just not handed one
 
     # The same release does offer it to the worker it was actually built for.
-    body = _flavour_heartbeat(tmp_path, redis_url, monkeypatch, "dotnet", dotnet_only)
-    assert body["update"] is not None and body["update"]["rid"] == "osx-arm64"
+    # No flavour maps to a platform-specific key any more, so such a release is offered to
+    # nobody — including a node reporting an unrecognised flavour. Fail-closed, by design.
+    assert _flavour_heartbeat(
+        tmp_path, redis_url, monkeypatch, "rust", unrunnable_only)["update"] is None
 
 
 def test_python_worker_gets_the_platform_independent_artifact(tmp_path, redis_url, monkeypatch):

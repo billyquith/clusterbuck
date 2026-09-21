@@ -43,7 +43,6 @@ from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reserva
 from .models import (
     RESULT_STATUSES,
     TERMINAL_STATUSES,
-    AttentionRequest,
     CatalogEntrySubmit,
     EnrollRequest,
     HeartbeatRequest,
@@ -110,22 +109,6 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-# os+arch → .NET runtime identifier. Kept for backward compat with any existing nodes
-# still reporting agent_flavour=dotnet; the Python worker uses py3-none-any instead.
-_RID = {
-    ("darwin", "arm64"): "osx-arm64", ("darwin", "x64"): "osx-x64",
-    ("linux", "arm64"): "linux-arm64", ("linux", "x64"): "linux-x64",
-    ("windows", "x64"): "win-x64", ("windows", "arm64"): "win-arm64",
-}
-
-
-def rid_for(os_name: str | None, arch: str | None) -> str | None:
-    if not os_name or not arch:
-        return None
-    a = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(arch.lower(), arch.lower())
-    return _RID.get((os_name.lower(), a))
-
-
 # The Python worker is one artifact for every platform — no per-OS build, no matrix.
 PY_ARTIFACT = "py3-none-any"
 
@@ -133,7 +116,6 @@ PY_ARTIFACT = "py3-none-any"
 # because os+arch alone is not enough to name an artifact unambiguously; selection FAILS
 # CLOSED — an unrecognised flavour gets no update, not a guess.
 _ARTIFACT_KEY = {
-    "dotnet": rid_for,             # backward compat — dotnet nodes still in the wild
     "python": lambda _os, _arch: PY_ARTIFACT,
 }
 
@@ -145,8 +127,11 @@ def artifact_key_for(flavour: str | None, os_name: str | None,
     FAILS CLOSED. An unrecognised flavour returns None and the node is offered no update at
     all, because a worker left on an old version is a much smaller problem than a worker
     that replaced itself with an executable for a different runtime.
+
+    An absent flavour reads as `python`, the only implementation there is — so a worker
+    old enough to omit the field still gets the artifact it can actually run.
     """
-    resolve = _ARTIFACT_KEY.get((flavour or "dotnet").lower())
+    resolve = _ARTIFACT_KEY.get((flavour or "python").lower())
     if resolve is None:
         return None
     return resolve(os_name, arch)
@@ -167,7 +152,7 @@ def _build_update_for(app, node, flavour: str | None = None) -> dict | None:
     rid = artifact_key_for(flavour, node.os, node.arch)
     if rid is None:
         _log.warning("no artifact mapping for node %s (flavour=%s %s/%s) — cannot offer "
-                     "an update", node.node_id, flavour or "dotnet",
+                     "an update", node.node_id, flavour or "python",
                      node.os, node.arch)
         return None
     try:
@@ -459,58 +444,6 @@ def create_app(
             stats = await app.state.queue.depth(cap, settings.consumer_group)
             out.append({"capability": cap, "queue": f"q:{cap}", **stats})
         return {"queues": out}
-
-    @app.post("/attention")
-    async def attention(body: AttentionRequest) -> dict:
-        """A client's user became active (or went idle) — heat up / cool down its backlog."""
-        store = app.state.store
-        if body.state == "idle":
-            # End the lease early: demote this client's unstarted attention-promotions.
-            for job in store.attention_promoted_jobs(body.client_key):
-                if await app.state.queue.read_result(job.result_key) is None:
-                    store.demote_job(job.id)
-            store.delete_attention_lease(body.client_key)
-            return {"promoted": 0, "prewarm": [], "lease_expires": None}
-
-        affected = store.attention_promote(body.client_key, body.scope)
-        expires_at = datetime.now(UTC).timestamp() + body.ttl_s
-        store.upsert_attention_lease(
-            body.client_key, json.dumps(body.scope) if body.scope else None, expires_at,
-        )
-
-        # Promotion also has to move each queued entry onto the urgent tier (ADR 34),
-        # or a promoted job gains wake rights while keeping its old place in line on a
-        # worker that is already awake.
-        #
-        # Unlike escalation_scan, this promotes in BULK with no result check of its own,
-        # so each row is checked here: a job that finished since must not be moved (or
-        # counted as promoted work needing warmth).
-        fleet = app.state.fleet
-        for row in affected:
-            if await app.state.queue.read_result(row.result_key) is not None:
-                continue
-            if not tiering_ready(store, fleet, row.capability,
-                                 mode=settings.urgent_streams):
-                continue
-            fresh = store.get(row.id)
-            if fresh is not None:
-                await move_to_urgent_tier(
-                    store, app.state.queue, fresh, group=settings.consumer_group
-                )
-
-        # Promotion grants wake rights; pre-warm the artifacts the backlog needs.
-        caps = {r.capability for r in affected}
-        prewarm = []
-        for cap in caps:
-            await app.state.wake.maybe_wake(cap, reason=f"attention:{body.client_key}")
-            if fleet and cap in fleet.capabilities:
-                prewarm.append(fleet.capabilities[cap].model)
-
-        return {
-            "promoted": len(affected),
-            "prewarm": sorted(set(prewarm)),
-            "lease_expires": _now_iso_at(expires_at),
-        }
 
     @app.post("/jobs", status_code=202)
     async def submit_job(
@@ -810,7 +743,7 @@ def create_app(
         otherwise would be a lie. (`/perf/runs/{id}/cancel` already sets that precedent.)
         Either way the client stops waiting, which is the half we can always deliver.
 
-        Any holder of the operator secret can cancel any job: `client_key` is attention
+        Any holder of the operator secret can cancel any job: `client_key` is a client
         scoping, not an authenticated identity, and ADR 26 deliberately declined
         per-client keys for LAN-only single-operator infrastructure. Accepted limitation,
         not an oversight.
@@ -1334,8 +1267,8 @@ def create_app(
                 # Version governance (ADR 27): what it runs and whether that is acceptable.
                 "agent_version": n.agent_version,
                 # Which runtime the node runs — decides which release artifact it can execute.
-                # Absent rows default to "dotnet" for backward compat with pre-M4 nodes.
-                "agent_flavour": n.agent_flavour or "dotnet",
+                # Absent rows predate the field; every worker is a Python one.
+                "agent_flavour": n.agent_flavour or "python",
                 "protocol_version": n.protocol_version,
                 "fitness": n.fitness or "unknown",
                 "fitness_reason": n.fitness_reason,

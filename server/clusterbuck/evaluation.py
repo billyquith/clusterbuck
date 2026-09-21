@@ -29,9 +29,9 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from .store import Store
 
@@ -144,14 +144,6 @@ def check_json_valid(output: str) -> bool:
 
 def check_contains(substr: str) -> Callable[[str], bool]:
     return lambda out: substr.lower() in _clean(out).lower()
-
-
-def check_exact(expected: str) -> Callable[[str], bool]:
-    return lambda out: _clean(out) == expected
-
-
-def check_min_length(n: int) -> Callable[[str], bool]:
-    return lambda out: len(_clean(out)) >= n
 
 
 def check_json_fields(**expected: Any) -> Callable[[str], bool]:
@@ -480,37 +472,3 @@ def suite_is_measurable(task_class: str, suite: list[EvalItem] = SEED_SUITE,
     runner's batching on a deliberately tiny suite. Production callers take the default.
     """
     return len(items_for(task_class, suite)) >= min_items
-
-
-def run_tier1(items: list[EvalItem], complete: Callable[[str], str]) -> dict[str, tuple[float, float]]:
-    """Run items through `complete` (prompt→text). Returns {task_class: (pass_rate, ability)}."""
-    tally: dict[str, list[int]] = defaultdict(lambda: [0, 0])  # [passed, total]
-    for item in items:
-        ok = item.check(complete(item.prompt))
-        tally[item.task_class][0] += 1 if ok else 0
-        tally[item.task_class][1] += 1
-    return {tc: (p / t, score_to_ability(p / t)) for tc, (p, t) in tally.items()}
-
-
-def evaluate_and_record(store: Store, artifact: str, items: list[EvalItem],
-                        complete: Callable[[str], str], *, now: str,
-                        scale_version: str = SCALE_VERSION,
-                        min_items: int = MIN_ITEMS_FOR_SCORE,
-                        ) -> dict[str, tuple[float, float]]:
-    """Run tier-1 for an artifact and write the resulting abilities to the matrix.
-
-    Task classes with too few items are run but NOT recorded: a score from a handful of
-    items is noise wearing a number's clothes.
-    """
-    results = run_tier1(items, complete)
-    counts: dict[str, int] = defaultdict(int)
-    for item in items:
-        counts[item.task_class] += 1
-    for task_class, (rate, score) in results.items():
-        n = counts[task_class]
-        if n < min_items:
-            continue
-        store.set_ability(artifact=artifact, task_class=task_class, score=score,
-                          scale_version=scale_version, updated_at=now,
-                          n_items=n, n_passed=round(rate * n))
-    return results

@@ -48,7 +48,7 @@ class Node(SQLModel, table=True):
     tps: float | None = None
     last_heartbeat: str | None = None
     agent_version: str | None = None  # the worker's build-stamped release version
-    # python (or dotnet for legacy nodes): which artifact it can execute
+    # which artifact this node can execute; 'python' is the only implementation
     agent_flavour: str | None = None
     protocol_version: int | None = None  # queue-contract version it speaks
     fitness: str | None = None  # ok | stale | quarantine (coordinator's last verdict)

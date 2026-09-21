@@ -84,8 +84,8 @@ wire contract lives as a machine-readable **JSON Schema in `contract/`**, with a
 **conformance test on each side** asserting round-trip agreement.
 **Scope in practice:** only the seams the C# worker actually parses or produces are in
 `contract/` — job, result, enroll request/response, heartbeat request/response,
-update-manifest. Reservations and attention are *server-only* HTTP shapes that no worker
-touches, so they stay Pydantic models rather than shared schemas; adding them would imply a
+update-manifest. Reservations are a *server-only* HTTP shape that no worker touches, so
+they stay Pydantic models rather than shared schemas; adding them would imply a
 cross-language contract that does not exist.
 **Why:** the split (ADR 7) gives up the compile-time shared-types safety a single language
 would have had; a schema + two conformance tests restores it — the type definitions
@@ -208,9 +208,8 @@ SLA-style reservations (unkeepable promises on a home fleet of roaming machines)
 `necessary` (prompt but non-blocking), `waitable(N)` (backlog) — each with its own
 **wake rights** (urgent may wake immediately; necessary may on-demand wake; waitable
 never wakes, riding existing warmth). Escalation is first-class: waitable promotes to
-necessary on **age** (`escalate_after_min`), a **backlog watermark**, or a client
-**attention lease** (user became active → that client's pending work heats up, TTL'd,
-demoting gracefully on expiry). Promotions **coalesce into warm windows** (implicit
+necessary on **age** (`escalate_after_min`) or a **backlog watermark**. Promotions
+**coalesce into warm windows** (implicit
 reservations), never per-job wake stampedes. This supersedes the static patience
 policy vocabulary of ADR 3 (`wait`/`wait_then_cloud`/`now` map to waitable(∞)/
 waitable(N)+cloud_ok/urgent) while preserving its intent; privacy (ADR 14) still
@@ -218,8 +217,14 @@ bounds cloud at every urgency.
 **Why:** a static label conflates deadline with cloud-willingness and cannot express
 how background pipelines actually behave — lazy until it matters, where "matters" is
 time passing, a backlog growing, or a user showing up. Tying wake rights to urgency is
-what keeps the fleet cold-by-default (ADR 17) while monitors churn; leasing attention
-prevents a stuck-escalated fleet.
+what keeps the fleet cold-by-default (ADR 17) while monitors churn.
+
+**Amended 2026-09-21 — the attention lease is removed.** A third escalation trigger was
+specified and built here: a client posting `POST /attention` when its user became active,
+promoting that client's backlog for a TTL. It was never adopted — no client, no e2e script,
+no dashboard control ever used it, and the `attention_leases` table held zero rows on the
+live coordinator across its whole life. The age trigger carries the decision; the watermark
+trigger remains unbuilt. `jobs.client_key` outlives it as an opaque client label.
 **Considered:** static priorities (no aging → starvation or permanent over-provision);
 keeping patience + urgency side by side (two overlapping knobs); clients re-submitting
 jobs at higher priority (racy, duplicates work).
@@ -659,8 +664,9 @@ claimed entry and then losing that worker would leave a job the reaper cannot se
 `cancel_requested` flag plus a floored `deadline_epoch` hands it to the expiry sweep
 instead. Every terminal path writes a usage row as well as a status, or
 `jobs_awaiting_usage` re-selects the job on every tick forever. `TERMINAL_STATUSES` also
-had to be added to the escalation and attention queries, which filtered on urgency alone —
-without it a cancelled job could still promote and **wake a physical machine**.
+had to be added to the escalation query (and, at the time, the attention one), which
+filtered on urgency alone — without it a cancelled job could still promote and **wake a
+physical machine**.
 **Considered:** a worker-side pre-run check of the result key (a new worker capability, and
 still no help for a job already inside the model call); mid-run abort (touches the inference
 path for a case a small fleet can absorb); `XAUTOCLAIM`-then-ack (the reaper can only ack
@@ -695,8 +701,8 @@ coordinator-written result).
 **Decision:** each capability gets two streams — `q:<cap>:urgent` and `q:<cap>` — sharing
 the one `cbk-workers` group. Tier is a pure function of urgency (`urgent`/`necessary` →
 urgent tier, `waitable` → base), derived in one place. Every consumer reads the urgent
-stream first and the base stream only if it was empty. Escalation and client attention move
-a promoted job's queued **entry** across, not just its urgency row.
+stream first and the base stream only if it was empty. Escalation moves a promoted job's
+queued **entry** across, not just its urgency row.
 **Why:** ADR 24 deferred this and named the condition for revisiting it — "a single warm
 node routinely has mixed-urgency backlog contending". That happened: an urgent probe job
 waited ~15 minutes behind a backlog of large `waitable` jobs on one warm worker. Worse,
@@ -726,9 +732,9 @@ off the stream *before* withdrawal, because it is not stored in SQLite.
 **Deliberate limits:** ordering is between tiers, not within one (two urgent jobs still run
 in submission order). The reaper requeues onto the tier it reclaimed from rather than
 re-deriving the tier, which keeps it free of the rollout gate; a job promoted while claimed
-therefore finishes its retries on the base stream. Demotion (an attention lease lapsing) does
-**not** move the entry back — a demoted job running slightly too eagerly is not worth
-doubling the machinery for.
+therefore finishes its retries on the base stream. Demotion never moved the entry back
+either — a demoted job running slightly too eagerly was not worth doubling the machinery
+for, and with the attention lease gone nothing demotes at all.
 **Considered:** a Redis sorted-set priority queue (abandons the Streams reliability
 primitives ADR 20 adopted); reordering inside the worker (it cannot see the whole stream
 cheaply); gating the rollout on `agent_version` (weaker than the worker's own declaration of

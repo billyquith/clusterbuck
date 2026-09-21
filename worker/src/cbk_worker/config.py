@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlparse
 #
 # AGENT_FLAVOUR decides which release artifact the coordinator offers us
 # (contract/heartbeat-request.schema.json → agent_flavour): the single platform-independent
-# `py3-none-any` build, never a .NET runtime id. It is a constant rather than a setting
+# `py3-none-any` build, never a platform-specific id. It is a constant, not a setting
 # because a worker that misreports it would install a foreign executable over its own
 # entrypoint — the coordinator verifies nothing about our runtime, it trusts this.
 AGENT_VERSION = "0.9.0"

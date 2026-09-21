@@ -84,7 +84,7 @@ Both planes share the same worker machines and the same model servers on them.
 
 2. **Async plane — "patient work."** A **job queue**. The client submits
    `{capability, prompt, params, deadline, result_key}`, receives a job id, and
-   polls (or gets a callback). The job waits in the queue until a capable worker
+   polls for the result. The job waits in the queue until a capable worker
    drains it — after a Wake-on-LAN or scheduled wake if necessary. This is the batch
    / wake-them-up path.
 
@@ -178,8 +178,7 @@ job = {
   - `waitable(N)` — backlog work, **eager but non-demanding**: never wakes a machine,
     but runs as soon as existing warmth has spare cycles. N is a **patience bound, not
     a delay** — unserved after N minutes it **escalates** to `necessary` (as it also
-    does on a backlog watermark or a client **attention** signal: the user opened the
-    app → its pending work heats up).
+    does on a backlog watermark).
 
   Cloud participation at any urgency is governed by `privacy` (and budget); a
   `local_only` job escalates locally but never leaves the LAN.
@@ -225,8 +224,8 @@ full treatment in [docs/fleet-management.md](docs/fleet-management.md):
   ability 4, 30 min, medium priority, nightly") — admission-checked, node woken and
   artifact pre-loaded before the window, drained, then back to sleep. Soft commitments:
   owner eviction always wins and the coordinator re-plans.
-- **Urgency & attention:** jobs carry `urgent` / `necessary` / `waitable(N)` with
-  first-class **escalation** (age, backlog watermark, client attention lease); waitable
+- **Urgency:** jobs carry `urgent` / `necessary` / `waitable(N)` with
+  first-class **escalation** (age, backlog watermark); waitable
   work never wakes a machine, and promotions coalesce into warm windows rather than
   stampeding wakes.
 - **Cloud governors:** overflow to cloud when the local fleet is overwhelmed (not just
@@ -293,7 +292,7 @@ client targets one endpoint:
 - **Interactive** work → the OpenAI-compatible **sync** endpoint (routes to a live
   worker, falls back to cloud on a miss). Drop-in for anything that speaks the OpenAI API.
 - **Patient** work → **submit an async job** (capability + prompt + urgency class),
-  then poll or receive a callback. The job queues until a capable worker drains it.
+  then poll for the result. The job queues until a capable worker drains it.
 
 Clients never learn which machine served them, and clusterbuck never learns anything
 about the client's domain.

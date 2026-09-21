@@ -26,7 +26,7 @@ AOT, and a macOS bundle that needs Homebrew — ADR 29), so the worker is Python
 With two languages the job/result types can't be one shared library, so **the wire
 contract is the source of truth**: [protocols.md](protocols.md) plus a machine-readable
 **JSON Schema** in `contract/` (job, result, enrollment, heartbeat, reservation,
-attention, update-manifest). Both sides validate against it; a contract test in each
+update-manifest). Both sides validate against it; a contract test in each
 language asserts round-trip conformance, so the two type definitions can't silently
 drift. Schema change → both sides update or their contract tests fail.
 

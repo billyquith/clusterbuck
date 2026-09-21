@@ -27,5 +27,5 @@
     "error": null
   },
   "agent_version": "0.7.0",
-  "agent_flavour": "dotnet"
+  "agent_flavour": "python"
 }

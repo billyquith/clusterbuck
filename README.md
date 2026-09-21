@@ -98,8 +98,8 @@ Windows coordinator installer is the one exception: it runs Redis in Docker Desk
 a native package.) The generated secrets land in `/root/.cbk-secrets`.
 
 `--lan-redis` is what unbinds Redis from loopback — remote workers cannot reach the queue
-without it. [`cbk-install/`](cbk-install) has the same sequence broken into inspectable
-per-step scripts if you would rather not hand a whole script to `sudo`.
+without it. If you would rather not hand a whole script to `sudo`, read `install.sh` first —
+it is a single linear file with no hidden steps.
 
 ### Three settings that make joining work
 
@@ -231,8 +231,9 @@ path is stub-proven), true Wake-on-LAN to real MACs across machines, OS presence
 (presence is set manually), mDNS coordinator autodiscovery (`_clusterbuck._tcp` is
 designed but unimplemented — joining takes the coordinator URL as an argument),
 attached-endpoint proxy workers, async-plane cloud overflow and
-budget *enforcement* (the budget figure is display-only), and callbacks (`callback_url` is
-accepted but ignored — poll instead).
+budget *enforcement* (the budget figure is display-only), and callbacks (there is no
+`callback_url` — poll instead; `POST /jobs` rejects unknown fields, so a client still
+sending one now gets a 422 rather than silence).
 
 See [DESIGN.md](DESIGN.md) for the overview, and [`docs/`](docs/) for detail — [installation](docs/installation.md),
 [architecture](docs/architecture.md), [protocols](docs/protocols.md), [deployment](docs/deployment.md),

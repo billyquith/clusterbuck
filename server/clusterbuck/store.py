@@ -11,19 +11,18 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta, timezone
-from typing import Iterator
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, SQLModel, select
+from sqlmodel import Session, select
 
 from . import migrate
 from .db import make_engine
 from .models import TERMINAL_STATUSES, now_iso
 from .orm.ability import Ability
-from .orm.attention_lease import AttentionLease
 from .orm.catalog_entry import CatalogEntry
 from .orm.eval_generation import EvalGeneration
 from .orm.eval_run import EvalRun
@@ -37,76 +36,6 @@ from .orm.proposal import Proposal
 from .orm.reservation import Reservation
 from .orm.usage import Usage
 
-# All tables have moved to orm/*.py (SQLModel) — see clusterbuck/orm/job.py's docstring
-# for why. Nothing left to bootstrap here; kept as an empty string (rather than removed)
-# so `Store._ensure_schema`'s legacy branch doesn't need a special case for "no DDL left".
-_SCHEMA = ""
-
-# Columns added after a table's initial schema; applied to pre-existing dev DBs.
-# {table: {column: ALTER statement}}
-_MIGRATIONS = {
-    "jobs": {
-        "urgency": "ALTER TABLE jobs ADD COLUMN urgency TEXT NOT NULL DEFAULT 'waitable'",
-        "escalate_at": "ALTER TABLE jobs ADD COLUMN escalate_at REAL",
-        "escalated": "ALTER TABLE jobs ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0",
-        "reservation": "ALTER TABLE jobs ADD COLUMN reservation TEXT",
-        "deadline_epoch": "ALTER TABLE jobs ADD COLUMN deadline_epoch REAL",
-        "client_key": "ALTER TABLE jobs ADD COLUMN client_key TEXT",
-        "task_class": "ALTER TABLE jobs ADD COLUMN task_class TEXT",
-        "promoted_by": "ALTER TABLE jobs ADD COLUMN promoted_by TEXT",
-        "attempts": "ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
-        # Caller provenance (protocols.md §1b). Nullable with no default: rows written
-        # before this existed have no attribution, and NULL says so honestly.
-        "submitter_app": "ALTER TABLE jobs ADD COLUMN submitter_app TEXT",
-        "submitter_instance": "ALTER TABLE jobs ADD COLUMN submitter_instance TEXT",
-        "submitter_request_id": "ALTER TABLE jobs ADD COLUMN submitter_request_id TEXT",
-        "submitted_at": "ALTER TABLE jobs ADD COLUMN submitted_at TEXT",
-        "observed_ip": "ALTER TABLE jobs ADD COLUMN observed_ip TEXT",
-        # Lifecycle timing + delivery (protocols.md §1b). Nullable, no default: rows
-        # written before this existed carry no observation, and NULL says so.
-        "started_at": "ALTER TABLE jobs ADD COLUMN started_at TEXT",
-        "finished_at": "ALTER TABLE jobs ADD COLUMN finished_at TEXT",
-        "claimed_by": "ALTER TABLE jobs ADD COLUMN claimed_by TEXT",
-        "entry_id": "ALTER TABLE jobs ADD COLUMN entry_id TEXT",
-        "stream": "ALTER TABLE jobs ADD COLUMN stream TEXT",
-        # Idempotency + cancellation (protocols.md §1b). The UNIQUE index that makes the
-        # key binding is in _INDEXES below — `ADD COLUMN` cannot carry one.
-        "idempotency_key": "ALTER TABLE jobs ADD COLUMN idempotency_key TEXT",
-        "cancel_requested":
-            "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
-    },
-    "ability": {
-        "provenance": "ALTER TABLE ability ADD COLUMN provenance TEXT NOT NULL DEFAULT 'measured'",
-    },
-    "eval_runs": {
-        "generation": "ALTER TABLE eval_runs ADD COLUMN generation INTEGER NOT NULL DEFAULT 1",
-    },
-    "nodes": {
-        "disk_quota_gb": "ALTER TABLE nodes ADD COLUMN disk_quota_gb REAL",
-        "auto_approve": "ALTER TABLE nodes ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0",
-        "agent_version": "ALTER TABLE nodes ADD COLUMN agent_version TEXT",
-        "agent_flavour": "ALTER TABLE nodes ADD COLUMN agent_flavour TEXT",
-        "protocol_version": "ALTER TABLE nodes ADD COLUMN protocol_version INTEGER",
-        "fitness": "ALTER TABLE nodes ADD COLUMN fitness TEXT",
-        "fitness_reason": "ALTER TABLE nodes ADD COLUMN fitness_reason TEXT",
-        "auto_update": "ALTER TABLE nodes ADD COLUMN auto_update INTEGER NOT NULL DEFAULT 0",
-    },
-}
-
-
-# Indexes the legacy (pre-Alembic) bootstrap must create for itself. `create_all` skips a
-# table that already exists — indexes included — and `ALTER TABLE ADD COLUMN` cannot carry
-# a constraint, so without this an upgraded database would be stamped at head with the
-# unique index simply absent. `IF NOT EXISTS` keeps it idempotent, matching _MIGRATIONS'
-# only-if-missing character.
-_INDEXES: dict[str, dict[str, str]] = {
-    "jobs": {
-        "ix_jobs_idempotency_key":
-            "CREATE UNIQUE INDEX IF NOT EXISTS ix_jobs_idempotency_key "
-            "ON jobs(idempotency_key)",
-    },
-}
-
 
 class Store:
     def __init__(self, db_path: str) -> None:
@@ -115,53 +44,19 @@ class Store:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        """Bring the database up to the current schema, then make sure Alembic knows it.
+        """Bring the database up to the current schema.
 
-        Three cases:
-        - Already has `alembic_version` (a database this method has stamped or migrated
-          before): just `alembic upgrade head` — the normal case on every later boot.
-        - No tables at all (a brand-new database, e.g. every test's `tmp_path`): also
-          `alembic upgrade head` — migrations/versions/0001_baseline.py creates the full
-          schema, so this is the only path exercised by new databases from here on.
-        - Has tables but no `alembic_version` (a database from before Alembic existed —
-          e.g. an already-deployed coordinator): bring it up to date the old way first
-          (idempotent — CREATE TABLE IF NOT EXISTS + only-if-missing ALTER TABLE), then
-          `alembic stamp head` to record it's at the baseline WITHOUT running that
-          migration's DDL against tables that already exist.
+        One path: `alembic upgrade head`. A brand-new database (every test's `tmp_path`)
+        gets the full schema from migrations/versions/0001_baseline.py; an existing one
+        gets only the revisions it is missing.
+
+        There used to be a third case — tables present but no `alembic_version`, i.e. a
+        coordinator deployed before Alembic existed — which bootstrapped raw DDL and then
+        stamped. Every such database has long since been stamped (the live coordinator was
+        at `0009` when this was removed), so the branch was unreachable and is gone, along
+        with the parallel `_SCHEMA` / `_MIGRATIONS` / `_INDEXES` definitions it needed.
         """
-        with self._conn() as c:
-            has_alembic_version = c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
-            ).fetchone() is not None
-            has_any_table = c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchone() is not None
-
-        if has_alembic_version or not has_any_table:
-            migrate.upgrade_to_head(self._db_path)
-            return
-
-        with self._conn() as c:
-            c.executescript(_SCHEMA)
-        SQLModel.metadata.create_all(self._engine, tables=[
-            Job.__table__, Reservation.__table__, Node.__table__,
-            JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
-            NodeModel.__table__, Proposal.__table__, Ability.__table__,
-            EvalRun.__table__, EvalGeneration.__table__, Usage.__table__,
-            PerfRun.__table__, PerfSample.__table__,
-        ])
-        with self._conn() as c:
-            for table, columns in _MIGRATIONS.items():
-                existing = {row["name"] for row in c.execute(f"PRAGMA table_info({table})")}
-                for col, ddl in columns.items():
-                    if col not in existing:
-                        c.execute(ddl)
-            # After the columns exist, not before: an index cannot be created on a column
-            # this loop is about to add.
-            for indexes in _INDEXES.values():
-                for ddl in indexes.values():
-                    c.execute(ddl)
-        migrate.stamp_head(self._db_path)
+        migrate.upgrade_to_head(self._db_path)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -181,7 +76,7 @@ class Store:
 
     def _session(self) -> Session:
         # expire_on_commit=False: several methods below return rows after committing a
-        # change to them (e.g. attention_promote), and callers read attributes off those
+        # change to them (e.g. mark_escalated), and callers read attributes off those
         # rows after this session has already closed. Expired attributes on a detached
         # instance raise DetachedInstanceError instead of lazily refreshing.
         return Session(self._engine, expire_on_commit=False)
@@ -424,71 +319,6 @@ class Store:
                 job.promoted_by = "age"
                 s.add(job)
                 s.commit()
-
-    # --- client attention (M4a) ---
-
-    def attention_promote(self, client_key: str, scope: list[str] | None) -> list[Job]:
-        """Promote a client's waitable backlog to necessary. Returns the affected rows."""
-        with self._session() as s:
-            stmt = select(Job).where(
-                Job.client_key == client_key,
-                Job.urgency == "waitable",
-                Job.escalated == 0,
-                # Same guard as due_for_escalation, and more exposed: this promotes in
-                # bulk with no per-row result check at all.
-                Job.status.not_in(TERMINAL_STATUSES),
-            )
-            if scope:
-                stmt = stmt.where(Job.task_class.in_(scope))
-            rows = list(s.exec(stmt))
-            for job in rows:
-                job.urgency = "necessary"
-                job.escalated = 1
-                job.promoted_by = "attention"
-                s.add(job)
-            s.commit()
-            return rows
-
-    def attention_promoted_jobs(self, client_key: str) -> list[Job]:
-        with self._session() as s:
-            stmt = select(Job).where(
-                Job.client_key == client_key, Job.promoted_by == "attention"
-            )
-            return list(s.exec(stmt))
-
-    def demote_job(self, id: str) -> None:
-        """Return an attention-promoted job to waitable (lease lapsed, still unstarted)."""
-        with self._session() as s:
-            job = s.get(Job, id)
-            if job is not None:
-                job.urgency = "waitable"
-                job.escalated = 0
-                job.promoted_by = None
-                s.add(job)
-                s.commit()
-
-    def upsert_attention_lease(self, client_key: str, scope: str | None, expires_at: float) -> None:
-        with self._session() as s:
-            lease = s.get(AttentionLease, client_key)
-            if lease is None:
-                lease = AttentionLease(client_key=client_key, scope=scope, expires_at=expires_at)
-            else:
-                lease.scope = scope
-                lease.expires_at = expires_at
-            s.add(lease)
-            s.commit()
-
-    def delete_attention_lease(self, client_key: str) -> None:
-        with self._session() as s:
-            lease = s.get(AttentionLease, client_key)
-            if lease is not None:
-                s.delete(lease)
-                s.commit()
-
-    def expired_attention_leases(self, now: float) -> list[AttentionLease]:
-        with self._session() as s:
-            stmt = select(AttentionLease).where(AttentionLease.expires_at <= now)
-            return list(s.exec(stmt))
 
     # --- ability matrix (M5) ---
 
@@ -1021,7 +851,7 @@ class Store:
         """Jobs/tokens/cost per (day, venue) over the trailing `days` — drives the usage
         page's activity-over-time chart. `day` is 'YYYY-MM-DD' (usage_scan), so lexicographic
         comparison sorts and filters chronologically without parsing."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
         with self._conn() as c:
             return c.execute(
                 "SELECT day, venue, COUNT(*) AS jobs, "

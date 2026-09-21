@@ -13,7 +13,6 @@ import logging
 
 from datetime import datetime, timezone
 
-from .attention import attention_tick
 from .catalog import scan_all
 from .config import settings
 from .backstop import backstop_scan
@@ -47,13 +46,12 @@ async def coordinator_loop(
     eval_every: int = 5,
     reaper_every: int = 6,
 ) -> None:
-    """Tick escalation + reservations + attention + usage + evals + the planner."""
+    """Tick escalation + reservations + usage + evals + the planner."""
     ticks = 0
     while not stop.is_set():
         try:
             await escalation_scan(store, queue, wake, fleet=fleet)
             await reservation_tick(store, wake)
-            await attention_tick(store, queue)
             await usage_scan(store, queue, fleet)
             ticks += 1
             # Recover jobs abandoned by a worker that died mid-run (ADR 20). Runs on a slow

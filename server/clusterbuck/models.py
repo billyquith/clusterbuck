@@ -125,9 +125,12 @@ class JobSubmit(BaseModel):
     # What the job needs the model to be ABLE to do, as opposed to how well (ADR 37).
     requires: Requirements | None = None
     deadline: str | None = None
-    callback_url: str | None = None
     reservation: str | None = None  # opt-in reservation id to queue against (§8)
-    client_key: str | None = None  # optional client identity (attention scoping, §9)
+    # An opaque client label, stored and never interpreted — the same standing as
+    # `submitter`. It used to select a client's backlog for attention promotion; with
+    # that feature gone it is kept because `extra: forbid` would turn a client still
+    # sending it into a 422, and because the eval harness tags its own jobs with it.
+    client_key: str | None = None
     submitter: Submitter | None = None  # optional caller provenance (§1b)
 
     @model_validator(mode="after")
@@ -196,17 +199,6 @@ class PerfRunSubmit(BaseModel):
     n_jobs: int | None = Field(default=None, ge=1)
     min_ability_override: int | None = Field(default=None, ge=1, le=10)
     pin_model: str | None = None
-
-
-class AttentionRequest(BaseModel):
-    """Client attention signal (protocols.md §9). Server-only ⇒ not in contract/."""
-
-    model_config = {"extra": "forbid"}
-
-    client_key: str
-    state: Literal["active", "idle"] = "active"
-    scope: list[str] | None = None  # task-class filter; null = all
-    ttl_s: int = Field(default=600, ge=1)
 
 
 class NodePolicy(BaseModel):
@@ -313,7 +305,8 @@ class HeartbeatRequest(BaseModel):
     # still heartbeats rather than 422-ing, and is assessed as unverifiable instead.
     agent_version: str | None = None
     # Which runtime this node runs, and so which release artifact it can EXECUTE
-    # ('python' → py3-none-any artifact; 'dotnet' → legacy .NET RID). Absent ⇒ dotnet.
+    # ('python' → the py3-none-any artifact). Absent ⇒ 'python'; an unknown flavour is
+    # offered no update at all (see api.artifact_key_for).
     # An unrecognised value is offered no update rather than the wrong one (fails closed).
     agent_flavour: str | None = None
     queues: list[str] = Field(default_factory=list)

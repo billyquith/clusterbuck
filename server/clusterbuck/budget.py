@@ -8,7 +8,7 @@ here. This is the real gate: `routing.resolve_capability` calls it before offeri
 cloud candidate.
 
 Two properties, matching the urgency ladder (fleet-management.md → Urgency, escalation &
-client attention): `waitable` never reaches this function at all — cloud is a wake-rights
+): `waitable` never reaches this function at all — cloud is a wake-rights
 question for it (ADR 18: "no wake, no cloud, no demand"), decided by the caller before any
 budget is considered. `necessary` may spend the **paced pool** — the monthly cap minus the
 reserve, scaled by how much of the month has elapsed, so week one can't burn the month.

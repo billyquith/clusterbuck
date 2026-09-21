@@ -189,16 +189,6 @@ def test_a_cancelled_job_never_escalates(tmp_path) -> None:
     assert [j.id for j in store.due_for_escalation(now=2.0)] == []
 
 
-def test_a_cancelled_job_is_not_promoted_by_attention(tmp_path) -> None:
-    """The more exposed of the two: attention promotes in bulk with no result check."""
-    store = Store(str(tmp_path / "att.db"))
-    store.insert(id="job_a", result_key="res_a", capability=CAP, created_at="t",
-                 urgency="waitable", client_key="c1")
-    store.set_status("job_a", "cancelled")
-
-    assert store.attention_promote("c1", scope=None) == []
-
-
 # --- the queue primitive ------------------------------------------------------------
 
 

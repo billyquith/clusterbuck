@@ -22,7 +22,7 @@
     "rid": {
       "type": "string",
       "minLength": 1,
-      "description": ".NET runtime identifier, e.g. osx-arm64."
+      "description": "Release-artifact key, e.g. py3-none-any \u2014 the key the coordinator resolved for this node's worker flavour (see heartbeat-request.agent_flavour)."
     },
     "url": {
       "type": "string",

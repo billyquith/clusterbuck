@@ -1,12 +1,18 @@
-"""Store._ensure_schema has two paths onto the same baseline (see its docstring): a
-fresh database goes straight through `alembic upgrade head`, while a database that
-already has tables but no `alembic_version` (a pre-Alembic deployment) gets brought up
-to date the old way and then *stamped* — never has the baseline's DDL run against it.
+"""`Store._ensure_schema` has one path onto the schema: `alembic upgrade head`.
 
-This file checks both paths land on the same schema, and does so every test run rather
-than by one-time hand inspection: any future edit to `_SCHEMA`, `_MIGRATIONS`, or an ORM
-table that isn't mirrored in migrations/versions/0001_baseline.py fails loudly here
-instead of surfacing only when someone points Alembic at a real database.
+This file pins the invariant that survives that simplification and matters most — the
+ORM and the migrations must agree. Every table lives as a SQLModel class under
+`clusterbuck/orm/`, and every column must also exist in migrations/versions/. An ORM
+edit with no accompanying migration fails loudly here, instead of surfacing when
+someone points Alembic at a real database and finds a column the code expects missing.
+
+It also exercises the two migrations whose DDL runs against a *populated* `jobs` table
+(0004, 0005), because adding a column to live data is the operation with real risk.
+
+Until 2026-09-21 there was a second bootstrap path — tables present but no
+`alembic_version`, i.e. a coordinator deployed before Alembic — which built raw DDL and
+then stamped. Every such database has long since been stamped (the live coordinator was
+at `0009`), so that path and its tests are gone with `_SCHEMA` / `_MIGRATIONS`.
 
 Comparison is by SQLite type *affinity* (TEXT/INTEGER/REAL/NUMERIC), not exact declared
 type strings — `sa.REAL` vs a hand-written `REAL` column may render identically, but
@@ -27,7 +33,6 @@ from sqlmodel import SQLModel
 from clusterbuck import migrate
 from clusterbuck.db import make_engine
 from clusterbuck.orm.ability import Ability
-from clusterbuck.orm.attention_lease import AttentionLease
 from clusterbuck.orm.catalog_entry import CatalogEntry
 from clusterbuck.orm.eval_generation import EvalGeneration
 from clusterbuck.orm.eval_run import EvalRun
@@ -40,12 +45,12 @@ from clusterbuck.orm.perf_sample import PerfSample
 from clusterbuck.orm.proposal import Proposal
 from clusterbuck.orm.reservation import Reservation
 from clusterbuck.orm.usage import Usage
-from clusterbuck.store import _MIGRATIONS, _SCHEMA, Store
+from clusterbuck.store import Store
 
 # The current Alembic head. Pinned deliberately rather than derived from the migration
-# scripts: deriving it from the machinery under test would let "nobody thought about the
-# legacy path" pass silently. Bump this in the same commit as a new migration.
-_HEAD = "0010"
+# scripts: deriving it from the machinery under test would let a migration that was
+# never wired up pass silently. Bump this in the same commit as a new migration.
+_HEAD = "0011"
 
 
 def _affinity(decl_type: str) -> str:
@@ -117,71 +122,49 @@ def _alembic_version(db_path) -> tuple[str] | None:
         conn.close()
 
 
-def _build_legacy_database(db_path) -> None:
-    """Reproduce exactly what Store._ensure_schema's legacy branch bootstraps, bypassing
-    its own alembic-vs-legacy dispatch — i.e. what an already-deployed, pre-Alembic
-    coordinator database looks like just before this code ever ran against it."""
-    engine = make_engine(str(db_path))
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.executescript(_SCHEMA)
-        conn.commit()
-    finally:
-        conn.close()
-    SQLModel.metadata.create_all(engine, tables=[
-        Job.__table__, Reservation.__table__, Node.__table__,
-        JoinToken.__table__, AttentionLease.__table__, CatalogEntry.__table__,
-        NodeModel.__table__, Proposal.__table__, Ability.__table__,
-        EvalRun.__table__, EvalGeneration.__table__, Usage.__table__,
-        PerfRun.__table__, PerfSample.__table__,
-    ])
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        for table, columns in _MIGRATIONS.items():
-            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-            for col, ddl in columns.items():
-                if col not in existing:
-                    conn.execute(ddl)
-        conn.commit()
-    finally:
-        conn.close()
+def test_the_orm_and_the_migrations_agree(tmp_path) -> None:
+    """The invariant this file exists for: every column the ORM declares must also be a
+    column some migration creates, and vice versa.
 
-
-def test_fresh_database_matches_alembic_baseline(tmp_path) -> None:
-    """A brand-new database, built the way Store._ensure_schema builds one (no
-    pre-existing tables), must match a plain `alembic upgrade head` exactly."""
-    store_db = tmp_path / "store.db"
-    Store(str(store_db))
+    Previously this compared `Store()` against `alembic upgrade head` — meaningful while
+    Store had a second, hand-written bootstrap path to disagree with. It no longer does,
+    so that comparison would now be a tautology (both sides are the same call). The live
+    risk that remains is an ORM edit landing without a migration, which this catches:
+    build one database from `SQLModel.metadata` and one from the migrations, and demand
+    they match.
+    """
+    orm_db = tmp_path / "orm.db"
+    SQLModel.metadata.create_all(make_engine(str(orm_db)))
 
     alembic_db = tmp_path / "alembic.db"
     migrate.upgrade_to_head(str(alembic_db))
 
-    assert _schema_signature(store_db) == _schema_signature(alembic_db)
-    assert _index_signature(store_db) == _index_signature(alembic_db)
-    assert ("jobs", "ix_jobs_idempotency_key", True) in _index_signature(store_db), \
+    orm_sig, alembic_sig = _schema_signature(orm_db), _schema_signature(alembic_db)
+    # alembic_version is Alembic's own bookkeeping; the ORM has no opinion about it.
+    alembic_sig.pop("alembic_version", None)
+
+    assert orm_sig == alembic_sig, (
+        "ORM and migrations disagree — add a migration for the ORM change, or an ORM "
+        "field for the migration"
+    )
+    assert _index_signature(orm_db) == _index_signature(alembic_db)
+    assert ("jobs", "ix_jobs_idempotency_key", True) in _index_signature(alembic_db), \
         "the unique index must exist, not merely match a peer that also lacks it"
-    assert _alembic_version(store_db) == _alembic_version(alembic_db) == (_HEAD,)
 
 
-def test_legacy_database_is_stamped_not_migrated(tmp_path) -> None:
-    """A pre-Alembic database (tables already exist, no `alembic_version`) must be
-    recognised, brought up to date the old way, and *stamped* rather than having the
-    baseline's `op.create_table` calls run against tables that already exist (which
-    would raise 'table already exists')."""
-    legacy_db = tmp_path / "legacy.db"
-    _build_legacy_database(legacy_db)
-    before = _schema_signature(legacy_db)
+def test_store_bootstraps_a_new_database_at_head(tmp_path) -> None:
+    """A brand-new database gets the full schema and is recorded at head."""
+    db = tmp_path / "store.db"
+    Store(str(db))
+    assert _alembic_version(db) == (_HEAD,)
+    assert "jobs" in _schema_signature(db)
 
-    Store(str(legacy_db))  # must not raise, and must not alter the schema
 
-    assert _schema_signature(legacy_db) == before
-    assert _alembic_version(legacy_db) == (_HEAD,)
-
-    # A second Store() against the now-stamped database takes the "already stamped"
-    # branch (plain `alembic upgrade head`, a no-op since it's already at head).
-    Store(str(legacy_db))
-    assert _schema_signature(legacy_db) == before
+def test_attention_leases_is_gone(tmp_path) -> None:
+    """0011 drops it. Guards against the table creeping back via an ORM class."""
+    db = tmp_path / "head.db"
+    migrate.upgrade_to_head(str(db))
+    assert "attention_leases" not in _schema_signature(db)
 
 
 def test_0004_adds_provenance_to_a_populated_jobs_table(tmp_path) -> None:
@@ -276,60 +259,5 @@ def test_0005_adds_timing_to_a_populated_jobs_table(tmp_path) -> None:
         for row in rows:
             for column in ("started_at", "finished_at", "claimed_by", "entry_id", "stream"):
                 assert row[column] is None
-    finally:
-        conn.close()
-
-
-def test_a_preexisting_jobs_table_still_gets_the_unique_index(tmp_path) -> None:
-    """The legacy path's sharp edge, and the reason `_INDEXES` exists.
-
-    `_build_legacy_database` above starts from `create_all`, which creates the `jobs`
-    table *including* its index — so it cannot see this failure. A real pre-Alembic
-    deployment has a `jobs` table that already existed, and `create_all` skips an existing
-    table wholesale, indexes included. `ALTER TABLE ADD COLUMN` cannot carry a constraint
-    either. So without an explicit `CREATE UNIQUE INDEX`, such a database would be stamped
-    at head with the idempotency constraint simply absent — and idempotent submit would
-    silently degrade to "mint a new job every time", which is the bug it exists to prevent.
-    """
-    db = tmp_path / "old.db"
-    conn = sqlite3.connect(str(db))
-    try:
-        # The shape the table had before any of this existed.
-        conn.execute(
-            "CREATE TABLE jobs ("
-            " id TEXT PRIMARY KEY,"
-            " result_key TEXT NOT NULL,"
-            " capability TEXT NOT NULL,"
-            " status TEXT NOT NULL,"
-            " created_at TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT INTO jobs (id, result_key, capability, status, created_at) "
-            "VALUES ('job_ancient', 'res_ancient', '8b-extract', 'done', 't')"
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    Store(str(db))  # legacy branch: bring up to date the old way, then stamp
-
-    assert _alembic_version(db) == (_HEAD,)
-    assert ("jobs", "ix_jobs_idempotency_key", True) in _index_signature(db)
-
-    conn = sqlite3.connect(str(db))
-    try:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
-        assert {"idempotency_key", "cancel_requested", "started_at",
-                "entry_id"} <= columns, "the columns must be added, not just stamped"
-        assert conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
-
-        # And the constraint must actually bite.
-        conn.execute("UPDATE jobs SET idempotency_key = 'k' WHERE id = 'job_ancient'")
-        conn.execute(
-            "INSERT INTO jobs (id, result_key, capability, status, created_at, "
-            "idempotency_key) VALUES ('job_new', 'res_new', 'c', 'queued', 't', 'other')"
-        )
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute("UPDATE jobs SET idempotency_key = 'k' WHERE id = 'job_new'")
     finally:
         conn.close()

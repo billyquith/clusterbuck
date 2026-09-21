@@ -103,7 +103,7 @@
     },
     "agent_flavour": {
       "type": "string",
-      "description": "Which worker implementation this is, and therefore which release artifact it can actually EXECUTE: 'dotnet' selects a .NET runtime id (osx-arm64, linux-x64, \u2026), 'python' selects the single platform-independent py3-none-any artifact. Deliberately an open string rather than an enum so a new worker language needs no contract change (the C# worker is a reference implementation, not a constraint \u2014 ADR 7). Absent \u21d2 'dotnet', the only implementation predating this field. The coordinator FAILS CLOSED: a flavour it has no artifact mapping for is offered no update at all, because handing a worker a binary it cannot run \u2014 or worse, one it would install over its own entrypoint \u2014 is far worse than leaving it on an old version."
+      "description": "Which worker implementation this is, and therefore which release artifact it can actually EXECUTE: 'python' selects the single platform-independent py3-none-any artifact. Deliberately an open string rather than an enum so a new worker language needs no contract change. Absent \u21d2 'python', the only implementation there is. The coordinator FAILS CLOSED: a flavour it has no artifact mapping for is offered no update at all, because handing a worker a binary it cannot run \u2014 or worse, one it would install over its own entrypoint \u2014 is far worse than leaving it on an old version."
     }
   }
 }

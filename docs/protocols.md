@@ -63,7 +63,6 @@ POST /jobs
                                         //   removing the queued entry, and the worker
                                         //   does not check it — a job already claimed
                                         //   runs to completion regardless.
-  "callback_url":"https://…",           // optional; else poll
   "submitter": {                        // optional caller provenance (all fields optional)
     "app":          "nightly-importer", // which client
     "instance":     "workstation-2",    //   on which machine
@@ -227,8 +226,8 @@ DELETE /jobs/{id}
 
 `cancelled` is a **coordinator** status: no worker can produce one, so it is deliberately
 absent from `contract/result.schema.json`'s enum and appears only in the assembled client
-view above. Any holder of the operator secret can cancel any job — `client_key` is
-attention scoping, not an authenticated identity, and ADR 26 declined per-client keys for
+view above. Any holder of the operator secret can cancel any job — `client_key` is an
+opaque label, not an authenticated identity, and ADR 26 declined per-client keys for
 LAN-only single-operator infrastructure. Accepted limitation, stated rather than hidden.
 
 **Terminating backstops.** Two coordinator sweeps, because only one of them can be policy:
@@ -557,29 +556,7 @@ POST /reservations
 - `DELETE /reservations/{id}` cancels; recurring reservations carry the recurrence on
   the parent and spawn per-occurrence instances.
 
-## 9. Client attention (escalation signal)
-
-A client tells the coordinator its user became active, so pending lazy work heats up —
-semantics in [fleet-management.md](fleet-management.md) → *Urgency, escalation & client
-attention*. Attention is a **lease**: the client refreshes it while the user stays
-active; expiry demotes unstarted work gracefully.
-
-```
-POST /attention
-{
-  "client_key": "…",
-  "state":      "active",               // active | idle (idle ends the lease early)
-  "scope":      ["summarize"] | null,   // optional task-class filter
-  "ttl_s":      600                     // lease duration; refresh to extend
-}
-→ 200 { "promoted": 37, "prewarm": ["<artifact>"], "lease_expires": "…" }
-```
-
-Effect: the client's `waitable` backlog (within scope) promotes to `necessary`,
-coalesced into a warm window rather than per-job wakes; artifacts that backlog needs may
-pre-warm. On lease expiry, unstarted promoted jobs return to `waitable`.
-
-## 10. Coordinator/operator endpoints
+## 9. Coordinator/operator endpoints
 
 The sections above specify the load-bearing seams. These are the remaining HTTP endpoints the
 coordinator serves — mostly read-only views over state described elsewhere, listed here so

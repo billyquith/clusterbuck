@@ -180,7 +180,7 @@ window at 02:00, the queued batch drains for ~30 minutes at medium priority (yie
 `urgent` traffic, ahead of `waitable` backlog), the idle timeout fires, the
 model unloads, the node sleeps. Nothing was hot before, nothing stays hot after.
 
-## Urgency, escalation & client attention
+## Urgency & escalation
 
 Priority is a **trajectory, not a label**: work is submitted in an urgency class and
 moves between classes as conditions change. Each class carries its own **wake rights**,
@@ -204,7 +204,7 @@ demand capacity.
 > `q:<cap>:urgent` and `q:<cap>` — and a worker drains the urgent one first, so `urgent`
 > and `necessary` work is served ahead of a `waitable` backlog on a node that is already
 > awake. This is what ADR 24 deferred and ADR 34 implements; escalation and client
-> attention move a promoted job's queued entry across, not just its urgency.
+> escalation moves a promoted job's queued entry across, not just its urgency.
 >
 > Two limits worth knowing. Ordering is **between** tiers, not within one: two urgent jobs
 > are still served in submission order. And a job a worker has already claimed cannot be
@@ -215,21 +215,20 @@ demand capacity.
 1. **Age** — the job's `escalate_after_min` expires ("waitable 10 minutes").
 2. **Backlog watermark** — the waitable backlog for a (client, task class) exceeds a
    depth or oldest-age threshold: the feed got busy, stop being lazy.
-3. **Attention** — the client signals that its user became active (below).
 
-**Escalation coalesces; it never stampedes.** When a watermark or attention signal
+A third trigger — a client **attention lease** — was built and removed unused in
+September 2026; see ADR 18.
+
+**Escalation coalesces; it never stampedes.** When a watermark signal
 promotes dozens of jobs at once, the coordinator batches them into a single **warm
 window** — one wake, one model load, one drain (an implicit reservation) — instead of
 per-job wakes.
 
-**Client attention is a lease.** A client posts `attention` when its user becomes
-active, with a TTL it refreshes while they stay active; the client's waitable backlog
-(optionally scoped by task class) promotes to `necessary` and the artifacts that backlog
-needs may pre-warm — so everything is up to date shortly after the user sits down. When
-the lease lapses, unstarted work demotes back to waitable and the system returns to
-lazy. Note the symmetry: **workers have presence** (owner active → small model, ADR 10)
-and **clients have attention** (user active → hot work) — the fabric mediates both
-sides. Reservation `priority` orders work *within* warmth; urgency governs whether
+**Client attention was a lease, and is gone.** A client could post `attention` when its
+user became active, promoting its waitable backlog for a TTL. Removed 2026-09-21: nothing
+ever posted to it in the system's lifetime, and its table never held a row. Escalation on
+**age** is the trigger that carries the design.
+Reservation `priority` orders work *within* warmth; urgency governs whether
 warmth gets created at all **and**, since ADR 34, which tier a job queues on.
 
 ### Worked pattern: a background feed monitor
@@ -243,9 +242,7 @@ immediately and no reservation is needed. On a counter-offer it accepts any plan
 **ability floor**: compromise on time, node, or (if `cloud_ok`) venue — **never on
 ability below the floor**. The batch drains in the window. If feeds spike and the
 backlog crosses its watermark, the oldest jobs promote to `necessary` and may wake a
-node early. When the user opens the client application, it posts **attention**: the
-pending backlog promotes, needed artifacts pre-warm, the user sees fresh results —
-then the lease lapses and everything goes back to sleep.
+node early. Once the window closes, everything goes back to sleep.
 
 ## Cloud tier: fallback, overflow, privacy, budget
 

@@ -2,7 +2,7 @@
 
 Distinct from `JobRecord` in `models.py`, which mirrors `contract/job.schema.json` (the
 Redis queue payload sent to a worker) — this is the SQLite side, read by the escalation
-engine, reaper, attention tick, and usage scan to track status and urgency trajectory
+engine, reaper, and usage scan to track status and urgency trajectory
 without re-reading queue payloads. The two shapes already differ (e.g. `escalate_at`
 here is an absolute epoch deadline computed from `JobRecord`'s `escalate_after_min`) and
 that's intentional, not drift to fix as part of this migration.
@@ -48,9 +48,9 @@ class Job(SQLModel, table=True):
     escalated: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
     reservation: str | None = None  # opt-in reservation id this job queues against
     deadline_epoch: float | None = None  # epoch seconds; for expiry sweep
-    client_key: str | None = None  # optional client identity (for attention scoping)
-    task_class: str | None = None  # need-shaped task class (for attention scoping)
-    promoted_by: str | None = None  # null | 'age' | 'attention' (escalation provenance)
+    client_key: str | None = None  # opaque client label (the eval harness tags with it)
+    task_class: str | None = None  # need-shaped task class, as submitted
+    promoted_by: str | None = None  # null | 'age' — escalation provenance
     attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})  # delivery attempts, incremented by the reaper
 
     # --- caller provenance (protocols.md §1b) ---------------------------------------
