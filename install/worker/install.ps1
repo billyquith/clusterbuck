@@ -144,20 +144,36 @@ No binary at $CbkBin — supply one with -Artifact PATH
 # and can still swap the file and keep cbk.prev beside it.
 if (Test-Path $CbkBin) { Protect-SecretFile $CbkBin }
 
+# WRITING FILES THE WORKER PARSES: never `Set-Content -Encoding UTF8`.
+#
+# On PowerShell 5.1 that encoder emits a BOM, and nothing downstream expects one:
+#   * the worker reads node.json and its own state as plain UTF-8 and fails outright with
+#     "Unexpected UTF-8 BOM (decode using utf-8-sig)";
+#   * cmd's `for /f` folds the BOM into the FIRST variable's NAME, so the leading setting
+#     is silently never applied - which for worker.env is the broker URL.
+# Both were observed on a live node. Use ASCII (for the .cmd wrapper) or
+# [System.IO.File]::WriteAllText with UTF8Encoding($false).
+
 # ── worker config ─────────────────────────────────────────────────────────────
 Write-Step 'Worker config'
 $EnvFile   = "$EtcDir\worker.env"
 $NodeState = "$VarDir\node.json"
 
 if (-not (Test-Path $EnvFile)) {
-    @"
+    $envBody = @"
 CBK_REDIS_URL=$RedisUrl
 CBK_SERVER_URL=$CoordinatorUrl
 CBK_MODEL_SERVER_URL=$ModelServerUrl
 CBK_MODEL=$Model
 CBK_MODEL_MANAGER=$ModelManager
 CBK_NODE_STATE=$NodeState
-"@ | Set-Content -Path $EnvFile -Encoding UTF8
+"@
+    # NOT Set-Content -Encoding UTF8: on PowerShell 5.1 that writes a BOM, and this file is
+    # parsed by two things that do not expect one. `cmd`'s for/f would fold the BOM into the
+    # FIRST variable's name, so CBK_REDIS_URL would silently never be set; and the worker
+    # reads its own state files as plain UTF-8 and fails outright with "Unexpected UTF-8
+    # BOM". Both were observed on a live node.
+    [System.IO.File]::WriteAllText($EnvFile, $envBody, (New-Object System.Text.UTF8Encoding($false)))
     Write-Ok "worker.env written -> $EnvFile"
 } else {
     Write-Ok 'worker.env already exists (not overwritten — edit manually to change)'
@@ -169,20 +185,28 @@ Write-Step 'Scheduled Task'
 $taskName = 'cbk-worker'
 $wrapper  = "$DeployDir\run-worker.cmd"
 
-# Env vars baked into the wrapper so the task runs without reading the .env file at launch
-$envLines = (Get-Content $EnvFile | Where-Object { $_ -match '^\w' } |
-    ForEach-Object { "set $_" }) -join "`r`n"
-
+# The wrapper READS worker.env at launch; it does not bake a copy of it.
+#
+# It used to inline every variable here at install time, which made this file - not
+# worker.env - the config the worker actually ran on. Editing the documented file then
+# changed nothing, silently: a model swap applied to worker.env left the node still
+# serving the old one, and the two copies drifted with no warning. It also put the broker
+# credential on disk twice.
+#
+# `eol=#` skips comment lines; `tokens=1,* delims==` keeps everything after the FIRST `=`
+# as the value, so a credential containing `=` survives intact.
 @"
 @echo off
 rem SYSTEM runs this with stdout redirected to a file, so Python falls back to the legacy
 rem ANSI codepage and dies encoding the arrows in the worker's own log lines. Force UTF-8.
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
-$envLines
+for /f "usebackq eol=# tokens=1,* delims==" %%a in ("$EnvFile") do set "%%a=%%b"
 python "$CbkBin" work >> "$LogDir\worker.log" 2>&1
 "@ | Set-Content $wrapper -Encoding ASCII
 
+# No longer holds the credential, but SYSTEM executes it at every boot - so an account
+# that can write it can run code as SYSTEM. Lock it down for that reason, not secrecy.
 Protect-SecretFile $wrapper
 
 $action   = New-ScheduledTaskAction -Execute 'cmd.exe' `

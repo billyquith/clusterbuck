@@ -911,3 +911,44 @@ teaching the worker to **authenticate the download with its node key** (cleanest
 abstract, but a manifest `url` may point anywhere, so the worker would have to decide which
 hosts deserve a credential — a leak hazard invented to solve a problem the signature already
 solves — and it cannot bootstrap a fleet already in the field).
+
+## 39. A mixture-of-experts that overflows VRAM is not "degraded"
+
+**Decision:** the catalog records `active_params_b` alongside `params_b`, and `fits()`
+(ADR 37) exempts an artifact whose active set is materially smaller than its total from the
+`degraded` verdict when it overflows the accelerator. Absence of the figure means **dense**.
+
+**Why, and it is measured rather than argued.** The gate compared total size against VRAM
+and reported "it will run from system RAM and be far slower". Bringing up a node with a
+12 GB card produced the opposite result:
+
+| node | residency | steady |
+|---|---|---|
+| 12 GB accelerator | 54% on GPU, 46% in system RAM | **71 tok/s** |
+| 48 GB accelerator | fully resident | 52 tok/s |
+
+Same artifact, same prompt, same benchmark. The **partially resident node was faster**, so
+the gate was steering the operator away from the best configuration in the fleet. The reason
+is architectural: the artifact activates ~3B of 30B parameters per token, so most of what
+sits in system RAM is never read on a given token, and what crosses the bus is a fraction of
+what a dense model of the same size would move.
+
+**Why not simply drop the VRAM check.** It is right for dense models, where every parameter
+is read for every token and spilling genuinely costs on each one — which is the case the
+gate exists to catch. The fix is to distinguish the two, not to stop checking.
+
+**Why absence means dense.** An artifact that merely omits `active_params_b` is treated as
+dense, so a genuinely oversized dense model cannot slip the gate on a technicality. The
+threshold is behavioural (`MOE_ACTIVE_FRACTION`), not a matter of what the architecture is
+called: a model that activates most of itself per token behaves densely whatever its name.
+
+**What the verdict says now.** `ok`, with a reason naming the active fraction and stating
+plainly that **measured throughput decides**. The gate's job is to avoid bad advice, not to
+predict a number it cannot derive from static metadata — `stats.tps` (ADR 36) is what
+actually answers "how fast is this here".
+
+**Considered:** scaling the VRAM requirement by the active fraction (would have produced a
+confident number — ~2 GB for this artifact — that nothing justifies, and the whole model
+still has to be resident *somewhere*); and inferring MoE status from the artifact name
+(`30b-a3b` encodes it, but a naming convention is not a contract, and a rename would
+silently change a routing gate).

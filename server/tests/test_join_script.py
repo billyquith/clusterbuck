@@ -115,3 +115,40 @@ def test_a_missing_node_state_does_not_fail_the_join(join, tmp_path, capsys):
     join.check_capabilities(["8b-extract"], tmp_path / "absent.json")
     assert "skipping the capability check" in capsys.readouterr().out
 
+
+
+# --- the Windows wrapper must not become a second copy of the config -------------------
+
+WIN_INSTALLER = REPO / "install/worker/install.ps1"
+
+
+def _installer_text() -> str:
+    return WIN_INSTALLER.read_text(encoding="utf-8")
+
+
+def test_the_wrapper_reads_worker_env_rather_than_baking_it():
+    """It used to inline every variable at install time, which made the wrapper - not
+    worker.env - the config the worker actually ran on. Editing the documented file then
+    changed nothing, silently: observed live as a node still serving its old model after
+    worker.env said otherwise, and it put the broker credential on disk twice."""
+    text = _installer_text()
+    assert 'for /f "usebackq eol=# tokens=1,* delims==" %%a in ("$EnvFile")' in text, \
+        "the wrapper must source worker.env at launch"
+    assert '$envLines' not in text, "the baked-variable path is still present"
+
+
+def test_the_wrapper_keeps_everything_after_the_first_equals():
+    """A broker credential can contain `=`. `tokens=1,*` keeps the remainder as the value;
+    a plain `tokens=1,2` would silently truncate it."""
+    assert "tokens=1,* delims==" in _installer_text()
+
+
+def test_worker_env_is_written_without_a_bom():
+    """PowerShell 5.1's `Set-Content -Encoding UTF8` emits a BOM. Two readers choke on it:
+    cmd's for/f folds it into the FIRST variable's NAME, so CBK_REDIS_URL is never set;
+    and the worker reads plain UTF-8 and fails with 'Unexpected UTF-8 BOM'. Both seen on a
+    live node."""
+    text = _installer_text()
+    assert "UTF8Encoding($false)" in text, "worker.env must be written BOM-less"
+    assert "Set-Content -Path $EnvFile -Encoding UTF8" not in text, \
+        "worker.env is still written with the BOM-emitting encoder"

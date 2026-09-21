@@ -75,6 +75,7 @@ curl -s -X POST -H "X-CBK-Api-Key: $CBK_API_KEY" \
   "min_ram_gb": 24.0,
   "family": "<family>",
   "params_b": 14.0,
+  "active_params_b": 14.0,
   "quant": "Q4_K_M",
   "expected_ability": 6.5,
   "context_tokens": 131072,
@@ -91,6 +92,13 @@ decide whether a candidate fits the node's RAM and the owner's disk quota. Guess
 and the model is silently never proposed anywhere; guess them low and you propose a
 multi-GB pull onto a machine that can't run it. Get them from the model's actual quantised
 size, not from the parameter count.
+
+**`active_params_b` decides whether a big model is viable on a small card** (ADR 39). Set
+it below `params_b` for a mixture-of-experts; leave it equal (or omit it) for a dense
+model. The fits gate warns "WILL RUN SLOWLY" when an artifact overflows a node's VRAM,
+which is right for dense weights but wrong for MoE — measured on real hardware, a 30B-A3B
+held 54% on a 12 GB card beat the same artifact fully resident in 48 GB. Omitting the
+field means dense, deliberately, so an oversized dense model cannot dodge the warning.
 
 **The capability fields ARE load-bearing at routing time** (ADR 37), unlike
 `expected_ability` below. `context_tokens`, `supports_tools`, `supports_json_schema` and

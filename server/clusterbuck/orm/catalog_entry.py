@@ -25,6 +25,10 @@ class CatalogEntry(SQLModel, table=True):
     artifact: str = Field(primary_key=True, nullable=True)
     family: str | None = None
     params_b: float | None = None
+    # Parameters ACTIVE per token. Equal to params_b for a dense model; far smaller for a
+    # mixture-of-experts, where only a few experts fire per token. The distinction is what
+    # decides whether partial VRAM residency actually costs anything (ADR 39).
+    active_params_b: float | None = None
     quant: str | None = None
     size_gb: float
     min_ram_gb: float

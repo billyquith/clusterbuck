@@ -245,6 +245,10 @@ class CatalogEntrySubmit(BaseModel):
     source: str = "ollama"
     family: str | None = None
     params_b: float | None = Field(default=None, ge=0)
+    # Parameters active per token (ADR 39). Omit for a dense model. Setting it below
+    # params_b tells the fits gate this is a mixture-of-experts, where partial VRAM
+    # residency is not reliably a penalty.
+    active_params_b: float | None = Field(default=None, ge=0)
     quant: str | None = None
     # The 1-10 anchored scale (model-evaluation.md). Out-of-range hints are a typo, not a
     # preference, and would silently distort every ranking they took part in.

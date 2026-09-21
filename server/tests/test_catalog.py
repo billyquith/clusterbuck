@@ -117,14 +117,51 @@ def test_a_model_the_same_size_as_the_card_does_not_fit_it(store):
 
 def test_degraded_proposals_carry_the_warning_and_still_need_a_human(store):
     """`auto_approve` is consent to routine upgrades, not to spending a multi-GB download
-    on something that will then crawl."""
+    on something that will then crawl.
+
+    Only DENSE candidates qualify: a mixture-of-experts that overflows VRAM is not
+    reliably slower, so it is not warned about (see the MoE test below).
+    """
     node = _node(ram_gb=512.0, vram_gb=1.0, auto_approve=1, disk_quota_gb=500.0)
     scan_node(store, node, now="t")
-    upgrades = [p for p in store.list_proposals() if p.kind == "upgrade"]
-    assert upgrades, "nothing proposed at all"
-    for prop in upgrades:
+    by_artifact = {p.artifact: p for p in store.list_proposals() if p.kind == "upgrade"}
+    dense = {a: p for a, p in by_artifact.items()
+             if (store.catalog_entry(a).active_params_b or 0) == 0}
+    assert dense, "nothing dense proposed at all"
+    for prop in dense.values():
         assert prop.status == "pending", "auto-approved a model that will spill"
         assert prop.rationale.startswith("WILL RUN SLOWLY:")
+
+
+def test_a_mixture_of_experts_that_overflows_vram_is_not_called_degraded(store):
+    """Measured, not assumed: a 30B-A3B (~3B active) held 54% on a 12 GB card ran at
+    71 tok/s, while the same artifact fully resident in 48 GB managed 52. The
+    partially-resident node was FASTER, so the old verdict steered the operator away from
+    the best configuration in the fleet."""
+    moe = next(r for r in store.list_catalog() if (r.active_params_b or 0) > 0)
+    node = _node(ram_gb=512.0, vram_gb=moe.size_gb / 4, disk_quota_gb=500.0)
+    verdict, why = fits(moe, node, quota_gb=500)
+    assert verdict == "ok", f"{moe.artifact} judged {verdict}"
+    assert "active per token" in why
+
+
+def test_a_dense_model_of_the_same_size_is_still_degraded(store):
+    """The exemption is about behaviour, not size. Every parameter of a dense model is
+    read for every token, so the spilled share genuinely crosses the bus each time."""
+    dense = next(r for r in store.list_catalog()
+                 if not r.active_params_b and r.size_gb >= 15)
+    node = _node(ram_gb=512.0, vram_gb=dense.size_gb / 4, disk_quota_gb=500.0)
+    verdict, _ = fits(dense, node, quota_gb=500)
+    assert verdict == "degraded"
+
+
+def test_an_artifact_that_declares_no_active_count_is_treated_as_dense(store):
+    """Absence must not be an escape hatch, or a genuinely oversized dense model passes
+    the gate on a technicality - which is the failure the gate exists to catch."""
+    from clusterbuck.catalog import _is_moe
+
+    row = next(r for r in store.list_catalog() if not r.active_params_b)
+    assert _is_moe(row) is False
 
 
 def test_fitting_proposals_still_honour_auto_approve(store):

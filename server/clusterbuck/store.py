@@ -596,12 +596,14 @@ class Store:
     def upsert_catalog(self, *, artifact: str, family: str | None, params_b: float | None,
                        quant: str | None, size_gb: float, min_ram_gb: float, source: str,
                        registry_ref: str, expected_ability: float | None,
-                       added_at: str, context_tokens: int | None = None,
+                       added_at: str, active_params_b: float | None = None,
+                       context_tokens: int | None = None,
                        supports_tools: bool | None = None,
                        supports_json_schema: bool | None = None,
                        supports_vision: bool | None = None) -> None:
         fields = dict(
-            family=family, params_b=params_b, quant=quant, size_gb=size_gb,
+            family=family, params_b=params_b, active_params_b=active_params_b,
+            quant=quant, size_gb=size_gb,
             min_ram_gb=min_ram_gb, source=source, registry_ref=registry_ref,
             expected_ability=expected_ability, context_tokens=context_tokens,
             supports_tools=supports_tools, supports_json_schema=supports_json_schema,

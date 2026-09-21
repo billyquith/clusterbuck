@@ -100,11 +100,12 @@ SEED_CATALOG = [
      "registry_ref": "mistral-small3.2:24b", "expected_ability": 6.8,
      "context_tokens": 131072, "supports_tools": True,
      "supports_json_schema": True, "supports_vision": True},
-    # Mixture-of-experts: 30B total, ~3B active per token. On a node whose accelerator
-    # cannot hold the whole model, cost per token tracks the ACTIVE parameters, so this
-    # stays usable where a dense 30B does not. The fits gate cannot see that — it has no
-    # VRAM concept at all — so the distinction lives here, in the ranking.
-    {"artifact": "qwen3:30b-a3b", "family": "qwen3", "params_b": 30.0, "quant": "Q4_K_M",
+    # Mixture-of-experts: 30B total, ~3B active per token. `active_params_b` is what lets
+    # the fits gate see that overflowing VRAM is not the penalty here that it would be for
+    # a dense model of the same size — measured on real hardware, a partially-resident
+    # 30B-A3B beat the same artifact fully resident on a slower accelerator (ADR 39).
+    {"artifact": "qwen3:30b-a3b", "family": "qwen3", "params_b": 30.0,
+     "active_params_b": 3.0, "quant": "Q4_K_M",
      "size_gb": 18.6, "min_ram_gb": 40.0, "source": "ollama",
      "registry_ref": "qwen3:30b-a3b", "expected_ability": 7.0,
      "context_tokens": 131072, "supports_tools": True,
@@ -149,6 +150,24 @@ def quota_for(profile: str | None, explicit: float | None) -> float:
 # proposed at all.
 VRAM_HEADROOM = 1.2
 
+# How much smaller the active set must be before an artifact counts as a mixture-of-experts
+# for the fits gate. A model activating most of itself per token behaves like a dense one,
+# whatever its architecture is called, so the threshold is about behaviour rather than
+# nomenclature.
+MOE_ACTIVE_FRACTION = 0.5
+
+
+def _is_moe(candidate) -> bool:
+    """Whether this artifact activates materially fewer parameters than it holds.
+
+    Requires BOTH figures and a real gap: an artifact that merely omits `active_params_b`
+    is treated as dense, because assuming otherwise would excuse a genuinely oversized
+    dense model from a gate that exists to catch exactly that.
+    """
+    total = getattr(candidate, "params_b", None)
+    active = getattr(candidate, "active_params_b", None)
+    return bool(total and active and active < total * MOE_ACTIVE_FRACTION)
+
 
 def fits(candidate, node, quota_gb: float) -> tuple[str, str]:
     """Gate 1: hardware + the owner's disk contract.
@@ -181,6 +200,23 @@ def fits(candidate, node, quota_gb: float) -> tuple[str, str]:
     needed = candidate.size_gb * VRAM_HEADROOM
     if needed <= vram:
         return "fast", f"fits in {vram:g} GB VRAM"
+
+    # Overflowing the accelerator is only reliably a penalty for a DENSE model, where every
+    # parameter is read for every token and the spilled share crosses the bus each time. A
+    # mixture-of-experts reads only its active parameters, so most of what sits in system
+    # RAM is untouched per token.
+    #
+    # This is measured, not assumed. A 30B-A3B (~3B active) held 54% on a 12 GB card ran at
+    # 71 tok/s, while the same artifact fully resident in 48 GB on another node managed 52.
+    # The partially-resident node was the FASTER one. Calling that "degraded" told the
+    # operator to avoid the best configuration in the fleet (ADR 39).
+    if _is_moe(candidate):
+        return "ok", (
+            f"{candidate.size_gb:g} GB exceeds {vram:g} GB VRAM, but only "
+            f"~{candidate.active_params_b:g}B of {candidate.params_b:g}B parameters are "
+            f"active per token, so partial residency is not reliably a penalty — measured "
+            f"throughput decides"
+        )
     return "degraded", (
         f"{candidate.size_gb:g} GB needs ~{needed:.1f} GB with overhead but the "
         f"accelerator has {vram:g} GB — it will run from system RAM and be far slower"
