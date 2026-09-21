@@ -596,6 +596,41 @@ attacker who can serve the file still cannot make a worker install it.
 The previous artifact is retained as `cbk.prev.pyz`, so a bad release can be reverted by
 hand. Per-node `auto_update: false` opts out.
 
+`release.json` is **unsigned source data** — version, channel, protocol version, and an
+artifact per release-key with its URL and SHA-256. The coordinator signs a manifest
+**per request** from the private key, so the file on disk carries no signature and
+publishing needs no key handling. It is read per request too, so editing it needs no
+restart.
+
+`GET /releases/<file>` serves **only files named by the current manifest**, matched on
+basename. That is an allowlist, not a path join: `..` and absolute paths cannot escape the
+release directory. One consequence to know before you need it — the moment the manifest
+moves to a new version, the *previous* artifact stops being servable even though it is
+still on disk. Rolling the channel back means restoring the old `release.json`, not just
+pointing at the old file.
+
+### Releasing a worker version touches three settings, not one
+
+They all name a version, nothing reconciles them, and disagreement is silent:
+
+| Setting | Governs | Read by |
+|---|---|---|
+| `CBK_WORKER_CURRENT_VERSION` | whether a node is judged `ok` or `stale` | the fitness check, on every heartbeat |
+| `CBK_WORKER_ARTIFACT` | the build a **joining** node downloads | `GET /worker/artifact`, which bootstrap points the joiner at |
+| `CBK_UPDATE_RELEASE` → `release.json` | the manifest **existing** nodes are offered | `_build_update_for`, on every heartbeat |
+
+Bumping only the first two produces the worst of the three states: every node is told it
+is `stale` while being offered nothing, because the release manifest still names the
+version they already run. It reads exactly like "self-update is not configured" when it is
+fully configured — signing key, channel, `auto_update` and all.
+
+So a release is: publish `cbk-<ver>.pyz` into the release directory, rewrite
+`release.json` (keeping a `.bak-<oldver>`), refresh the join artifact, and bump
+`CBK_WORKER_CURRENT_VERSION`. Miss one and the fleet drifts quietly.
+
+This is the same shape as the three registries in §6 — several records that each name
+part of the truth and never check each other. Worth watching for as a pattern.
+
 *Deferred:* canary rings and automatic crash-loop rollback. The binary swap and retention
 are built and proven; deciding that a release is crash-looping needs multi-node
 observation that does not exist yet.

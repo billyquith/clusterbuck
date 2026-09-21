@@ -226,11 +226,32 @@ sudo -u clusterbuck git -C /opt/clusterbuck merge --ff-only origin/main
 sudo systemctl restart cbk-server
 ```
 
-Updating a worker by hand: build a new zipapp, copy it over, restart the service. Bump
-`CBK_WORKER_CURRENT_VERSION` in `server.env` to match, so version governance flags nodes
-still behind. Where self-update is configured (signing key plus release manifest), nodes
-take it themselves on the next heartbeat — except on Windows, where self-update refuses by
-design and the `.pyz` must be replaced by hand.
+Releasing a new worker version touches **three** settings, and they do not reconcile with
+each other:
+
+| Setting | Governs |
+|---|---|
+| `CBK_WORKER_CURRENT_VERSION` | whether a node reads as `ok` or `stale` |
+| `CBK_WORKER_ARTIFACT` | the build a **joining** node downloads |
+| `CBK_UPDATE_RELEASE` → `release.json` | what **existing** nodes are offered on heartbeat |
+
+Bump only the first two and every node is told it is `stale` while being offered nothing
+— which looks exactly like a broken update channel on a channel that is working fine.
+
+```bash
+cd worker && uv run python build.py                    # → dist/cbk.pyz
+# on the coordinator, as the clusterbuck user:
+install -m 0755 cbk.pyz /var/lib/clusterbuck/releases/cbk-0.10.0.pyz
+cp release.json release.json.bak-0.9.0                 # rollback needs the old manifest,
+                                                       # not just the old artifact
+# rewrite release.json with the new version, url and sha256, refresh the join artifact,
+# then bump CBK_WORKER_CURRENT_VERSION in server.env and restart.
+```
+
+`release.json` is read per request, so it needs no restart of its own; only the
+`server.env` change does. Nodes with `auto_update` take the new build on their next
+heartbeat — except on Windows, where self-update refuses by design and the `.pyz` must be
+replaced by hand.
 
 ## Security on a home LAN
 
