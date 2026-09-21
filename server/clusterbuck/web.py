@@ -24,6 +24,48 @@ templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 web_routes = APIRouter()
 
 
+# --- node liveness -------------------------------------------------------------------
+#
+# The registry knows when a node last spoke (`last_heartbeat`, written on every heartbeat)
+# but nothing ever compared that stamp to the clock, so every surface that renders a node
+# showed the `mode` it last declared — forever. A box powered off in July still drew an
+# `active` pill in September. These two helpers are the missing comparison; the queues
+# panel already does the equivalent for stream consumers via `live_worker_consumers`.
+
+
+def _parse_iso(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # Stamps are written UTC-aware, but a hand-edited or migrated row may be naive.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def heartbeat_age_s(node, *, now: datetime) -> float | None:
+    """Seconds since this node last spoke, or None if it has no readable stamp at all.
+
+    Falls back to `enrolled_at`, because `Store.enroll_node` does not set
+    `last_heartbeat` — a node that enrolled and never heartbeated has been silent since it
+    enrolled, and reading that as "no information" would exempt precisely the nodes that
+    never came up.
+    """
+    at = _parse_iso(node.last_heartbeat) or _parse_iso(node.enrolled_at)
+    if at is None:
+        return None
+    return max(0.0, (now - at).total_seconds())
+
+
+def humanize_age(seconds: float) -> str:
+    """Coarse, one-unit age: the reader wants "days, not seconds", not a precise interval."""
+    for limit, unit, name in ((60, 1, "s"), (3600, 60, "m"), (86400, 3600, "h")):
+        if seconds < limit:
+            return f"{int(seconds // unit)}{name}"
+    return f"{int(seconds // 86400)}d"
+
+
 @web_routes.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "dashboard.html")
@@ -60,11 +102,18 @@ async def ui_connections(request: Request) -> HTMLResponse:
     fleet = request.app.state.fleet
     jobs_by_key = {r["key"]: r["jobs"] for r in store.usage_rollup("node")}
 
-    workers = [
-        {"name": n.hostname or n.node_id, "mode": n.mode or "unknown",
-         "jobs": jobs_by_key.get(n.node_id, 0)}
-        for n in store.list_nodes()
-    ]
+    now = datetime.now(timezone.utc)
+    workers = []
+    for n in store.list_nodes():
+        # Same correction as the nodes table: a spoke drawn from `mode` alone claims a
+        # connection to a machine that may have been off for months.
+        age = heartbeat_age_s(n, now=now)
+        workers.append({
+            "name": n.hostname or n.node_id, "mode": n.mode or "unknown",
+            "silent": age is None or age > settings.node_silent_s,
+            "age": humanize_age(age) if age is not None else None,
+            "jobs": jobs_by_key.get(n.node_id, 0),
+        })
     providers = sorted({provider_of(fleet.capabilities[cap].model)
                         for cap in cloud_capabilities(fleet)}) if fleet else []
     cloud = [{"provider": p, "jobs": jobs_by_key.get(f"cloud:{p}", 0)} for p in providers]
@@ -258,16 +307,29 @@ async def ui_models(request: Request) -> HTMLResponse:
 async def ui_nodes(request: Request) -> HTMLResponse:
     import json as _json
 
+    now = datetime.now(timezone.utc)
     nodes = []
     for n in request.app.state.store.list_nodes():
         installed = _json.loads(n.installed or "[]")
+        age = heartbeat_age_s(n, now=now)
         nodes.append({
             "id": n.node_id, "host": n.hostname, "mode": n.mode,
             "caps": ", ".join(_json.loads(n.capabilities or "[]")),
             "loaded": ", ".join(_json.loads(n.loaded or "[]")),
             "installed": ", ".join(installed),
             "n_installed": len(installed),
-            "seen": (n.last_heartbeat or "—"),
+            # Liveness. `mode` is only what the node last CLAIMED; `stale` is the
+            # coordinator's own judgement about whether that claim is still worth
+            # anything. `seen` stays raw ISO so the template can hand it to the
+            # data-utc/.ts localiser like every other timestamp on the dashboard.
+            "seen": n.last_heartbeat,
+            "never": n.last_heartbeat is None,
+            # An unknown age counts as silent, deliberately: `enrolled_at` is written
+            # ISO-Z and non-null, so an unreadable stamp means a corrupted or hand-edited
+            # row — and failing OPEN there would render exactly those rows as a clean
+            # `active` pill, which is the defect this closes.
+            "silent": age is None or age > settings.node_silent_s,
+            "age": humanize_age(age) if age is not None else None,
             # Version governance (ADR 27): drift and unfitness must be visible, not buried.
             "version": n.agent_version or "unknown",
             "fitness": n.fitness or "unknown",

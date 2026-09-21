@@ -2,7 +2,7 @@
 {% if nodes %}
 <div class="table-scroll">
 <table>
-  <tr><th>node / hardware</th><th>version</th><th>mode</th><th>models (installed / warm)</th><th>capabilities</th></tr>
+  <tr><th>node / hardware</th><th>version</th><th>mode / last seen</th><th>models (installed / warm)</th><th>capabilities</th></tr>
   {% for n in nodes %}
   <tr>
     <td>
@@ -27,9 +27,20 @@
       {% endif %}
     </td>
     <td>
+      {# `mode` is what the node last DECLARED about itself; the stale pill below is
+         whether that declaration is still worth anything. Both are shown, because a node
+         that went away and then went off is a different story from one that crashed. #}
       {% if n.mode == "active" %}<span class="pill">active</span>
       {% elif n.mode == "away" %}<span class="pill ok">away</span>
       {% else %}<span class="pill warn">{{ n.mode }}</span>{% endif %}
+      {% if n.silent %}<br>
+      {% if n.age %}<span class="pill bad" title="no heartbeat for {{ n.age }} — the mode above is the last thing this node said, not what it is doing now. (Distinct from the version column's `stale`, which is agent drift on a node that is still talking.)">silent &middot; {{ n.age }}</span>
+      {% else %}<span class="pill bad" title="neither the heartbeat nor the enrollment stamp could be read, so there is no telling when this node last spoke">silent &middot; age unknown</span>{% endif %}
+      {% endif %}
+      <br><span style="color:var(--muted);font-size:.72rem">
+        {% if n.seen %}<span class="ts" data-utc="{{ n.seen }}">{{ n.seen[:16] | replace("T", " ") }}</span>
+        {% else %}<span title="enrolled, but has never heartbeated">never seen</span>{% endif %}
+      </span>
     </td>
     <td>
       {{ n.installed or "—" }}

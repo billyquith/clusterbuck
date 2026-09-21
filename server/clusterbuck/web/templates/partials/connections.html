@@ -9,7 +9,8 @@
         <div class="spoke{{ ' idle' if w.jobs == 0 else '' }}">
           <span class="spoke-line"></span>
           <span class="spoke-name">{{ w.name }}</span>
-          <span class="pill">{{ w.mode }}</span>
+          {% if w.silent %}<span class="pill bad" title="no heartbeat for {{ w.age or "an unreadable length of time" }} — last declared mode was {{ w.mode }}">silent &middot; {{ w.age or "age unknown" }}</span>
+          {% else %}<span class="pill">{{ w.mode }}</span>{% endif %}
           <span class="spoke-jobs">{{ w.jobs }} job{{ 's' if w.jobs != 1 else '' }}</span>
         </div>
         {% endfor %}

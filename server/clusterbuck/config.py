@@ -71,6 +71,15 @@ class Settings:
     # A consumer idle longer than this is treated as gone; must exceed the longest
     # inference (a busy worker isn't polling). Real heartbeats (M4) supersede this.
     worker_dead_ms: int = int(os.environ.get("CBK_WORKER_DEAD_MS", "60000"))
+    # A registry row is a DECLARATION, not a liveness signal: `mode` is what the node last
+    # said about itself, and nothing ever expires it — a machine powered off months ago
+    # still reads `active`. A node silent for longer than this is shown as stale. The
+    # worker heartbeats every 10s from its OWN task (never blocked by a long inference,
+    # see worker commands.py `_heartbeat_loop`), so this tolerates six consecutive misses
+    # before saying anything — a missed heartbeat is transient, sustained silence is not.
+    # Called "silent", not "stale": ADR 27 already spends that word on agent-version drift,
+    # and the nodes table renders both pills one column apart.
+    node_silent_s: float = float(os.environ.get("CBK_NODE_SILENT_S", "60"))
     # At most one wake per capability per this window (coalesce, don't stampede).
     wake_cooldown_s: float = float(os.environ.get("CBK_WAKE_COOLDOWN_S", "60"))
     # How often the escalation engine scans for due waitable jobs.

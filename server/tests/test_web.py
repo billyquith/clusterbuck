@@ -296,3 +296,112 @@ def test_models_flags_an_uncurated_artifact(models_client):
 
 def test_the_models_page_loads_the_joined_table(client):
     assert "/ui/models" in client.get("/models").text
+
+
+# --- node liveness: a registry row is a declaration, not a heartbeat -------------------
+
+def _enroll(client, hostname: str) -> str:
+    token = client.post("/nodes/tokens").json()["join_token"]
+    r = client.post("/nodes/enroll", json={
+        "join_token": token, "hostname": hostname, "os": "linux", "arch": "x86_64",
+        "hw": {"ram_gb": 32, "accelerator": "cuda", "vram_gb": 12, "disk_free_gb": 256},
+        "profile": "shared",
+    })
+    return r.json()["node_id"]
+
+
+def _heartbeat_at(client, node_id: str, when: str) -> None:
+    """Write a heartbeat stamp directly: the HTTP route always stamps `now`, and the
+    whole point here is a node that last spoke long ago."""
+    client.app.state.store.record_heartbeat(
+        node_id=node_id, mode="active", installed="[]", loaded="[]", queues="[]",
+        jobs_done=0, tps=None, last_heartbeat=when)
+
+
+def test_heartbeat_age_falls_back_to_enrollment():
+    """A node that enrolled and never heartbeated has been silent since it enrolled —
+    reading that as "no information" would exempt exactly the nodes that never came up."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from clusterbuck.web import heartbeat_age_s
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    never = SimpleNamespace(last_heartbeat=None, enrolled_at="2026-01-01T00:00:00Z")
+    assert heartbeat_age_s(never, now=now) == 86400
+
+    spoke = SimpleNamespace(last_heartbeat="2026-01-01T23:59:00Z",
+                            enrolled_at="2026-01-01T00:00:00Z")
+    assert heartbeat_age_s(spoke, now=now) == 60
+
+    unreadable = SimpleNamespace(last_heartbeat="not-a-date", enrolled_at=None)
+    assert heartbeat_age_s(unreadable, now=now) is None
+
+
+def test_humanize_age_picks_one_coarse_unit():
+    from clusterbuck.web import humanize_age
+
+    assert humanize_age(9) == "9s"
+    assert humanize_age(600) == "10m"
+    assert humanize_age(7200) == "2h"
+    assert humanize_age(86400 * 3) == "3d"
+
+
+def test_nodes_fragment_marks_a_silent_node(client):
+    """The defect this closes: `mode` is what the node last declared, and nothing expired
+    it, so a machine powered off months ago still rendered a plain `active` pill."""
+    node_id = _enroll(client, "node-gone")
+    _heartbeat_at(client, node_id, "2026-01-01T00:00:00Z")
+
+    html = client.get("/ui/nodes").text
+    assert "silent" in html and "no heartbeat for" in html
+    assert "2026-01-01 00:00" in html, "the stamp itself must be visible, not just the pill"
+
+
+def test_nodes_fragment_leaves_a_live_node_alone(client):
+    from datetime import UTC, datetime
+
+    node_id = _enroll(client, "node-here")
+    seen = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    _heartbeat_at(client, node_id, seen)
+
+    html = client.get("/ui/nodes").text
+    assert "node-here" in html
+    # Positive half: the row rendered AND carries its stamp. Asserting only the absence
+    # of the silent pill would pass just as happily if the whole cell failed to render.
+    assert f'data-utc="{seen}"' in html
+    assert "no heartbeat for" not in html
+
+
+def test_nodes_fragment_says_never_seen_before_a_first_heartbeat(client):
+    _enroll(client, "node-fresh")
+    assert "never seen" in client.get("/ui/nodes").text
+
+
+def test_connections_diagram_marks_a_silent_worker(client):
+    """The spoke is drawn from the same declared `mode`, so it claimed a connection to a
+    machine that may have been off for months."""
+    node_id = _enroll(client, "node-gone")
+    _heartbeat_at(client, node_id, "2026-01-01T00:00:00Z")
+
+    html = client.get("/ui/connections").text
+    assert "node-gone" in html
+    assert "silent" in html and "no heartbeat for" in html
+
+
+def test_an_unreadable_stamp_is_silent_not_healthy(client):
+    """Fail closed. A corrupted or hand-edited row is exactly where a fail-open reading
+    would resurrect the original defect: a clean `active` pill on a node nobody has heard
+    from."""
+    node_id = _enroll(client, "node-corrupt")
+    _heartbeat_at(client, node_id, "not-a-date")
+    with client.app.state.store._session() as s:  # noqa: SLF001 - no setter for a bad stamp
+        from clusterbuck.orm.node import Node
+        node = s.get(Node, node_id)
+        node.enrolled_at = "also-not-a-date"
+        s.add(node)
+        s.commit()
+
+    html = client.get("/ui/nodes").text
+    assert "node-corrupt" in html
+    assert "age unknown" in html
