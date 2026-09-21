@@ -146,7 +146,35 @@ class UpdateApplier:
         self._log = log or print
 
     async def apply(self, m: UpdateManifest) -> UpdateResult:
-        """Verify and apply a manifest. On success the process re-execs and does not return."""
+        """Verify and apply a manifest. On success the process re-execs and does not return.
+
+        Refuses outright on Windows. The swap-then-re-exec sequence below is unsound there
+        and has two failure modes, neither of them safe:
+
+          * `shutil.move` over the running `.pyz` hits WinError 32, because zipimport holds
+            the handle open. The update simply never lands, reported as FAILED each time.
+          * If it did land, `os.execv` on Windows does not replace the process image the
+            way it does on POSIX — it spawns a child and the parent exits. The Task
+            Scheduler registration then restarts the task (`RestartCount 999`), and the
+            fleet briefly has TWO workers on one Redis consumer name. That is precisely
+            what `_reexec`'s comment says execv prevents, and it is only true on POSIX.
+
+        ADR 13a already recorded the swap as "unverified on Windows — a known gap, not a
+        claim". Leaving it to fail ambiguously was the worse option: a silent no-op looks
+        like a worker that will not update, and the duplicate-consumer case looks like a
+        queue bug somewhere else entirely. A refusal names itself.
+
+        The coordinator still marks such a node `stale`, so the drift stays visible; the
+        operator updates it by replacing the artifact and restarting the task.
+        """
+        if os.name == "nt":
+            return UpdateResult(
+                Outcome.REFUSED,
+                f"self-update is not supported on Windows (offered {m.version}): the "
+                f"running artifact cannot be replaced in place, and os.execv would leave "
+                f"two workers on one consumer name. Replace the .pyz and restart the "
+                f"scheduled task instead.")
+
         if not self._public_key_pem:
             return UpdateResult(Outcome.REFUSED,
                                 "no pinned public key (CBK_UPDATE_PUBKEY): self-update is "

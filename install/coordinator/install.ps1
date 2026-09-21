@@ -97,9 +97,17 @@ API_KEY=$apiKey
 } else {
     Write-Ok "Reusing existing secrets from $SecretsFile"
 }
-$secrets = Get-Content $SecretsFile | ConvertFrom-StringData
+# -Raw is required. Without it Get-Content emits a string[], the pipeline hands
+# ConvertFrom-StringData one line at a time, and the result is an ARRAY of single-entry
+# hashtables rather than one hashtable — at which point $secrets['REDIS_PW'] is a string
+# index into Object[] and throws "Cannot convert value \"REDIS_PW\" to type Int32".
+# Every run of this installer would have failed on the next line.
+$secrets = Get-Content $SecretsFile -Raw | ConvertFrom-StringData
 $redisPw = $secrets['REDIS_PW']
 $apiKey  = $secrets['API_KEY']
+if (-not $redisPw -or -not $apiKey) {
+    throw "Could not read REDIS_PW/API_KEY from $SecretsFile"
+}
 
 # ── Redis (Docker container) ──────────────────────────────────────────────────
 Write-Step 'Redis'
@@ -149,7 +157,12 @@ $FleetYaml = "$EtcDir\fleet.yaml"
 $DbPath    = "$VarDir\cbk.db"
 
 if (-not (Test-Path $ServerEnv)) {
-    @"
+    # NEVER `Set-Content -Encoding UTF8` here. On PowerShell 5.1 that encoder emits a BOM,
+    # and the run-coordinator.cmd wrapper below parses this file with cmd's `for /f`, which
+    # folds a BOM into the FIRST variable's NAME. That would leave CBK_API_KEY unset while
+    # every other line worked — an unauthenticated coordinator that looks configured. Same
+    # trap the worker installer hit (see install/worker/install.ps1 and commit 51f1790).
+    $envBody = @"
 CBK_API_KEY=$apiKey
 CBK_REDIS_URL=redis://:$redisPw@127.0.0.1:6379/0
 CBK_DB_PATH=$DbPath
@@ -157,7 +170,8 @@ CBK_FLEET_PATH=$FleetYaml
 CBK_HOST=0.0.0.0
 CBK_PORT=$Port
 CBK_WORKER_CURRENT_VERSION=$WorkerVersion
-"@ | Set-Content -Path $ServerEnv -Encoding UTF8
+"@
+    [System.IO.File]::WriteAllText($ServerEnv, $envBody, (New-Object System.Text.UTF8Encoding($false)))
     # Restrict to Administrators
     $acl = Get-Acl $ServerEnv
     $acl.SetAccessRuleProtection($true, $false)
@@ -170,7 +184,11 @@ CBK_WORKER_CURRENT_VERSION=$WorkerVersion
 }
 
 if (-not (Test-Path $FleetYaml)) {
-    "nodes: []`ncapabilities: {}" | Set-Content $FleetYaml -Encoding UTF8
+    # PyYAML tolerates a leading BOM, so this one is not currently load-bearing — but the
+    # file is hand-edited afterwards and read by a Python that does not pass utf-8-sig, so
+    # it is written BOM-less for the same reason as server.env rather than as an exception.
+    [System.IO.File]::WriteAllText($FleetYaml, "nodes: []`r`ncapabilities: {}`r`n",
+        (New-Object System.Text.UTF8Encoding($false)))
     Write-Ok 'fleet.yaml written'
 }
 
@@ -180,13 +198,22 @@ $taskName = 'cbk-coordinator'
 $python   = "$VenvDir\Scripts\python.exe"
 $wrapper  = "$DeployDir\run-coordinator.cmd"
 
-# Build env-var block from server.env for the cmd wrapper
-$envBlock = (Get-Content $ServerEnv | Where-Object { $_ -match '^\w' } |
-    ForEach-Object { "set $_" }) -join "`r`n"
-
+# The wrapper READS server.env at launch. It used to bake the values in at install time,
+# character-for-character the code deleted from install/worker/install.ps1 in 51f1790 —
+# which meant editing the documented config file changed nothing until someone re-ran the
+# installer, while `:169` cheerfully reported "server.env already exists (not
+# overwritten)". The README and the summary below both tell the operator to hand-edit that
+# file to add the three join settings, so the documented procedure was a silent no-op on a
+# Windows coordinator. It also wrote the API key and the Redis password to a second file.
+#
+# Task Scheduler cannot source an env file, which is why a .cmd shim exists at all.
+# PYTHONUTF8: SYSTEM redirects stdout, so Python falls back to the ANSI codepage and dies
+# on the coordinator's own non-ASCII log output.
 @"
 @echo off
-$envBlock
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
+for /f "usebackq eol=# tokens=1,* delims==" %%a in ("$ServerEnv") do set "%%a=%%b"
 "$python" -m clusterbuck >> "$LogDir\coordinator.log" 2>&1
 "@ | Set-Content $wrapper -Encoding ASCII
 

@@ -230,3 +230,57 @@ async def test_rollback_restores_the_retained_artifact(tmp_path, monkeypatch):
 async def test_rollback_is_a_no_op_without_a_retained_artifact(tmp_path, monkeypatch):
     monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
     assert upd.rollback(log=lambda _: None) is False
+
+
+# --- Windows: refuse rather than fail ambiguously ---------------------------------------
+
+async def test_self_update_refuses_on_windows(monkeypatch, tmp_path):
+    """The swap-then-re-exec sequence is unsound on Windows, in two different ways.
+
+    `shutil.move` over the running `.pyz` hits WinError 32 because zipimport holds the
+    handle; and if it somehow landed, `os.execv` there spawns a child rather than
+    replacing the image, so Task Scheduler's `RestartCount 999` would leave two workers
+    on one Redis consumer name — exactly what `_reexec` claims execv prevents.
+
+    A refusal is strictly better than either. A silent failure reads as "this node won't
+    update"; the duplicate-consumer case reads as a queue bug somewhere else entirely.
+    """
+    import httpx
+
+    from cbk_worker.update import Outcome, UpdateApplier, UpdateManifest
+
+    monkeypatch.setattr("cbk_worker.update.os.name", "nt")
+    async with httpx.AsyncClient() as client:
+        applier = UpdateApplier(client, public_key_pem="-----BEGIN PUBLIC KEY-----")
+        m = UpdateManifest(version="9.9.9", url="https://example/cbk.pyz",
+                           sha256="0" * 64, signature="x", protocol_version=1)
+        got = await applier.apply(m)
+
+    assert got.outcome is Outcome.REFUSED
+    assert "Windows" in got.detail and "9.9.9" in got.detail
+    assert "consumer name" in got.detail, "the refusal must say WHY, not just decline"
+
+
+async def test_the_windows_refusal_comes_before_any_download(monkeypatch, tmp_path):
+    """It must not fetch a multi-GB artifact only to refuse to install it."""
+    import httpx
+
+    from cbk_worker.update import Outcome, UpdateApplier, UpdateManifest
+
+    called = False
+
+    class _Boom(httpx.AsyncClient):
+        def stream(self, *a, **k):
+            nonlocal called
+            called = True
+            raise AssertionError("downloaded before checking the platform")
+
+    monkeypatch.setattr("cbk_worker.update.os.name", "nt")
+    async with _Boom() as client:
+        applier = UpdateApplier(client, public_key_pem="-----BEGIN PUBLIC KEY-----")
+        got = await applier.apply(UpdateManifest(
+            version="1.0.0", url="https://example/cbk.pyz", sha256="0" * 64,
+            signature="x", protocol_version=1))
+
+    assert got.outcome is Outcome.REFUSED
+    assert called is False

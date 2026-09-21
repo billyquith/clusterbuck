@@ -70,14 +70,40 @@ function Write-Warn  { Write-Host "[cbk] WARN: $args" -ForegroundColor Yellow }
 # Applied on EVERY run, not only the run that creates the file. An install that died
 # between writing a secret and securing it used to leave it exposed, and the
 # "already exists, not overwritten" guard meant no later run ever repaired it.
+# The account the worker runs as. A BUILT-IN service account, deliberately: it needs no
+# creation, no password to store or rotate, and no "log on as a batch job" right to grant.
+# NetworkService has the outbound network access the worker needs (Redis, the coordinator,
+# the model server) and is not an administrator.
+#
+# It used to run as SYSTEM, which was never argued for and cost more than it looked like.
+# At the inherited ACL the binary is writable by Authenticated Users, so any local account
+# could replace the code the machine then ran with full local authority — the hole
+# Protect-SecretFile exists to close. Running as NetworkService does not remove the need
+# for that hardening, but it does mean a successful swap yields a non-admin process rather
+# than SYSTEM.
+$ServiceAccount = 'NT AUTHORITY\NetworkService'
+
 function Protect-SecretFile {
-    param([Parameter(Mandatory)][string]$Path)
+    <#
+      Strip inheritance and grant only what is named. `-Grant` adds the service account at
+      the given rights; omit it for a file the worker never reads.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('None', 'ReadAndExecute', 'Read', 'Modify')][string]$Grant = 'None'
+    )
     $acl = Get-Acl $Path
     $acl.SetAccessRuleProtection($true, $false)          # stop inheriting, copy nothing
     foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
     foreach ($id in @('Administrators', 'SYSTEM')) {
         $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
             $id, 'FullControl', 'Allow'))
+    }
+    if ($Grant -ne 'None') {
+        # Never FullControl: the worker must not be able to rewrite its own binary, which
+        # is the whole point of dropping it off SYSTEM.
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $ServiceAccount, $Grant, 'Allow'))
     }
     Set-Acl -Path $Path -AclObject $acl
 }
@@ -140,9 +166,14 @@ No binary at $CbkBin — supply one with -Artifact PATH
 # whether the binary was just installed or was already there, since an older install left
 # it wide open and no re-run would otherwise repair it.
 #
-# Self-update (ADR 13) is unaffected: the worker runs as SYSTEM, which keeps FullControl
-# and can still swap the file and keep cbk.prev beside it.
-if (Test-Path $CbkBin) { Protect-SecretFile $CbkBin }
+# Self-update does not need write access here any more: it is refused outright on Windows
+# (see worker/src/cbk_worker/update.py — the in-place swap cannot work while zipimport
+# holds the handle, and os.execv there would leave two workers on one consumer name).
+# That refusal is what made dropping off SYSTEM possible; the two changes belong together.
+# Updating a Windows node means replacing the .pyz and restarting the scheduled task.
+# ReadAndExecute, not FullControl: the service account runs the binary and must not
+# be able to rewrite it.
+if (Test-Path $CbkBin) { Protect-SecretFile $CbkBin -Grant ReadAndExecute }
 
 # WRITING FILES THE WORKER PARSES: never `Set-Content -Encoding UTF8`.
 #
@@ -178,7 +209,7 @@ CBK_NODE_STATE=$NodeState
 } else {
     Write-Ok 'worker.env already exists (not overwritten — edit manually to change)'
 }
-Protect-SecretFile $EnvFile
+Protect-SecretFile $EnvFile -Grant Read          # the wrapper reads it at every launch
 
 # ── Scheduled Task ────────────────────────────────────────────────────────────
 Write-Step 'Scheduled Task'
@@ -207,7 +238,7 @@ python "$CbkBin" work >> "$LogDir\worker.log" 2>&1
 
 # No longer holds the credential, but SYSTEM executes it at every boot - so an account
 # that can write it can run code as SYSTEM. Lock it down for that reason, not secrecy.
-Protect-SecretFile $wrapper
+Protect-SecretFile $wrapper -Grant ReadAndExecute  # cmd.exe runs it as the service account
 
 $action   = New-ScheduledTaskAction -Execute 'cmd.exe' `
                 -Argument "/c `"$wrapper`"" -WorkingDirectory $DeployDir
@@ -216,7 +247,10 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 `
                 -RestartCount 999 `
                 -RestartInterval (New-TimeSpan -Minutes 1) `
                 -StartWhenAvailable
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+# ServiceAccount logon, and no -RunLevel Highest: NetworkService cannot elevate, which is
+# the point. If this node was installed before the switch, Register-ScheduledTask -Force
+# below replaces the SYSTEM registration rather than leaving both.
+$principal = New-ScheduledTaskPrincipal -UserId $ServiceAccount -LogonType ServiceAccount
 
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName $taskName `
@@ -249,7 +283,8 @@ if ($Token) {
 # replacing it, so the ACL survives every mode change. The cost is that `cbk pause` now
 # needs an elevated shell here — which matches Linux, where the file belongs to the
 # service account and a human owner pauses through sudo.
-if (Test-Path $NodeState) { Protect-SecretFile $NodeState }
+# Modify, not Read: the worker writes its presence state back here.
+if (Test-Path $NodeState) { Protect-SecretFile $NodeState -Grant Modify }
 
 # ── start ─────────────────────────────────────────────────────────────────────
 if (Test-Path $NodeState) {

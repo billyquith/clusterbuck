@@ -107,6 +107,60 @@ jobs:
           uv run python build.py
           uv run python dist/cbk.pyz --version
 
+  powershell:
+    # 575 lines of PowerShell across three installers had NO automated coverage of any
+    # kind — not a parse, not a lint. Every defect in them has been found by hand on a
+    # real Windows node (see commits 51f1790, b1ed03a, and the coordinator's
+    # ConvertFrom-StringData bug, which would have failed on every run). This will not
+    # catch a logic error, but it catches the class that has cost the most: a script that
+    # does not parse, or an obvious misuse, discovered at 2am on the node itself.
+    name: install scripts (PowerShell + shell)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every .ps1 parses
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) {
+              $bad++
+              Write-Host "::error file=$($_.FullName)::$($errors -join '; ')"
+            } else {
+              Write-Host "ok  $($_.Name)"
+            }
+          }
+          if ($bad) { exit 1 }
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          # Errors fail the build; warnings are surfaced but tolerated, so this can land
+          # without a cleanup pass on style rules nobody has agreed to yet.
+          $found = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error,Warning
+          $found | Format-Table -AutoSize
+          $errs = @($found | Where-Object Severity -eq 'Error')
+          if ($errs) { Write-Host "::error::$($errs.Count) PSScriptAnalyzer error(s)"; exit 1 }
+
+  shellcheck:
+    name: install scripts (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every shell script parses, and shellcheck is clean of errors
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          fail=0
+          for f in $(git ls-files '*.sh'); do
+            bash -n "$f" || { echo "::error file=$f::does not parse"; fail=1; }
+          done
+          # -S error only: the e2e scripts predate this and carry style warnings.
+          shellcheck -S error $(git ls-files '*.sh') || fail=1
+          exit $fail
+
   contract:
     name: contract schemas
     runs-on: ubuntu-latest
