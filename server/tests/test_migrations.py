@@ -24,6 +24,7 @@ reason — cosmetic differences in how a literal default is quoted aren't schema
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 import pytest
@@ -158,6 +159,30 @@ def test_store_bootstraps_a_new_database_at_head(tmp_path) -> None:
     Store(str(db))
     assert _alembic_version(db) == (_HEAD,)
     assert "jobs" in _schema_signature(db)
+
+
+def test_running_migrations_does_not_silence_the_application(tmp_path) -> None:
+    """Alembic must not disable the coordinator's own loggers.
+
+    `migrations/env.py` calls `logging.config.fileConfig`, which defaults to
+    `disable_existing_loggers=True`, and `Store._ensure_schema` runs Alembic on EVERY
+    Store construction — at coordinator startup, after `clusterbuck.api` has imported
+    every module and each has taken its logger. With the default, that one call set
+    `disabled = True` on all sixteen `clusterbuck.*` loggers and the coordinator ran
+    blind: tick failures, wake decisions and reaper actions all vanished, leaving only
+    uvicorn's and Alembic's own lines in the journal.
+
+    Cheap to break by accident (it is Alembic's shipped template default) and invisible
+    when broken, which is exactly what a regression test is for.
+    """
+    import clusterbuck.api  # noqa: F401  — the real import graph, so the loggers exist
+    names = [n for n in logging.root.manager.loggerDict if n.startswith("clusterbuck")]
+    assert names, "expected clusterbuck loggers to have been created by the import"
+
+    Store(str(tmp_path / "logging.db"))
+
+    silenced = sorted(n for n in names if logging.getLogger(n).disabled)
+    assert not silenced, f"migrations disabled these loggers: {silenced}"
 
 
 def test_attention_leases_is_gone(tmp_path) -> None:

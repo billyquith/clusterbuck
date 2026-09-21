@@ -1,25 +1,36 @@
 """The coordinator's background loop: one periodic tick over stored state.
 
-Runs the escalation scan (ADR 18) and the reservation reconciler (ADR 17) on a shared
-cadence. Both derive what should happen from SQLite + Redis rather than from live timers,
-so they survive restarts and are driven directly in tests. This is the single place a
-future unified coordinator gathers its periodic work.
+Every scan here derives what should happen from SQLite + Redis rather than from live
+timers, so they survive restarts and can be driven directly in tests. This is the single
+place the coordinator gathers its periodic work.
+
+**Each tick is isolated.** The loop used to run the latency-sensitive scans inside one
+shared `try`, with `observe_tick` broken out into a second one. That gave the wrong
+grouping twice over: an exception in the first scan skipped every later scan in the same
+block *and* left `ticks` un-incremented, stalling the slow-cadence work behind it — while
+the one tick that had its own handler was the purely observational one that mattered
+least. Now every tick gets the same treatment, and a failure costs only its own turn.
+
+Cadences, fastest to slowest: escalation / reservations / usage / observe run every tick;
+the reaper and the terminating backstops run on `reaper_every` because the thresholds they
+enforce are measured in minutes; evals on `eval_every`; the planner on `planner_every`,
+because it is advisory and compares slow-moving state.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from .backstop import backstop_scan
 from .catalog import scan_all
 from .config import settings
-from .backstop import backstop_scan
 from .escalation import escalation_scan
-from .observe import observe_tick
 from .eval_runner import eval_tick
 from .fleet import Fleet
+from .observe import observe_tick
 from .queue import Queue
 from .reaper import reaper_scan
 from .reservations import reservation_tick
@@ -34,6 +45,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+@contextmanager
+def _isolated(name: str):
+    """Run one tick; log and swallow its failure so the others still get their turn."""
+    try:
+        yield
+    except Exception:  # a tick failure must not kill the loop, or skip its siblings
+        _log.exception("coordinator tick %r failed", name)
+
+
 async def coordinator_loop(
     store: Store,
     queue: Queue,
@@ -46,48 +66,50 @@ async def coordinator_loop(
     eval_every: int = 5,
     reaper_every: int = 6,
 ) -> None:
-    """Tick escalation + reservations + usage + evals + the planner."""
+    """Tick escalation + reservations + usage + observation + evals + the planner."""
     ticks = 0
     while not stop.is_set():
-        try:
+        ticks += 1
+
+        with _isolated("escalation"):
             await escalation_scan(store, queue, wake, fleet=fleet)
+        with _isolated("reservation"):
             await reservation_tick(store, wake)
+        with _isolated("usage"):
             await usage_scan(store, queue, fleet)
-            ticks += 1
-            # Recover jobs abandoned by a worker that died mid-run (ADR 20). Runs on a slow
-            # cadence because the idle threshold it enforces is measured in minutes.
-            if ticks % reaper_every == 0:
+
+        if ticks % reaper_every == 0:
+            # Recover jobs abandoned by a worker that died mid-run (ADR 20): XAUTOCLAIM
+            # over the pending-entries list.
+            with _isolated("reaper"):
                 await reaper_scan(
                     store, queue, group=settings.consumer_group,
                     min_idle_ms=settings.reaper_min_idle_ms,
                 )
-                # Same slow cadence as the reaper, and for the same reason: both enforce
-                # thresholds measured in minutes. This is the half the reaper cannot do,
-                # because a job nobody ever claimed is not in the pending list.
+            # Same slow cadence, and for the same reason — thresholds in minutes — but a
+            # separate mechanism, not a variant of the reaper: these scan SQLite for jobs
+            # that never entered the pending list at all, which is precisely what
+            # XAUTOCLAIM cannot see (see backstop.py's header).
+            with _isolated("backstop"):
                 await backstop_scan(
                     store, queue, fleet,
                     orphan_grace_s=settings.orphan_grace_s,
                     max_queue_age_s=settings.max_queue_age_s,
                     group=settings.consumer_group,
                 )
-            # Measuring an unmeasured artifact is background work: collect finished eval
-            # jobs and dispatch new ones on a slower cadence than the live ticks.
-            if ticks % eval_every == 0:
-                await eval_tick(store, queue, now=_now(), fleet=fleet)
-            # The planner is advisory and compares slow-moving state, so it runs far less
-            # often than the latency-sensitive ticks above.
-            if ticks % planner_every == 0:
-                scan_all(store, now=_now())
-        except Exception:  # a tick failure must not kill the loop
-            _log.exception("coordinator tick failed")
 
-        # Deliberately in its own try, and last: this is the only tick that is purely
-        # observational — nothing routes on it — so a Redis hiccup here must not cost the
-        # escalation, reservation and usage ticks above their turn.
-        try:
+        if ticks % eval_every == 0:
+            with _isolated("eval"):
+                await eval_tick(store, queue, now=_now(), fleet=fleet)
+
+        if ticks % planner_every == 0:
+            with _isolated("planner"):
+                scan_all(store, now=_now())
+
+        # Purely observational — nothing routes on it — so it runs last.
+        with _isolated("observe"):
             await observe_tick(store, queue, group=settings.consumer_group)
-        except Exception:
-            _log.exception("observe tick failed")
+
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_s)
         except asyncio.TimeoutError:

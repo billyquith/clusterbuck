@@ -25,9 +25,18 @@ db_path = os.environ.get("CBK_DB_PATH", "cbk.db")
 config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+#
+# `disable_existing_loggers=False` is load-bearing, not tidiness. It defaults to True, and
+# `Store._ensure_schema` runs `alembic upgrade head` on EVERY Store construction — which on
+# the coordinator happens at startup, after `clusterbuck.api` has imported every module and
+# each has taken its `logging.getLogger(...)`. With the default, that single call set
+# `disabled = True` on all sixteen `clusterbuck.*` loggers, and the coordinator then ran
+# blind: no tick failures, no wake decisions, no reaper actions, nothing but uvicorn's and
+# Alembic's own output in the journal. Alembic's template ships the default because it
+# assumes the CLI, where nothing else has logged yet; embedded in a long-lived process it
+# silences the host application.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = SQLModel.metadata
 

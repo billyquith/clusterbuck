@@ -30,7 +30,7 @@ from .catalog import (
 )
 from .cloud_executor import CloudExecutor, cloud_capabilities
 from .config import JOIN_PASSWORD_MIN_LEN, settings
-from .coordinator import propose_capabilities
+from .capability_proposal import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import (
     SCALE_VERSION,
