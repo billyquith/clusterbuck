@@ -5,21 +5,16 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+E2E_NAME=enroll
+# shellcheck source=lib.sh
+source "$REPO/deploy/e2e/lib.sh"
 # shellcheck source=worker.sh
 source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8084}"
 URL="http://127.0.0.1:$PORT"
-WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-PIDS=()
-log(){ printf '\033[36m[enroll]\033[0m %s\n' "$*"; }
-fail(){ printf '\033[31m[enroll] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
-cleanup(){ for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORKDIR"; }
-trap cleanup EXIT
-wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
-jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
+redis_cli -n 0 FLUSHDB >/dev/null
 python3 "$REPO/server/tools/fake_model_server.py" --port 11441 >/dev/null 2>&1 & PIDS+=($!)
 wait_for "http://127.0.0.1:11441/healthz" "fake model server"
 # exec so the backgrounded subshell *becomes* uvicorn — $! is the real server pid, so

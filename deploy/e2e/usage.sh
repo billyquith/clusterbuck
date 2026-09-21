@@ -5,21 +5,16 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+E2E_NAME=usage
+# shellcheck source=lib.sh
+source "$REPO/deploy/e2e/lib.sh"
 # shellcheck source=worker.sh
 source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8083}"
 URL="http://127.0.0.1:$PORT"
 CAP="8b-extract"
-WORKDIR="$(mktemp -d)"
-PIDS=()
-log(){ printf '\033[36m[usage]\033[0m %s\n' "$*"; }
-fail(){ printf '\033[31m[usage] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
-cleanup(){ for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORKDIR"; }
-trap cleanup EXIT
-wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
-jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
+redis_cli -n 0 FLUSHDB >/dev/null
 
 python3 "$REPO/server/tools/fake_model_server.py" --port 11439 & PIDS+=($!)
 wait_for "http://127.0.0.1:11439/healthz" "fake model server"

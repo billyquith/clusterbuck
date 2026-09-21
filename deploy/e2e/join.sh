@@ -10,16 +10,13 @@
 # this needs no root.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+E2E_NAME=join-e2e
+# shellcheck source=lib.sh
+source "$REPO/deploy/e2e/lib.sh"
 PORT="${CBK_PORT:-8098}"
 URL="http://127.0.0.1:$PORT"
-WORKDIR="$(mktemp -d)"
-PIDS=()
 PASSWORD="a-long-enough-join-password"
 OPERATOR_KEY="operator-key-must-not-leak"
-log(){ printf '\033[36m[join-e2e]\033[0m %s\n' "$*"; }
-fail(){ printf '\033[31m[join-e2e] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
-cleanup(){ for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORKDIR"; }
-trap cleanup EXIT
 wait_for(){ for _ in $(seq 1 60); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
 
 # The artifact the coordinator will hand out. Built here so the test proves the real file

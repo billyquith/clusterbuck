@@ -19,6 +19,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+E2E_NAME=selfupd-py
+# shellcheck source=lib.sh
+source "$REPO/deploy/e2e/lib.sh"
 PORT="${CBK_PORT:-8093}"
 FILE_PORT="${CBK_FILE_PORT:-8094}"
 MODEL_PORT="${CBK_MODEL_PORT:-11449}"
@@ -26,16 +29,11 @@ URL="http://127.0.0.1:$PORT"
 KEYDIR="$(mktemp -d)"; WORKDIR="$(mktemp -d)"; DIST="$WORKDIR/dist"; INSTALL="$WORKDIR/bin"
 STATE="$WORKDIR/node.json"
 RID="py3-none-any"          # one artifact, every platform — that is the point
-PIDS=()
 sha256(){ if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d" " -f1;
           else shasum -a 256 "$1" | cut -d" " -f1; fi; }
-log(){ printf '\033[36m[selfupd-py]\033[0m %s\n' "$*"; }
-fail(){ printf '\033[31m[selfupd-py] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
 cleanup(){ for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
            pkill -f "$INSTALL/cbk.pyz" 2>/dev/null || true; rm -rf "$WORKDIR" "$KEYDIR"; }
-trap cleanup EXIT
 wait_for(){ for _ in $(seq 1 60); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.25; done; fail "$2 not ready"; }
-jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 node_field(){ curl -fsS "$URL/nodes" | python3 -c "
 import sys,json
 n=next((n for n in json.load(sys.stdin)['nodes'] if n['node_id']=='$1'),{})
@@ -92,7 +90,7 @@ JSON
 
 python3 "$REPO/server/tools/fake_model_server.py" --port "$MODEL_PORT" >/dev/null 2>&1 & PIDS+=($!)
 wait_for "http://127.0.0.1:$MODEL_PORT/healthz" "model server"
-${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
+redis_cli -n 0 FLUSHDB >/dev/null
 
 ( cd "$REPO/server" && exec env \
   CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \

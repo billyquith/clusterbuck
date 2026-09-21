@@ -12,21 +12,16 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+E2E_NAME=install
+# shellcheck source=lib.sh
+source "$REPO/deploy/e2e/lib.sh"
 # shellcheck source=worker.sh
 source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8087}"
 URL="http://127.0.0.1:$PORT"
-WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-PIDS=()
-log(){ printf '\033[36m[install]\033[0m %s\n' "$*"; }
-fail(){ printf '\033[31m[install] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
-cleanup(){ for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORKDIR"; }
-trap cleanup EXIT
-wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
-jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
+redis_cli -n 0 FLUSHDB >/dev/null
 
 if [[ "${USE_OLLAMA:-0}" == "1" ]]; then
   MODEL_URL="http://localhost:11434/v1"

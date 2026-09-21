@@ -14,6 +14,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+E2E_NAME=eval
+# shellcheck source=lib.sh
+source "$REPO/deploy/e2e/lib.sh"
 # shellcheck source=worker.sh
 source "$REPO/deploy/e2e/worker.sh"
 PORT="${CBK_PORT:-8088}"
@@ -21,17 +24,9 @@ MODEL_PORT="${CBK_MODEL_PORT:-11446}"
 URL="http://127.0.0.1:$PORT"
 ARTIFACT="newcomer:7b"
 CAP="8b-extract"
-WORKDIR="$(mktemp -d)"
 STATE="$WORKDIR/node.json"
-PIDS=()
-log(){ printf '\033[36m[eval]\033[0m %s\n' "$*"; }
-fail(){ printf '\033[31m[eval] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
-cleanup(){ for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$WORKDIR"; }
-trap cleanup EXIT
-wait_for(){ for _ in $(seq 1 50); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done; fail "$2 not ready"; }
-jqpy(){ python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 FLUSHDB >/dev/null
+redis_cli -n 0 FLUSHDB >/dev/null
 
 # A model server advertising an artifact nobody has ever scored.
 python3 "$REPO/server/tools/fake_model_server.py" --port "$MODEL_PORT" --models "$ARTIFACT" \
@@ -122,7 +117,7 @@ curl -fsS -X POST "$URL/jobs" -H 'content-type: application/json' -d '{
   "urgency": "waitable"
 }' >/dev/null
 sleep 0.5
-BEFORE_DEPTH=$(${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} -n 0 XLEN "q:$CAP" | tr -d '\r')
+BEFORE_DEPTH=$(redis_cli -n 0 XLEN "q:$CAP" | tr -d '\r')
 [[ "$BEFORE_DEPTH" -gt 0 ]] || fail "need-shaped job did not reach q:$CAP"
 log "measured artifact is routable via $CAP ✓"
 

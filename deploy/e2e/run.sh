@@ -11,35 +11,19 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+E2E_NAME=e2e
+# shellcheck source=lib.sh
+source "$REPO/deploy/e2e/lib.sh"
 # shellcheck source=worker.sh
 source "$REPO/deploy/e2e/worker.sh"
 REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}"
 SERVER_PORT="${CBK_PORT:-8077}"
 SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
 CAP="8b-extract"
-WORKDIR="$(mktemp -d)"
-PIDS=()
-
-log()  { printf '\033[36m[e2e]\033[0m %s\n' "$*"; }
-fail() { printf '\033[31m[e2e] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
-
-cleanup() {
-  for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-  rm -rf "$WORKDIR"
-}
-trap cleanup EXIT
-
-wait_for() {  # url, name
-  for _ in $(seq 1 50); do
-    if curl -fsS "$1" >/dev/null 2>&1; then return 0; fi
-    sleep 0.2
-  done
-  fail "$2 did not become ready at $1"
-}
 
 # --- Redis reachable? -------------------------------------------------------
 redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1 \
-  || ${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} ping >/dev/null 2>&1 \
+  || redis_cli ping >/dev/null 2>&1 \
   || fail "no Redis reachable at $REDIS_URL"
 log "redis ok"
 
