@@ -77,8 +77,14 @@ class Settings:
     escalation_interval_s: float = float(os.environ.get("CBK_ESCALATION_INTERVAL_S", "10"))
     wol_broadcast: str = os.environ.get("CBK_WOL_BROADCAST", "255.255.255.255")
     wol_port: int = int(os.environ.get("CBK_WOL_PORT", "9"))
-    # Reservations: wake + pre-load this long before a window opens (ADR 17).
-    warm_lead_s: int = int(os.environ.get("CBK_WARM_LEAD_S", "300"))
+    # Reservations: how long before a window opens to wake and pre-load (ADR 17).
+    # UNSET is the normal case and does NOT mean "no lead" — it means the lead is derived
+    # from each node's MEASURED cold-load time (`stats.load_s`), which is the whole point
+    # of measuring it. Defaulting this to 300 made it indistinguishable from an operator
+    # explicitly choosing 300, so the measured path could never be reached: the only
+    # caller always passed the constant. Set it only to override the measurement.
+    warm_lead_s: int | None = (
+        int(os.environ["CBK_WARM_LEAD_S"]) if os.environ.get("CBK_WARM_LEAD_S") else None)
     # Shared-secret for the coordinator API (DESIGN.md → Security). Unset ⇒ auth disabled
     # (dev default, warned at startup).
     api_key: str | None = os.environ.get("CBK_API_KEY") or None

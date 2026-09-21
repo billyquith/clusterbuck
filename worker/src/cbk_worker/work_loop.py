@@ -97,9 +97,8 @@ class WorkLoop:
         median = statistics.median(self._tps_samples)
         # Two decimals, and never a zero. Rounding a genuinely slow node's rate to one
         # decimal produced 0.0 on a live fleet — which every consumer then reads as a
-        # MEASUREMENT of zero rather than the absence of one, excluding that node from
-        # every min_tps job and making it refuse the ones it claimed anyway. A node that
-        # cannot be shown to generate anything has no rate, which is the None case.
+        # MEASUREMENT of zero rather than the absence of one. A node that cannot be shown
+        # to generate anything has no rate, which is the None case.
         return round(median, 2) or None
 
     @property
@@ -171,18 +170,6 @@ class WorkLoop:
         Silent when the inventory is unknown: a model server that did not answer must not
         take the whole node offline.
         """
-        # Throughput floor. The coordinator excluded capabilities whose nodes are known to
-        # be too slow, but "known" is the operative word: a node that had measured nothing
-        # at submit time passes that gate and may still be the wrong machine for the job.
-        # This is the node that actually knows, so it is the one that says no.
-        #
-        # Only ever refuses on a MEASUREMENT. A worker that has finished no jobs has no
-        # speed — which is not the same as being slow — and must not reject work over it.
-        measured = self.tps
-        if job.min_tps and measured and measured < job.min_tps:
-            return (f"job needs {job.min_tps:g} tok/s; this node measures {measured:g}. "
-                    f"Refusing rather than returning a slow answer nobody asked for.")
-
         pinned = (job.params or {}).get("model")
         if not pinned or not self.installed:
             return None

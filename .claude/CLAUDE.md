@@ -61,16 +61,14 @@ pin it cannot serve, so `min_ability` is no longer enforced against a name unrel
 runs; the tier-1 suite went from 6 items to 40 and is **capped at ability 7**, because
 compliance checks cannot certify the frontier band and a 3B scoring 10 made the cloud
 fallback permanently unreachable; `embed` is gone (seeded, unmeasurable, unservable);
-throughput is addressable as **`min_tps`**, judged by the node that actually knows; artifact
-**capabilities** (`requires`: context window, tools, JSON schema, vision) are a hard filter,
-since no 1–10 score can express a yes/no fact; hardware fitness now reads **VRAM**, with
+hardware fitness now reads **VRAM**, with
 `fits()` distinguishing "runs" from "runs well" and capability proposals budgeting against
 it; and the reservation pre-warm lead comes from each node's **measured cold-load time**
 (`stats.load_s`) rather than a hardcoded five minutes. `bench_tps_small` — declared in the
 contract, carried through four layers, never computed or read — is gone.
 
-A single coordinator loop runs the escalation / reservation / attention / usage / eval /
-reaper / planner ticks. Deliberately deferred (needs real hardware, a judge model, real usage data,
+A single coordinator loop runs the escalation / reservation / usage / eval / reaper /
+backstop / planner / observe ticks, each isolated so one failure costs only its own turn. Deliberately deferred (needs real hardware, a judge model, real usage data,
 or multi-node — documented in code + ADRs): true Wake-on-LAN to real MACs, canary rings +
 automatic crash-loop rollback (the binary swap and `cbk.prev` retention ARE built and proven;
 deciding a release is crash-looping needs multi-node observation), OS presence detection,
@@ -208,8 +206,7 @@ bash deploy/e2e/enroll.sh         # M4b: enroll → registry → heartbeat → p
 bash deploy/e2e/join.sh           # one password joins a node; operator key stays home
 bash deploy/e2e/ability.sh        # M5: need-shaped {task_class,min_ability} routing
 bash deploy/e2e/pinning.sh        # the model that cleared the bar is the model that runs
-bash deploy/e2e/speed.sh          # ADR 36: min_tps measured from real work, and addressable
-bash deploy/e2e/requires.sh       # ADR 37: context/tools/vision filtered, not scored
+bash deploy/e2e/cloud.sh          # no local artifact clears the bar -> the provider runs it, metered
 bash deploy/e2e/discovery.sh      # M6a: models learned by observation, not config
 bash deploy/e2e/install.sh        # M6c: propose → approve → pull → discover → re-eval
 bash deploy/e2e/eval.sh           # M7: unmeasured model → eval jobs → scored → routable

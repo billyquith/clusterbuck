@@ -60,7 +60,7 @@ from .routing import NoCapableArtifact, resolve
 from .signing import build_manifest, load_private_pem
 from .store import Store
 from .sync import build_router, sync_routes
-from .tiering import move_to_urgent_tier, tiering_ready
+from .tiering import tiering_ready
 from .usage import build_usage_summary, venue_of
 from .versions import assess, policy_from_settings
 from .wake import WakeCoordinator
@@ -468,8 +468,6 @@ def create_app(
                 capability=body.capability,
                 task_class=body.task_class,
                 min_ability=body.min_ability,
-                min_tps=body.min_tps,
-                requires=body.requires,
                 privacy=body.privacy.value,
                 urgency=body.urgency.value,
                 cloud_budget_monthly=settings.cloud_budget_monthly,
@@ -520,7 +518,6 @@ def create_app(
             # coordinator knows which nodes serve a capability, but only the node knows how
             # fast it is right now, with this model loaded and the owner's machine as busy
             # as it happens to be.
-            min_tps=body.min_tps,
             result_key=result_key,
             submitter=body.submitter,
         )
@@ -662,12 +659,28 @@ def create_app(
         `deadline` nor an `escalate_after_min` (see protocols.md §1b).
         """
         deadline = _now_iso_at(row.deadline_epoch) if row.deadline_epoch else None
+
+        # The max-queue-age backstop is the OTHER thing that gives up on a job, and it
+        # was missing from this view: with `CBK_MAX_QUEUE_AGE_S` set, a client polling a
+        # job the coordinator was about to expire was told `expires_at: null`, i.e. that
+        # nothing would ever give up on it. Exactly backwards, and the one case where
+        # this field lied rather than merely being unhelpful.
+        #
+        # Bounded to `queued` because that is what the sweep selects
+        # (`Store.stale_queued_jobs`): a claimed job is not aged out, so once it is in
+        # flight the deadline is again the only bound.
+        backstop = None
+        if settings.max_queue_age_s is not None and row.status == "queued":
+            started = datetime.fromisoformat(row.created_at.replace("Z", "+00:00"))
+            backstop = _now_iso_at(started.timestamp() + settings.max_queue_age_s)
+
+        # Whichever gives up first. ISO-8601 UTC sorts lexicographically, which is why
+        # both are already normalised to a trailing Z.
+        bounds = [b for b in (deadline, backstop) if b is not None]
         return {
             "deadline": deadline,
             "escalates_at": _now_iso_at(row.escalate_at) if row.escalate_at else None,
-            # Only the deadline bounds a job today; a max-queue-age backstop would fold
-            # in here as the earlier of the two.
-            "expires_at": deadline,
+            "expires_at": min(bounds) if bounds else None,
         }
 
     async def _queue_position(row) -> int | None:
@@ -815,6 +828,8 @@ def create_app(
             window_start=body.window.start,
             duration_min=body.duration_min,
             privacy=body.privacy.value,
+            # None ⇒ reservations.admit derives it from measured cold-load time,
+            # falling back to DEFAULT_WARM_LEAD_S when the fleet has measured nothing.
             lead_s=settings.warm_lead_s,
         )
         rsv_id = new_reservation_id()

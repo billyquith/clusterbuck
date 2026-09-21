@@ -230,6 +230,42 @@ def test_a_job_with_no_bounds_reports_that_nothing_will_give_up_on_it(client):
     assert got["expires_at"] is None
 
 
+def test_the_max_queue_age_backstop_is_reported_as_a_give_up_time(client, monkeypatch):
+    """With the backstop configured, a queued job is NOT unbounded — and used to say it was.
+
+    `CBK_MAX_QUEUE_AGE_S` makes the coordinator expire an unclaimed job, but the limits
+    view only ever looked at `deadline`. A client polling a job the coordinator was about
+    to terminate was told `expires_at: null`, i.e. that nothing would ever give up on it.
+    """
+    import dataclasses
+
+    from clusterbuck.config import settings
+    monkeypatch.setattr("clusterbuck.api.settings",
+                        dataclasses.replace(settings, max_queue_age_s=3600))
+
+    got = client.get(f"/jobs/{_submit(client).json()['id']}").json()
+
+    assert got["deadline"] is None, "no deadline was set; the bound is the backstop alone"
+    assert got["expires_at"] is not None, "a bounded job must not report itself unbounded"
+    assert got["expires_at"] > got["created_at"]
+
+
+def test_the_earlier_of_deadline_and_backstop_wins(client, monkeypatch):
+    """`expires_at` is when clusterbuck stops trying — so it is the first bound to fire,
+    not whichever one happens to be implemented."""
+    import dataclasses
+
+    from clusterbuck.config import settings
+    monkeypatch.setattr("clusterbuck.api.settings",
+                        dataclasses.replace(settings, max_queue_age_s=60))
+
+    r = _submit(client, deadline="2030-01-01T00:00:00Z")
+    got = client.get(f"/jobs/{r.json()['id']}").json()
+
+    assert got["deadline"].startswith("2030-01-01")
+    assert got["expires_at"] < got["deadline"], "the 60s backstop fires long before 2030"
+
+
 def test_deadline_and_escalation_are_echoed_back(client):
     r = _submit(client, deadline="2030-01-01T00:00:00Z", escalate_after_min=10)
     got = client.get(f"/jobs/{r.json()['id']}").json()
@@ -334,17 +370,3 @@ def test_a_client_cannot_pin_its_way_past_the_ability_floor(client, redis_url):
     assert job["params"]["temperature"] == 0.1, "other params must still pass through"
 
 
-def test_a_job_requiring_an_unservable_feature_is_refused_at_submit(client):
-    """`requires` is hard yes/no facts about what a model CAN DO. Nothing in the seed fleet
-    is curated for vision, so the job fails at the API rather than being queued for a model
-    that will error on the image — or worse, quietly drop it."""
-    r = _submit(client, capability=None, task_class="summarize", min_ability=4,
-                requires={"vision": True})
-    assert r.status_code == 422
-    assert "requirement" in r.json()["detail"].lower()
-
-
-def test_a_job_whose_requirements_are_met_still_routes(client, redis_url):
-    r = _submit(client, capability=None, task_class="summarize", min_ability=4,
-                requires={"tools": True, "context_tokens": 8000})
-    assert r.status_code == 202, r.text

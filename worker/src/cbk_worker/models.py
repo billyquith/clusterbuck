@@ -37,11 +37,6 @@ class Job:
     privacy: str = ""
     escalate_after_min: int | None = None
     deadline: str | None = None
-    # Output tokens/sec this job needs, or None for any speed (contract §job). The worker
-    # compares it against its OWN measured throughput: the coordinator knows which nodes
-    # serve a capability, but only the node knows how fast it is right now, with whatever
-    # model is loaded and whatever else the owner is running.
-    min_tps: float | None = None
     attempts: int = 0
     max_attempts: int = 0
 
@@ -59,7 +54,6 @@ class Job:
             privacy=d.get("privacy", ""),
             escalate_after_min=d.get("escalate_after_min"),
             deadline=d.get("deadline"),
-            min_tps=d.get("min_tps"),
             attempts=d.get("attempts", 0),
             max_attempts=d.get("max_attempts", 0),
         )

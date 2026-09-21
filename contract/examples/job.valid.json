@@ -19,7 +19,6 @@
   "urgency": "waitable",
   "escalate_after_min": 10,
   "privacy": "local_only",
-  "min_tps": 15,
   "result_key": "res_01HZX9K2QJ8P4V7M3N6T5R0abc",
   "attempts": 0,
   "max_attempts": 3,

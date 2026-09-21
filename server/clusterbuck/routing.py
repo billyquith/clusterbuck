@@ -23,25 +23,6 @@ enforced against a name in `fleet.yaml` that nothing reconciled with reality.
 
 The provenance travels with it for the same reason: a job served on a `seed` placeholder has
 not been served on a measurement, and only the caller can decide whether that matters.
-
-**Speed is a second, independent filter (`min_tps`).** Ability scores an *artifact* and is
-machine-independent by design, so it structurally cannot say that the same model is quick on
-an accelerator and unusable without one. That question is answered by `stats.tps`, which each
-node measures from its own real jobs. A capability whose serving nodes have never reached the
-requested throughput is excluded here, exactly as an artifact below `min_ability` is — and for
-the same reason: a floor the caller stated and cannot otherwise learn was missed.
-
-A capability with no measurement at all is NOT excluded. A fresh fleet has finished no jobs,
-and treating "unknown" as "too slow" would make every speed-sensitive request fail on a
-healthy new install. The worker checks again before answering, so an unknown node that turns
-out to be too slow refuses the job rather than under-serving it.
-
-**`requires` is a hard filter, applied before ability is compared** (ADR 37). Context window,
-tool calling, schema-constrained output and vision are not quality questions — they have no
-good/bad axis and no 1-10 score can express them. An artifact that does not declare a needed
-feature is excluded; unlike speed, unknown here reads as "no", because serving a job that
-needs tool calling on an unchecked model fails somewhere downstream where it looks like a
-model bug rather than a routing one.
 """
 
 from __future__ import annotations
@@ -49,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .budget import BudgetDecision, check_cloud_budget
-from .evaluation import SCALE_VERSION
+from .evaluation import SCALE_VERSION, TIER1_MAX_ABILITY
 from .fleet import Fleet
 from .store import Store
 
@@ -68,9 +49,6 @@ class Selection:
     cloud: bool
     score: float | None = None
     provenance: str | None = None
-    # Fastest measured throughput among the nodes serving this capability, or None if none
-    # of them has measured anything yet.
-    tps: float | None = None
 
     @property
     def on_a_guess(self) -> bool:
@@ -110,63 +88,6 @@ def _cloud_gate(
 
 
 # Requirement name → the attribute holding it, on a catalog row or a capability spec.
-_FEATURE_FIELDS = {
-    "context_tokens": "context_tokens",
-    "tools": "supports_tools",
-    "json_schema": "supports_json_schema",
-    "vision": "supports_vision",
-}
-
-
-def _unmet_requirement(store: Store, artifact: str, spec, requires) -> str | None:
-    """Which required capability this artifact does not provide, or None.
-
-    Features come from the model catalog, which is the coordinator's record of what it
-    knows about artifacts. A provider account has no host and never enters that catalog, so
-    it declares its own on the capability — disjoint sets, never in conflict.
-
-    An artifact that does not DECLARE a feature is treated as not having it. That is the
-    conservative reading, and it is the right one: the alternative is serving a job that
-    needs tool calling on a model nobody has checked, which fails somewhere further down
-    where it looks like a model bug rather than a routing one. The refusal names the
-    artifact, so the fix is to curate it.
-    """
-    if requires is None:
-        return None
-    row = store.catalog_entry(artifact)
-    for name, field in _FEATURE_FIELDS.items():
-        needed = getattr(requires, name, None)
-        if not needed:
-            continue
-        have = getattr(row, field, None) if row is not None else None
-        if have is None:
-            have = getattr(spec, field, None)
-        if have is None:
-            return f"{artifact} does not declare {name}"
-        if name == "context_tokens":
-            if have < needed:
-                return f"{artifact} holds {have} tokens, needs {needed}"
-        elif not have:
-            return f"{artifact} does not support {name}"
-    return None
-
-
-def _too_slow(store: Store, capability: str, min_tps: float | None,
-              cloud: bool) -> tuple[bool, float | None]:
-    """(excluded, measured) for a capability against a throughput floor.
-
-    A cloud capability is never excluded on speed: it has no node, its throughput is the
-    provider's, and nothing here measures it. Neither is a capability whose nodes have not
-    measured anything — unknown is not slow.
-    """
-    if not min_tps or cloud:
-        return False, None
-    measured = store.best_tps_for(capability)
-    if measured is None:
-        return False, None
-    return measured < min_tps, measured
-
-
 def resolve(
     fleet: Fleet | None,
     store: Store,
@@ -174,8 +95,6 @@ def resolve(
     capability: str | None,
     task_class: str | None,
     min_ability: int | None,
-    min_tps: float | None = None,
-    requires=None,
     privacy: str = "local_only",
     urgency: str = "waitable",
     cloud_budget_monthly: float | None = None,
@@ -209,21 +128,10 @@ def resolve(
             raise NoCapableArtifact(
                 f"capability {capability!r} is cloud-backed and excluded: {excluded}"
             )
-        unmet = _unmet_requirement(store, spec.model, spec, requires)
-        if unmet is not None:
-            raise NoCapableArtifact(f"capability {capability!r} cannot meet the job's "
-                                    f"requirements: {unmet}")
-        slow, measured = _too_slow(store, capability, min_tps, spec.cloud)
-        if slow:
-            raise NoCapableArtifact(
-                f"capability {capability!r} is served at {measured:g} tok/s, below the "
-                f"requested {min_tps:g}"
-            )
         # Explicit addressing names a tier, and the tier's registered model is the artifact
         # it means. Pinning it here is what stops the tier's meaning being decided by
         # whatever CBK_MODEL happens to say on the node that claims the job.
-        return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud,
-                         tps=measured)
+        return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud)
 
     if fleet is None or task_class is None or min_ability is None:
         raise NoCapableArtifact(
@@ -236,10 +144,7 @@ def resolve(
     candidates: list[tuple[bool, float, str, str, float, str | None, float | None]] = []
     excluded_by_privacy = 0
     excluded_by_budget = 0
-    excluded_by_speed = 0
-    unmet_requirements: list[str] = []
     best_available: float | None = None
-    fastest_seen: float | None = None
     for cap, spec in fleet.capabilities.items():
         excluded = _cloud_gate(spec.cloud, privacy=privacy, urgency=urgency, budget=budget)
         if excluded is not None:
@@ -248,9 +153,6 @@ def resolve(
             elif excluded != "urgency=waitable never uses cloud":
                 excluded_by_budget += 1
             continue
-        unmet = _unmet_requirement(store, spec.model, spec, requires)
-        if unmet is not None:
-            unmet_requirements.append(unmet)
             continue
         score = store.get_ability(spec.model, task_class, scale_version)
         if score is None:
@@ -258,24 +160,18 @@ def resolve(
         best_available = score if best_available is None else max(best_available, score)
         if score < min_ability:
             continue
-        slow, measured = _too_slow(store, cap, min_tps, spec.cloud)
-        if measured is not None:
-            fastest_seen = measured if fastest_seen is None else max(fastest_seen, measured)
-        if slow:
-            excluded_by_speed += 1
             continue
         candidates.append((
             spec.cloud, spec.price_in_per_1k + spec.price_out_per_1k, cap,
             spec.model, score,
             store.ability_provenance(spec.model, task_class, scale_version),
-            measured,
         ))
 
     if candidates:
         candidates.sort()  # prefer local (False < True) → cheapest
-        cloud, _price, cap, artifact, score, provenance, measured = candidates[0]
+        cloud, _price, cap, artifact, score, provenance = candidates[0]
         return Selection(capability=cap, artifact=artifact, cloud=cloud,
-                         score=score, provenance=provenance, tps=measured)
+                         score=score, provenance=provenance)
 
     detail = (
         f"no artifact reaches ability {min_ability} for task_class {task_class!r}"
@@ -285,16 +181,17 @@ def resolve(
         detail += f"; {excluded_by_privacy} cloud artifact(s) excluded by privacy=local_only"
     if excluded_by_budget:
         detail += f"; {excluded_by_budget} cloud artifact(s) excluded by budget ({budget.reason})"
-    if unmet_requirements:
-        # Listed rather than counted: "which model was missing what" is the whole content
-        # of this failure, and it names exactly which catalog entries to curate.
-        detail += "; requirements unmet by " + ", ".join(sorted(set(unmet_requirements)))
-    if excluded_by_speed:
-        # Named separately from the ability miss: "your fleet is not good enough" and "your
-        # fleet is not fast enough" call for completely different fixes, and a caller told
-        # only the first would go looking for a better model it already has.
-        detail += (f"; {excluded_by_speed} capable artifact(s) excluded by min_tps "
-                   f"{min_tps:g} (fastest measured: {fastest_seen:g} tok/s)")
+    if min_ability > TIER1_MAX_ABILITY:
+        # Without this the caller is told "no artifact reaches ability 9" and goes looking
+        # for a better model — but no model, local or cloud, can hold a 9 today. The
+        # tier-1 suite is a compliance instrument and is clamped to TIER1_MAX_ABILITY on
+        # every write; the 8-10 band is reserved for the judged tiers, which are not
+        # built. Naming the ceiling turns an impossible request into a legible one.
+        detail += (
+            f"; note {min_ability} is above the measurable ceiling of "
+            f"{TIER1_MAX_ABILITY:g} — tier-1 scoring cannot certify the 8-10 band, so no "
+            f"artifact can clear this bar, cloud included"
+        )
     raise NoCapableArtifact(detail)
 
 

@@ -125,14 +125,6 @@
       "format": "date-time",
       "description": "Optional expiry. Enforced by a coordinator sweep that marks the job `expired`, NOT by removing the entry from the stream \u2014 so a job already claimed by a worker runs to completion, and a worker does not check this field. Absent means no expiry: a waitable job with neither this nor `escalate_after_min` has no terminating mechanism at all (protocols.md \u00a71b)."
     },
-    "min_tps": {
-      "type": [
-        "number",
-        "null"
-      ],
-      "minimum": 0,
-      "description": "Output tokens/sec this job needs, or null for any speed. The speed half of need-shaped addressing: ability scores an ARTIFACT and is machine-independent by design, so it cannot express that the same model is fast on an accelerator and unusable without one. Checked at submit against the measured `stats.tps` of the nodes serving the capability, and again by the worker before it answers \u2014 a node that cannot meet the floor fails the job explicitly rather than returning a slow answer nobody asked for."
-    },
     "result_key": {
       "type": "string",
       "minLength": 1,

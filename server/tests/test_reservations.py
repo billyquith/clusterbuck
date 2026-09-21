@@ -180,6 +180,43 @@ def test_post_reservation_confirmed(rsv_client):
     assert body["id"].startswith("rsv_")
 
 
+def test_the_api_actually_reaches_the_measured_warm_lead(rsv_client, monkeypatch):
+    """The wiring, not the arithmetic — and the wiring was the half that was missing.
+
+    `admit` derives the lead from measured cold-load time when `lead_s is None`, and
+    `Store.warm_lead_for` was unit-tested. But the only production caller always passed
+    `settings.warm_lead_s`, which defaulted to 300, so the measured branch was dead in
+    production while CLAUDE.md claimed the lead "comes from each node's measured
+    cold-load time rather than a hardcoded five minutes".
+
+    Asserts on the call itself: a node measuring a 90s cold load must widen the lead past
+    the 300s default (90 x WARM_LEAD_SAFETY is smaller, so a bare value would not prove
+    anything — what matters is that the measurement is consulted at all).
+    """
+    from clusterbuck import api as api_mod
+    from clusterbuck.config import settings
+
+    assert settings.warm_lead_s is None, (
+        "CBK_WARM_LEAD_S must be unset by default, or the measured path is unreachable")
+
+    seen = {}
+    real_admit = api_mod.admit
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return real_admit(*a, **kw)
+
+    monkeypatch.setattr(api_mod, "admit", spy)
+    r = rsv_client.post("/reservations", json={
+        "task_class": "summarize", "min_ability": 4, "window": {"start": "asap"},
+    })
+
+    assert r.status_code == 201, r.text
+    assert "lead_s" in seen, "admit was not called with an explicit lead_s"
+    assert seen["lead_s"] is None, (
+        f"api passed lead_s={seen['lead_s']!r}; anything but None skips the measurement")
+
+
 def test_post_reservation_declined(rsv_client):
     r = rsv_client.post("/reservations", json={
         "task_class": "x", "min_ability": 9, "window": {"start": "asap"},

@@ -70,30 +70,6 @@ class Submitter(BaseModel):
     submitted_at: str | None = None
 
 
-class Requirements(BaseModel):
-    """Hard yes/no facts a job needs from whatever runs it (ADR 37).
-
-    Separate from `min_ability` because these are not quality questions. Ability is a
-    graded 1-10 judgement; a context window is a number with a hard edge and tool calling
-    is a boolean, and no score can encode either. A 4k-context model and a 128k one can
-    both be "a 6 at summarize", and sending a long document to the first silently
-    truncates it.
-
-    Every field is optional, and an omitted one is not a requirement. A field that IS set
-    is a filter applied before ability is compared at all: an artifact that does not
-    declare the feature is excluded, and the refusal says so, rather than the job being
-    served by something that may or may not manage it.
-    """
-
-    model_config = {"extra": "forbid"}
-
-    # Total context the job needs the model to hold, prompt plus completion.
-    context_tokens: int | None = Field(default=None, ge=1)
-    tools: bool | None = None          # OpenAI-style function/tool calling
-    json_schema: bool | None = None    # schema-constrained output, not "usually valid JSON"
-    vision: bool | None = None         # accepts image content
-
-
 class JobSubmit(BaseModel):
     """Client request body for POST /jobs (protocols.md §1b).
 
@@ -115,15 +91,6 @@ class JobSubmit(BaseModel):
     urgency: Urgency = Urgency.waitable
     escalate_after_min: int | None = Field(default=None, ge=0)
     privacy: Privacy = Privacy.local_only
-    # The SPEED half of need-shaped addressing. `min_ability` says how good the model must
-    # be; this says how fast the machine running it must be. They are different questions
-    # and neither can answer the other: ability scores an artifact and is deliberately
-    # machine-independent, so the same model scores identically on a GPU box and a CPU one
-    # and performs nothing alike. Output tokens/sec, matched against `stats.tps` — which
-    # every node measures from its own real jobs.
-    min_tps: float | None = Field(default=None, ge=0)
-    # What the job needs the model to be ABLE to do, as opposed to how well (ADR 37).
-    requires: Requirements | None = None
     deadline: str | None = None
     reservation: str | None = None  # opt-in reservation id to queue against (§8)
     # An opaque client label, stored and never interpreted — the same standing as
@@ -331,7 +298,6 @@ class JobRecord(BaseModel):
     privacy: Privacy
     deadline: str | None = None
     # Carried to the worker so it can refuse rather than under-serve (contract §job).
-    min_tps: float | None = None
     result_key: str
     attempts: int = 0
     max_attempts: int = 3
