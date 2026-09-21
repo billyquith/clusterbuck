@@ -2,10 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clusterbuck.dev/contract/result.schema.json",
   "title": "Result",
-  "description": "The terminal result record the worker (C#) writes once to the result store under the job's `result_key`, and the server (Python) reads to answer GET /jobs/{id} (protocols.md §2). Shape mirrors an OpenAI completion plus the clusterbuck envelope {status, error, worker}.",
+  "description": "The terminal result record a worker writes once to the result store under the job's `result_key`, and the coordinator reads to answer GET /jobs/{id} (protocols.md \u00a72). Shape mirrors an OpenAI completion plus the clusterbuck envelope {status, error, worker}.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["job_id", "status", "worker", "completed_at"],
+  "required": [
+    "job_id",
+    "status",
+    "worker",
+    "completed_at"
+  ],
   "properties": {
     "job_id": {
       "type": "string",
@@ -14,7 +19,11 @@
     },
     "status": {
       "type": "string",
-      "enum": ["done", "failed", "expired"],
+      "enum": [
+        "done",
+        "failed",
+        "expired"
+      ],
       "description": "Terminal state only. Non-terminal (queued/running) is queue state, assembled by the server, never stored here."
     },
     "worker": {
@@ -38,10 +47,15 @@
       "description": "DEPRECATED, and never meant what its name says: it was stamped BEFORE inference, so it is a processing-START time, wrong by a full inference duration. Retained for one release equal to `started_at` so no existing reader silently changes meaning; read `started_at`/`finished_at` instead."
     },
     "completion": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "OpenAI-style chat completion on success; null on failure/expiry. additionalProperties allowed so the model server's native fields pass through.",
       "additionalProperties": true,
-      "required": ["choices"],
+      "required": [
+        "choices"
+      ],
       "properties": {
         "choices": {
           "type": "array",
@@ -49,17 +63,37 @@
           "items": {
             "type": "object",
             "additionalProperties": true,
-            "required": ["message"],
+            "required": [
+              "message"
+            ],
             "properties": {
-              "index": { "type": "integer", "minimum": 0 },
-              "finish_reason": { "type": ["string", "null"] },
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "finish_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "message": {
                 "type": "object",
                 "additionalProperties": true,
-                "required": ["role", "content"],
+                "required": [
+                  "role",
+                  "content"
+                ],
                 "properties": {
-                  "role": { "type": "string" },
-                  "content": { "type": ["string", "null"] }
+                  "role": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
                 }
               }
             }
@@ -68,26 +102,53 @@
       }
     },
     "error": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Failure detail when status != done; null on success."
     },
     "usage": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Token accounting, when the model server reports it.",
       "additionalProperties": true,
       "properties": {
-        "prompt_tokens": { "type": "integer", "minimum": 0 },
-        "completion_tokens": { "type": "integer", "minimum": 0 },
-        "total_tokens": { "type": "integer", "minimum": 0 }
+        "prompt_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completion_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "status": { "const": "done" } } },
+      "if": {
+        "properties": {
+          "status": {
+            "const": "done"
+          }
+        }
+      },
       "then": {
-        "required": ["completion"],
-        "properties": { "completion": { "type": "object" } }
+        "required": [
+          "completion"
+        ],
+        "properties": {
+          "completion": {
+            "type": "object"
+          }
+        }
       }
     }
   ]

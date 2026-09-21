@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clusterbuck.dev/contract/enroll-request.schema.json",
   "title": "EnrollRequest",
-  "description": "A worker agent's one-time enrollment request (protocols.md \u00a76). Produced by the C# worker, consumed by the Python coordinator.",
+  "description": "A worker agent's one-time enrollment request (protocols.md \u00a76). Produced by a worker, consumed by the coordinator.",
   "type": "object",
   "additionalProperties": false,
   "required": [

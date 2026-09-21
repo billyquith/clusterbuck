@@ -169,8 +169,8 @@ from conceptually (and Redis is the chosen broker), not alternatives to the whol
 Mature distributed task queues (Python). **Relationship:** the pull-based worker model is
 exactly right; clusterbuck's async plane is this pattern specialised for LLM capabilities
 + wake. **Why not the whole answer:** general-purpose and Python-centric (a
-cross-platform-distribution concern for our nodes — see [decisions.md](decisions.md));
-no LLM/capability/wake awareness. clusterbuck implements the equivalent on Redis in C#.
+cross-platform-distribution concern for our nodes — see [decisions.md](design.md));
+no LLM/capability/wake awareness. clusterbuck implements the equivalent on Redis.
 
 ### [Temporal](https://github.com/temporalio/temporal)
 Durable workflow orchestration with retries/timeouts. **Relationship:** great primitives

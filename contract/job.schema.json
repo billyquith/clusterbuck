@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clusterbuck.dev/contract/job.schema.json",
   "title": "Job",
-  "description": "An enqueued clusterbuck job record \u2014 the payload the server (Python) writes onto a capability stream and the worker (C#) consumes. This is the cross-language seam (protocols.md \u00a72); addressing has already been resolved to a concrete `capability` before enqueue.",
+  "description": "An enqueued clusterbuck job record \u2014 the payload the coordinator writes onto a capability stream and a worker consumes. This is the cross-language seam (protocols.md \u00a72); addressing has already been resolved to a concrete `capability` before enqueue.",
   "type": "object",
   "additionalProperties": false,
   "required": [
