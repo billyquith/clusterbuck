@@ -24,6 +24,7 @@ from redis.exceptions import ResponseError
 from .config import WorkerConfig
 from .model_client import ModelClient
 from .models import Job, Result
+from .naming import artifact_aliases
 
 # Urgency tiers, mirroring the coordinator's queue.py (ADR 34). The urgent stream is read
 # ahead of the base one, so demanding work no longer waits behind a patient backlog on a
@@ -44,19 +45,6 @@ _LOAD_WINDOW = 5
 
 def stream_key(capability: str, tier: str | None = None) -> str:
     return f"q:{capability}:{URGENT_TIER}" if tier == URGENT_TIER else f"q:{capability}"
-
-
-def artifact_aliases(name: str) -> set[str]:
-    """Spellings that mean the same artifact to a model server.
-
-    Ollama reports an explicit tag on `/v1/models` while a registry commonly omits it, so
-    `llama3.2` and `llama3.2:latest` are one artifact. Mirrors the coordinator's own
-    normalisation (server fleet.py) — the two must agree, or a pin the coordinator believes
-    valid is refused here.
-    """
-    name = (name or "").strip()
-    base = name.split(":", 1)[0]
-    return {name, base, f"{base}:latest"}
 
 
 def _now_iso() -> str:

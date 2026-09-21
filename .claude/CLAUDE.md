@@ -188,7 +188,7 @@ CBK_API_KEY=… uv run cbk-server   # async job API + sync /v1/chat/completions 
 # --- worker (one py3-none-any zipapp, ADR 29) ---
 cd worker
 uv venv && uv pip install -e ".[dev]"
-uv run pytest                 # contract conformance + loop/update/ladder/probe (131 tests)
+uv run pytest                 # contract conformance + loop/update/ladder/probe (147 tests)
 uv run ruff check src tests build.py
 uv run cbk work               # start the worker loop
 uv run python build.py        # → dist/cbk.pyz (~2.8 MB, py3-none-any) — the shipped artifact

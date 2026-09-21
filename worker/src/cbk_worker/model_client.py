@@ -12,6 +12,7 @@ import httpx
 
 from .config import WorkerConfig, model_server_api_key
 from .models import Job
+from .naming import artifact_aliases
 
 # `params` is forwarded verbatim so the worker stays out of the way of whatever the model
 # server supports — but five keys are the request envelope, not inference parameters, and
@@ -65,5 +66,37 @@ class ModelClient:
         resp = await self._client.post(url, json=request, headers=headers)
         resp.raise_for_status()
         body = resp.json()
+        _refuse_substituted_model(request["model"], body)
         usage = body.get("usage") if isinstance(body, dict) else None
         return body, usage
+
+
+def _refuse_substituted_model(requested: str, body: Any) -> None:
+    """Fail if the model server answered with a model other than the one asked for.
+
+    The last hole in the pinning chain, and a real one: LM Studio returns HTTP 200 for a
+    request naming a model it does not have — including an id that exists nowhere — and
+    answers with whatever happens to be loaded. Observed live, with a nonsense id, against
+    a fleet whose ability matrix then recorded an EMBEDDING model scoring 7.0 at code.
+    Those were another model's answers filed under the wrong name.
+
+    The coordinator pins the artifact whose measured ability cleared the job's bar, and the
+    worker refuses a pin it does not have installed — but neither can see past the model
+    server. This can: the OpenAI response echoes the model that actually ran, so the
+    substitution is detectable in the reply the server itself sent.
+
+    Silent when the field is absent or unparseable: not every server echoes it, and a
+    missing field is unknown rather than wrong — the same rule the other gates follow.
+    Aliases are normalised, so an implicit `:latest` is not mistaken for a substitution.
+    """
+    if not isinstance(body, dict):
+        return
+    served = body.get("model")
+    if not isinstance(served, str) or not served.strip():
+        return
+    if artifact_aliases(served) & artifact_aliases(requested):
+        return
+    raise RuntimeError(
+        f"model server answered with {served!r} but the job pinned {requested!r}. "
+        f"Refusing a result measured against, or attributed to, the wrong model."
+    )

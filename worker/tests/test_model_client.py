@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import pytest
 
 from cbk_worker.config import WorkerConfig
-from cbk_worker.model_client import ModelClient
+from cbk_worker.model_client import ModelClient, _refuse_substituted_model
 from cbk_worker.models import Job
 
 _OK = {
@@ -188,3 +189,56 @@ async def test_job_params_cannot_supply_or_override_the_key_or_base(monkeypatch)
             prompt="x", params={"api_key": "sk-attacker"}))
     # The node's OWN configured key still wins — the job's params never substitute one.
     assert header_seen[0]["authorization"] == "Bearer sk-node-local"
+
+
+# --- the model server itself substituting (found live) ----------------------------------
+
+
+def _body(model):
+    return {"model": model, "choices": [{"message": {"role": "assistant", "content": "x"}}]}
+
+
+def test_a_substituted_model_is_refused():
+    """LM Studio returns HTTP 200 for a model it does not have — including an id that
+    exists nowhere — and answers with whatever is loaded. Observed live: an EMBEDDING model
+    recorded 7.0 at code, which were another model's answers filed under the wrong name."""
+    with pytest.raises(RuntimeError) as e:
+        _refuse_substituted_model("text-embedding-nomic-embed-text-v1.5",
+                                  _body("qwen/qwen3.5-9b"))
+    assert "qwen/qwen3.5-9b" in str(e.value) and "text-embedding" in str(e.value)
+
+
+def test_the_model_that_was_asked_for_passes():
+    assert _refuse_substituted_model("qwen/qwen3.5-9b", _body("qwen/qwen3.5-9b")) is None
+
+
+def test_an_implicit_latest_tag_is_not_a_substitution():
+    assert _refuse_substituted_model("llama3.2", _body("llama3.2:latest")) is None
+    assert _refuse_substituted_model("llama3.2:latest", _body("llama3.2")) is None
+
+
+def test_a_server_that_echoes_nothing_is_not_accused():
+    """Not every server echoes `model`, and absent is unknown rather than wrong — the same
+    rule every other gate here follows."""
+    assert _refuse_substituted_model("m:7b", {"choices": []}) is None
+    assert _refuse_substituted_model("m:7b", {"model": ""}) is None
+    assert _refuse_substituted_model("m:7b", {"model": None}) is None
+    assert _refuse_substituted_model("m:7b", "not a dict") is None
+
+
+async def test_a_substituting_server_fails_the_job_rather_than_answering():
+    """End to end through the client: the reply parses fine and says 200, and is still
+    refused, because the name it came back under is not the one whose ability cleared the
+    job's bar."""
+    cfg = WorkerConfig(redis_url="redis://x", model_name="configured:1b",
+                       model_server_url="http://ms/v1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_body("something-else:70b"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        job = Job.from_wire({"id": "j", "created_at": "t", "capability": "c",
+                             "prompt": "hi", "params": {"model": "pinned:7b"},
+                             "result_key": "r"})
+        with pytest.raises(RuntimeError, match="something-else:70b"):
+            await ModelClient(http, cfg).complete(job)
