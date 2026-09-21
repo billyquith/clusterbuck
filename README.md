@@ -154,7 +154,11 @@ cd clusterbuck
 .\install\worker\join.ps1 --coordinator http://COORDINATOR_HOST:8018 --model qwen2.5:7b
 ```
 
-It prompts for the join password, and nothing else. From there it:
+It prompts for the join password, and nothing else. **On Windows, Ctrl+V does not paste
+into that prompt** — it sends a keystroke, because the prompt reads raw keys so the
+password is never echoed. Use right-click (or Ctrl+Shift+V), type it, or set
+`CBK_JOIN_PASSWORD` in the environment. A mangled paste is refused with an explanation
+rather than sent. From there it:
 
 1. exchanges that password with the coordinator for a **single-use join token** and the broker
    URL — so no Redis credential and no operator key is ever typed on the new machine or left in

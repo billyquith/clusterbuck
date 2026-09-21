@@ -76,6 +76,45 @@ def _post_json(url: str, password: str) -> dict:
         return json.loads(resp.read())
 
 
+def read_password(prompt: str = "Join password: ", attempts: int = 3) -> str:
+    """Prompt for the join password, rejecting what a console paste actually produced.
+
+    `getpass` reads raw keystrokes on Windows (msvcrt.getwch), so **Ctrl+V arrives as the
+    literal control character 0x16 instead of pasting** — the prompt happily accepts a
+    one-character "password" and moves on. That then travels as an HTTP header, where a
+    control character makes the request unparseable, so the coordinator answers
+    `400 Invalid HTTP request received.` — an error that implicates the network and says
+    nothing about the cause. A wrong password, by contrast, is a clean 401.
+
+    So catch it at the only point that can explain it, and re-prompt rather than exiting:
+    the alternative is re-running a join that has already done real work.
+
+    Surrounding whitespace is stripped because password managers routinely append a
+    newline, and that lands as a genuine authentication failure — 401, hours of doubting
+    the right password.
+    """
+    interactive = sys.stdin is not None and sys.stdin.isatty()
+    for remaining in range(attempts - 1, -1, -1):
+        password = getpass.getpass(prompt).strip()
+        if not password:
+            problem = "nothing was entered"
+        elif not password.isprintable():
+            problem = ("it contains a control character, so the coordinator would reject "
+                       "the request as malformed")
+        else:
+            return password
+
+        warn(f"that is not a usable password: {problem}.")
+        # Non-interactive input has no second chance to give: stdin is already exhausted,
+        # and looping would spin on EOF.
+        if not interactive or not remaining:
+            break
+        warn("  On Windows, Ctrl+V does not paste into this prompt - it sends a keystroke.")
+        warn("  Paste with RIGHT-CLICK or Ctrl+Shift+V, type it by hand, or set")
+        warn("  CBK_JOIN_PASSWORD in the environment and re-run.")
+    die("no usable join password")
+
+
 def bootstrap(coordinator: str, password: str) -> dict:
     """Exchange the join password for a one-time token and the broker URL."""
     url = f"{coordinator.rstrip('/')}/nodes/bootstrap"
@@ -247,9 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     if sys.version_info < (3, 11):
         die(f"Python 3.11+ required (running {platform.python_version()})")
 
-    password = args.password or getpass.getpass("Join password: ")
-    if not password:
-        die("a join password is required")
+    # An explicit --password/CBK_JOIN_PASSWORD is taken as given: it came from a script
+    # or a shell, not from a prompt that mangles pastes.
+    password = (args.password or "").strip() or read_password()
 
     repo_root = Path(__file__).resolve().parents[2]
     state = Path(args.node_state) if args.node_state else None

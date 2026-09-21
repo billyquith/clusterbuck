@@ -114,3 +114,4 @@ def test_a_missing_node_state_does_not_fail_the_join(join, tmp_path, capsys):
     failed just because the state file moved."""
     join.check_capabilities(["8b-extract"], tmp_path / "absent.json")
     assert "skipping the capability check" in capsys.readouterr().out
+
