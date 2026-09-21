@@ -134,6 +134,16 @@ No binary at $CbkBin — supply one with -Artifact PATH
 "@
 }
 
+# SYSTEM executes this binary at every boot, and at the inherited ACL it is WRITABLE by
+# Authenticated Users - so any local account can replace the code the machine runs as
+# SYSTEM. Same hole the wrapper had, on the file that actually is the worker. Applied
+# whether the binary was just installed or was already there, since an older install left
+# it wide open and no re-run would otherwise repair it.
+#
+# Self-update (ADR 13) is unaffected: the worker runs as SYSTEM, which keeps FullControl
+# and can still swap the file and keep cbk.prev beside it.
+if (Test-Path $CbkBin) { Protect-SecretFile $CbkBin }
+
 # ── worker config ─────────────────────────────────────────────────────────────
 Write-Step 'Worker config'
 $EnvFile   = "$EtcDir\worker.env"
