@@ -63,11 +63,29 @@ async def move_to_urgent_tier(store: Store, queue, row, *, group: str) -> bool:
     promoted job keeps its place on the base stream and the promotion buys it nothing on a
     worker that is already awake — the exact complaint that reopened ADR 24.
 
-    Read the payload FIRST: it lives on the stream, not in SQLite, so withdrawing before
-    reading would destroy the job. Then withdraw, and only re-add when the withdrawal
-    proved the entry was unclaimed. `claimed`, `gone`, or no recorded delivery all mean
-    leave it alone — a copy on the urgent stream would run the job twice, which is much
-    worse than serving it once in submission order.
+    Read the payload FIRST: it lives on the stream, not in SQLite, so removing the entry
+    before reading would destroy the job. `claimed`, `gone`, or no recorded delivery all
+    mean leave it alone — a copy on the urgent stream would run the job twice, which is
+    much worse than serving it once in submission order.
+
+    Two things make the move safe to be interrupted, and both replace an earlier sequence
+    that could lose a job outright:
+
+    * **One atomic step in Redis** (`queue.move_if_unclaimed`), not `withdraw` then
+      `enqueue`. The payload exists only on the stream, so a coordinator that died between
+      those two calls destroyed the job — and left it invisible to every recovery path at
+      once, since it was in no pending list and its row still named the deleted entry.
+      That primitive also refuses to delete an entry a consumer holds, where `withdraw`
+      deletes first by design; deleting a running job's entry orphans its PEL row, which
+      Redis 7's XAUTOCLAIM drops (see `orm/job.py` on `cancel_requested`).
+    * **The recorded delivery is cleared before the move, not after.** The remaining window
+      is between the successful move and re-recording it, and clearing first turns that
+      into a self-healing state rather than a stuck one: `entry_id IS NULL` is what the
+      orphan sweep selects, and it looks for the entry before concluding anything, so it
+      finds the entry on the urgent stream and adopts it. Restored only on `claimed`,
+      where the original entry is still there and still valid; on `gone` the row is left
+      cleared deliberately, so the sweep can report honestly that the entry was trimmed
+      away unserved instead of pointing at one that no longer exists.
     """
     if not row.entry_id or not row.stream:
         return False
@@ -78,11 +96,16 @@ async def move_to_urgent_tier(store: Store, queue, row, *, group: str) -> bool:
     if payload is None:
         return False  # trimmed away, or unparseable — nothing safe to move
 
-    if await queue.withdraw(row.stream, row.entry_id, group=group) != "deleted":
+    dst = stream_key(row.capability, URGENT_TIER)
+    store.clear_delivery(row.id)
+    outcome = await queue.move_if_unclaimed(
+        row.stream, dst, row.entry_id, payload, group=group
+    )
+    if outcome == "claimed":
+        store.record_delivery(row.id, stream=row.stream, entry_id=row.entry_id)
+        return False
+    if outcome == "gone":
         return False
 
-    entry_id = await queue.enqueue(payload, tier=URGENT_TIER)
-    store.record_delivery(
-        row.id, stream=stream_key(row.capability, URGENT_TIER), entry_id=entry_id
-    )
+    store.record_delivery(row.id, stream=dst, entry_id=outcome)
     return True

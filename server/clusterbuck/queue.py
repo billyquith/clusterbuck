@@ -197,8 +197,25 @@ class Queue:
                 return entry_id, json.loads(raw)
         return None
 
-    async def write_result(self, result_key: str, result: dict[str, Any]) -> None:
-        await self._r.set(result_key, json.dumps(result), ex=settings.result_ttl_s)
+    async def write_result(
+        self, result_key: str, result: dict[str, Any], *, only_if_absent: bool = False
+    ) -> bool:
+        """Write a job's terminal result. True if this call is the one that wrote it.
+
+        `only_if_absent` makes it first-writer-wins, for an EXECUTOR: a job can legitimately
+        be running twice (a worker that stalled long enough for the reaper to requeue it
+        still finishes its own copy when it comes back), and the loser must not overwrite an
+        answer a client may already have read. Terminal should mean terminal.
+
+        The coordinator's own terminalising paths — the reaper's dead-letter and the
+        backstops — deliberately pass False. The reaper already checks `read_result` first,
+        and the backstops exist precisely to write an answer where nothing else will.
+        """
+        wrote = await self._r.set(
+            result_key, json.dumps(result), ex=settings.result_ttl_s,
+            **({"nx": True} if only_if_absent else {}),
+        )
+        return bool(wrote)
 
     async def known_capabilities(self) -> list[str]:
         """Capabilities with a live stream, discovered from Redis rather than config.
@@ -250,6 +267,56 @@ class Queue:
                 except ValueError:
                     continue
         return None
+
+    # Move a queued entry between streams, atomically, and only if no consumer holds it.
+    #
+    # A script rather than three round-trips because the entry's payload lives ONLY on the
+    # stream — SQLite has no `messages`/`prompt`/`params` columns — so a coordinator that
+    # died between the XDEL and the XADD destroyed the job outright. It was then invisible
+    # to every recovery path at once: not in any pending list (so the reaper cannot see
+    # it), and not `entry_id IS NULL` (so the orphan sweep does not select it either).
+    #
+    # The pending check is inside the same script for a second reason. The obvious
+    # primitive, `withdraw`, deletes FIRST and probes after, deliberately — for a
+    # cancellation, guaranteeing non-delivery is the whole point. A move wants the
+    # opposite: if the entry cannot be proven free, leave it completely alone, deletion
+    # included. Probing first from Python cannot deliver that (a worker can claim the
+    # entry in the gap, and then the delete orphans a running job's PEL row, which Redis
+    # 7's XAUTOCLAIM drops — see orm/job.py's note on `cancel_requested`); probing first
+    # inside Lua can, because nothing else runs in between.
+    #
+    # Returns the new entry id, or the literal "claimed" / "gone". Ids are `<ms>-<seq>`,
+    # so neither sentinel can be mistaken for one.
+    _MOVE_IF_UNCLAIMED = """
+    local held = redis.pcall('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
+    if type(held) == 'table' and held.err == nil and #held > 0 then return 'claimed' end
+    if redis.call('XDEL', KEYS[1], ARGV[2]) ~= 1 then return 'gone' end
+    return redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[3], '*', 'job', ARGV[4])
+    """
+
+    async def move_if_unclaimed(
+        self, src: str, dst: str, entry_id: str, payload: dict[str, Any], *, group: str
+    ) -> str:
+        """Move one entry from `src` to `dst` in a single atomic step.
+
+        Returns the new entry id on success, or `"claimed"` (a consumer holds it, so it
+        will run where it is) or `"gone"` (already trimmed, or never there). Both
+        non-success outcomes leave the source stream untouched.
+
+        The destination group is ensured first: XADD creates the stream but not the group,
+        and an entry written to a stream nobody is grouped on would be delivered to nobody.
+        """
+        try:
+            await self._r.xgroup_create(
+                name=dst, groupname=group, id="$", mkstream=True
+            )
+        except redis.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+        return await self._r.eval(
+            self._MOVE_IF_UNCLAIMED, 2, src, dst,
+            group, entry_id, str(settings.stream_maxlen), json.dumps(payload),
+        )
 
     async def read_entry(self, stream: str, entry_id: str) -> dict[str, Any] | None:
         """The job payload of one specific stream entry, or None if it is not there.

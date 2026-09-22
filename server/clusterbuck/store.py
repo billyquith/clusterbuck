@@ -225,6 +225,25 @@ class Store:
             )
             return list(s.exec(stmt))
 
+    def clear_delivery(self, id: str) -> None:
+        """Forget which stream entry represents this job, before moving it.
+
+        `entry_id IS NULL` is what the orphan sweep selects on, and it reads as *unknown*,
+        not *never enqueued* — the sweep looks for the entry before concluding anything and
+        adopts it if it turns up (`backstop.py`). So clearing the delivery first makes a
+        crash mid-move self-healing: the sweep finds the entry on whichever stream it
+        actually ended up on and re-records it. Leaving the old id in place instead would
+        leave the row pointing at a deleted entry, which no sweep selects and nothing
+        repairs.
+        """
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is not None:
+                job.entry_id = None
+                job.stream = None
+                s.add(job)
+                s.commit()
+
     def jobs_by_entry_ids(self, entry_ids: list[str]) -> dict[str, Job]:
         """entry_id → job, for the ids currently held in a stream's pending list.
 

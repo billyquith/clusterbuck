@@ -170,5 +170,16 @@ class CloudExecutor:
         # Result first, ack second — identical ordering to work_loop.py, for the identical
         # reason: acking first would let a crash in between drop the job from the pending
         # list with a result nowhere, invisible to the reaper.
-        await self._queue.write_result(job.result_key, result)
+        #
+        # First writer wins, also identically. This executor can be running a job the
+        # reaper has already requeued out from under it (a slow provider call outlasting
+        # `reaper_min_idle_ms` is all it takes), and the copy that finishes second must not
+        # overwrite an answer a client may already have read.
+        if not await self._queue.write_result(
+            job.result_key, result, only_if_absent=True
+        ):
+            self._log(f"cloud {job.id} was already answered elsewhere — discarding this "
+                      f"copy (reclaimed while the provider call was in flight)")
+        # Acked either way: a refused write means somebody else answered it, so leaving the
+        # entry in the pending list would only give the reaper something to churn on.
         await self._queue.ack(capability, self._group, entry_id, tier=tier)

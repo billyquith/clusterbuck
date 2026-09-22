@@ -284,7 +284,9 @@ heartbeat to send and a pause flag to notice, so it must come back to its own lo
  silently mis-attribute scores.
 - **Completion:** write the result (below), then `XACK q:<capability> cbk-workers <entry-id>`.
  Acknowledge on failure too, having written a `failed` result — an unacked entry is
- indistinguishable from an abandoned one.
+ indistinguishable from an abandoned one. Acknowledge even when the result write was
+ refused (see *Idempotency*): a refused write means the job already has an answer, and
+ leaving the entry pending only gives the reaper something to reclaim.
 - **Recovery:** entries left pending longer than the coordinator's idle threshold
  (`CBK_REAPER_MIN_IDLE_MS`, default 10 min) are reclaimed with `XAUTOCLAIM`, re-appended to
  the stream with `attempts` incremented, and the stale delivery acked away. Past
@@ -304,9 +306,17 @@ heartbeat to send and a pause flag to notice, so it must come back to its own lo
  [`contract/result.schema.json`](../contract/result.schema.json) — it *requires*
  `{job_id, status, worker, completed_at}` and nests the OpenAI-shaped body under
  **`completion`**, with optional `usage`. `status` is `done | failed | expired`.
-- **Idempotency:** a re-run overwrites the same `result_key` rather than duplicating. Delivery
- is at-least-once, so a job may legitimately run twice; the coordinator skips re-running a
- reclaimed entry whose result already exists.
+- **Idempotency: FIRST WRITER WINS.** Delivery is at-least-once, so a job may legitimately
+ run twice — and the two copies can overlap by hours, because a node that sleeps
+ mid-inference is not dead: the reaper hands the work on, and the sleeper still finishes
+ when it wakes. An executor therefore writes its result **only if the key is absent**
+ (`SET result_key … NX EX <ttl>`) and treats a refusal as "already answered elsewhere",
+ discarding its copy. Terminal must mean terminal: an unconditional write let a client be
+ told `failed` and later find `done`, with no way to know which it had acted on.
+ The coordinator's own terminalising writes — the reaper's dead-letter past `max_attempts`,
+ and the queued-row sweeps — are unconditional by design, because they exist to write an
+ answer where nothing else will; the reaper checks for an existing result first, and skips
+ re-running a reclaimed entry that has one.
 
 ## 3. Worker ↔ model server (OpenAI HTTP)
 

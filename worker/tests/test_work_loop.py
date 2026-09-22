@@ -421,3 +421,91 @@ async def test_a_model_swap_clears_the_throughput_window(redis_client):
         # to. It measures the new model immediately rather than after 20 jobs of drift.
         assert len(loop._tps_samples) == 1
         assert loop._tps_model == "big:70b"
+
+
+# --- a node that slept through its own job (B2) ---------------------------------------
+
+
+async def test_a_late_copy_does_not_overwrite_an_answer_that_already_landed(redis_client):
+    """The lid-closed-mid-job case, from the sleeping node's side.
+
+    A machine that sleeps mid-inference is not dead. The coordinator's reaper reclaims the
+    entry after `reaper_min_idle_ms` and another worker answers; hours later this node
+    wakes, finishes the generation it was suspended in the middle of, and writes. Writing
+    unconditionally overwrote a terminal answer the client may already have read — and
+    where the reaper had dead-lettered the job, it turned a `failed` the client was told
+    about into a silent `done`. Both copies are valid answers to one job, so the tie goes
+    to whichever landed first and terminal stays terminal.
+    """
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_slept")})
+    # Whoever the reaper handed it to got there first.
+    winner = {"job_id": "job_slept", "status": "done", "worker": "node-other",
+              "completion": {"choices": [{"index": 0, "message": {
+                  "role": "assistant", "content": "answered while you were away"}}]}}
+    await redis_client.set("res:job_slept", json.dumps(winner))
+
+    assert await loop.poll_once() is True
+
+    stored = json.loads(await redis_client.get("res:job_slept"))
+    assert stored["worker"] == "node-other", "the first answer must survive"
+    assert stored["completion"]["choices"][0]["message"]["content"] == \
+        "answered while you were away"
+    await http.aclose()
+
+
+async def test_a_dead_letter_is_not_quietly_turned_into_a_success(redis_client):
+    """The worse half of the same bug: the client was TOLD this job failed."""
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_dl")})
+    await redis_client.set("res:job_dl", json.dumps({
+        "job_id": "job_dl", "status": "failed", "worker": "cbk-reaper",
+        "error": "abandoned by its worker and retried 3 times (max_attempts=3)",
+    }))
+
+    await loop.poll_once()
+
+    assert json.loads(await redis_client.get("res:job_dl"))["status"] == "failed"
+    await http.aclose()
+
+
+async def test_a_late_copy_is_still_acked(redis_client):
+    """Very likely a no-op — the reclaiming reaper acked the old entry when it requeued —
+    but if it is not, leaving the entry pending gives the reaper something to churn on for
+    a job that already has an answer."""
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_ack")})
+    await redis_client.set("res:job_ack", json.dumps(
+        {"job_id": "job_ack", "status": "done", "worker": "node-other"}))
+
+    await loop.poll_once()
+
+    pending = await redis_client.xpending(stream_key("8b-extract"), cfg.consumer_group)
+    assert pending["pending"] == 0
+    await http.aclose()
+
+
+async def test_the_ordinary_path_still_writes_its_result(redis_client):
+    """The guard must not become a refusal to answer: with nothing there already, the
+    worker's own result is what lands, TTL and all."""
+    cfg = _cfg(result_ttl_s=1234)
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_fresh")})
+
+    await loop.poll_once()
+
+    stored = json.loads(await redis_client.get("res:job_fresh"))
+    assert stored["worker"] == "node-test" and stored["status"] == "done"
+    assert 0 < await redis_client.ttl("res:job_fresh") <= 1234
+    await http.aclose()

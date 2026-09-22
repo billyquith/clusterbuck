@@ -317,6 +317,12 @@ Eviction is instant and lossless: `cbk pause` stops pulling, unloads, and any ab
 returns to its queue through the visibility timeout. To the queue, a node dropping down
 the ladder is indistinguishable from one going to sleep.
 
+A node that slept through its own inference is the awkward case, because it is not dead:
+the reaper hands the work on, and hours later the sleeper wakes and finishes the
+generation it was suspended in. Both answers are valid, so the **first** one to land is
+the one that stands — the late copy is discarded rather than overwriting a result a
+client may already have read.
+
 *Built with a caveat:* presence is **set manually** (env, CLI, `cbk pause`). Detecting it
 from screen lock or input idle is deferred, so the hysteresis currently damps a signal
 only a human changes.
@@ -356,6 +362,14 @@ Urgency also **orders the queue**. Each capability has two streams, `q:<cap>:urg
 `q:<cap>`, and a worker drains the urgent one first. Two limits: ordering is *between*
 tiers, not within one (two urgent jobs are still FIFO), and a job already claimed cannot
 be moved, so a promotion mid-run affects only what is still queued.
+
+Promoting a queued job **moves its stream entry**, and that move is a single atomic step
+that refuses to touch an entry a consumer holds. Both halves are load-bearing. The
+payload exists only on the stream — SQLite has no prompt column — so a delete-then-add
+that was interrupted between the two destroyed the job, and left it in the one state no
+recovery path looks at: absent from every pending list, with a row still naming the
+deleted entry. And deleting a *claimed* entry orphans a running job's pending row, which
+Redis drops, so losing that worker afterwards left nothing to recover from either.
 
 Escalation triggers are **age** (`escalate_after_min`, built) and a **backlog watermark**
 (designed, not built). A third — a client attention lease — was built and removed unused
@@ -666,6 +680,14 @@ Short list, because reversing one of these quietly breaks something.
   that is wrong the moment a laptop closes.
 - **Streams, not lists.** The pending-entries list is what makes a dead worker's job
   recoverable at all.
+- **A job's payload lives only on the stream**, so any operation that moves it between
+  streams is one atomic step, and never deletes an entry it cannot prove is unclaimed.
+  Split into delete-then-add, an interrupted move destroys the job *and* hides it from
+  every recovery path at once.
+- **First writer wins on a result blob.** A job can legitimately be running twice — a
+  node that slept through its own inference still finishes when it wakes, long after the
+  reaper handed the work elsewhere. Terminal has to mean terminal, or a client is told
+  `failed` and later finds `done`.
 - **Every wake is retried, and liveness is read from two signals.** Wake-on-LAN cannot be
   acknowledged, so a trigger that fires once is a job that waits forever; and a worker
   busy on a long inference is not polling, so consumer idle time alone reports the

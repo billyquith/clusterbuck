@@ -173,3 +173,61 @@ async def test_ensure_groups_and_consumer_id(fleet, queue):
     await executor.ensure_groups()
     assert executor.capabilities == [CAP]
     assert CONSUMER_ID  # a fixed, non-empty consumer name
+
+
+# --- a provider call that outlived its own claim (B2) ---------------------------------
+
+
+async def test_a_late_copy_does_not_overwrite_an_answer_that_already_landed(
+    fleet, queue, monkeypatch
+):
+    """The same first-writer-wins rule as the worker's loop, for the same reason.
+
+    This executor is not immune to being reclaimed out from under itself: a provider call
+    slower than `reaper_min_idle_ms` is all it takes for the reaper to requeue the entry
+    and something else to answer. Whichever copy finishes second must not overwrite a
+    terminal answer a client may already have read.
+    """
+    record = _enqueue(queue)
+    await queue.enqueue(record.to_wire())
+
+    async def fake_acompletion(**kwargs):
+        return _FakeResponse({
+            "model": ARTIFACT,
+            "choices": [{"message": {"role": "assistant", "content": "late"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    monkeypatch.setattr("clusterbuck.cloud_executor.litellm.acompletion", fake_acompletion)
+    await queue.write_result(record.result_key, {
+        "job_id": record.id, "status": "done", "worker": "node-other",
+        "completion": {"choices": [{"message": {
+            "role": "assistant", "content": "answered first"}}]},
+    })
+
+    executor = CloudExecutor(queue, fleet, consumer_group="cbk-workers", log=lambda _: None)
+    assert await executor.poll_once() is True
+
+    result = await queue.read_result(record.result_key)
+    assert result["worker"] == "node-other", "the first answer must survive"
+    assert result["completion"]["choices"][0]["message"]["content"] == "answered first"
+    # Acked regardless: a refused write means somebody else answered, so leaving the entry
+    # pending would only give the reaper something to churn on.
+    summary = await queue.client.xpending(f"q:{CAP}", "cbk-workers")
+    assert summary["pending"] == 0
+
+
+async def test_the_coordinators_own_terminalising_writes_are_still_unconditional(queue):
+    """`only_if_absent` is an EXECUTOR rule, not a queue-wide one. The reaper's dead-letter
+    and the backstops exist precisely to write an answer where nothing else will, and they
+    already guard themselves (the reaper reads the blob first)."""
+    await queue.write_result("res:x", {"job_id": "x", "status": "done", "worker": "a"})
+    await queue.write_result("res:x", {"job_id": "x", "status": "failed", "worker": "b"})
+
+    assert (await queue.read_result("res:x"))["worker"] == "b"
+
+    assert await queue.write_result(
+        "res:y", {"job_id": "y", "status": "done", "worker": "a"}, only_if_absent=True)
+    assert not await queue.write_result(
+        "res:y", {"job_id": "y", "status": "done", "worker": "b"}, only_if_absent=True)
+    assert (await queue.read_result("res:y"))["worker"] == "a"

@@ -244,3 +244,113 @@ async def test_moving_twice_is_a_no_op(store, queue):
     assert await move_to_urgent_tier(
         store, queue, store.get("job_twice"), group=GROUP) is False
     assert await queue.client.xlen(stream_key(CAP, URGENT_TIER)) == 1
+
+
+# --- the move is atomic, and refuses to touch a claimed entry (A3) -------------------
+
+
+def _wire(job_id: str) -> dict:
+    """A minimal job payload, matching contract/job.schema.json's required fields."""
+    return {
+        "id": job_id, "created_at": "t", "capability": CAP, "prompt": "x",
+        "params": {}, "urgency": "necessary", "privacy": "local_only",
+        "result_key": f"res_{job_id.removeprefix('job_')}", "attempts": 0,
+        "max_attempts": 3,
+    }
+
+
+async def test_a_claimed_entry_is_left_completely_alone(store, queue):
+    """Not just "not moved" — not DELETED either, which is the part that could lose a job.
+
+    Escalation fires on any due `waitable` whose result blob is absent, and
+    `due_for_escalation` excludes only terminal statuses — `running` is not one. So a job a
+    worker is actively generating is reachable here. The obvious primitive, `withdraw`,
+    deletes first and probes after (correct for a cancellation, where guaranteeing
+    non-delivery is the point): that removed a running job's stream entry, and Redis 7's
+    XAUTOCLAIM drops a pending row whose entry is gone, so losing that worker afterwards
+    left the job with no blob, no status and nothing to recover it.
+    """
+    store.insert(id="job_a", result_key="res_a", capability=CAP, created_at="t",
+                 urgency="necessary")
+    entry_id = await queue.enqueue(_wire("job_a"))
+    store.record_delivery("job_a", stream=stream_key(CAP), entry_id=entry_id)
+    # A worker claims it and is now mid-inference.
+    await queue.client.xreadgroup(GROUP, "node-busy", {stream_key(CAP): ">"}, count=1)
+
+    row = store.get("job_a")
+    assert await move_to_urgent_tier(store, queue, row, group=GROUP) is False
+
+    # The entry is still there, still deliverable, still claimable by the reaper.
+    assert await queue.read_entry(stream_key(CAP), entry_id) is not None
+    assert [c["entry_id"] for c in await queue.claims(CAP, GROUP)] == [entry_id]
+    # And the row still points at it, so cancellation and queue position still work.
+    row = store.get("job_a")
+    assert (row.stream, row.entry_id) == (stream_key(CAP), entry_id)
+    # Nothing was copied to the urgent tier.
+    assert await queue.client.xlen(stream_key(CAP, URGENT_TIER)) == 0
+
+
+async def test_the_delivery_is_cleared_before_the_entry_moves(store, queue):
+    """Ordering, because it is the whole of what makes a crash mid-move recoverable.
+
+    The move is one atomic step in Redis now, so the entry cannot vanish between two
+    streams. What remains is the gap between a successful move and re-recording it in
+    SQLite — and `entry_id IS NULL` is what the orphan sweep selects, which it resolves by
+    LOOKING for the entry and adopting it. Recording the clear afterwards instead would
+    leave the row naming a deleted entry: a state no sweep selects and nothing repairs.
+
+    Observed by watching the row at the instant the move is issued, which is the only way
+    to pin an ordering without actually killing the process.
+    """
+    store.insert(id="job_a", result_key="res_a", capability=CAP, created_at="t",
+                 urgency="necessary")
+    entry_id = await queue.enqueue(_wire("job_a"))
+    store.record_delivery("job_a", stream=stream_key(CAP), entry_id=entry_id)
+
+    seen: dict = {}
+    real = queue.move_if_unclaimed
+
+    async def watching(src, dst, eid, payload, *, group):
+        row = store.get("job_a")
+        seen["entry_id"], seen["stream"] = row.entry_id, row.stream
+        return await real(src, dst, eid, payload, group=group)
+
+    queue.move_if_unclaimed = watching
+    try:
+        assert await move_to_urgent_tier(
+            store, queue, store.get("job_a"), group=GROUP) is True
+    finally:
+        queue.move_if_unclaimed = real
+
+    assert seen == {"entry_id": None, "stream": None}, \
+        "the row must already be cleared when the move is issued, not after it returns"
+    # And it is re-recorded once the move succeeds.
+    row = store.get("job_a")
+    assert row.stream == stream_key(CAP, URGENT_TIER)
+    assert await queue.read_entry(row.stream, row.entry_id) is not None
+
+
+async def test_a_move_that_finds_nothing_leaves_the_delivery_cleared(store, queue):
+    """`gone` deliberately does NOT restore the old id.
+
+    The entry really is not there — trimmed away unserved, or lost between the read and
+    the move. Restoring the id would leave the row pointing at a deleted entry, which the
+    orphan sweep does not select; cleared, the sweep looks for it, does not find it, and
+    reports honestly that it cannot be recovered. `claimed` is the opposite case and does
+    restore, because there the original entry is still live (asserted above).
+    """
+    store.insert(id="job_a", result_key="res_a", capability=CAP, created_at="t",
+                 urgency="necessary")
+    entry_id = await queue.enqueue(_wire("job_a"))
+    store.record_delivery("job_a", stream=stream_key(CAP), entry_id=entry_id)
+
+    async def vanished(src, dst, eid, payload, *, group):
+        return "gone"
+
+    queue.move_if_unclaimed = vanished
+    assert await move_to_urgent_tier(
+        store, queue, store.get("job_a"), group=GROUP) is False
+
+    row = store.get("job_a")
+    assert (row.entry_id, row.stream) == (None, None), \
+        "a row naming a deleted entry is one nothing repairs; cleared, the sweep can act"

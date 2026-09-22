@@ -314,8 +314,23 @@ class WorkLoop:
 
         # Result first, ack second. Acking first would let a crash in between drop the job
         # from the pending list with no result anywhere — invisible to the reaper.
-        await self._redis.set(job.result_key, json.dumps(result.to_wire()),
-                              ex=self._cfg.result_ttl_s)
+        #
+        # And FIRST WRITER WINS (`nx`), because this node may no longer be the one serving
+        # this job. A machine that sleeps mid-inference is not dead: the coordinator's
+        # reaper reclaims the entry after `reaper_min_idle_ms` and another worker answers,
+        # and then this one wakes hours later, finishes the generation it was in the middle
+        # of, and writes. Unconditionally, that overwrote a terminal answer a client had
+        # already read — or replaced a dead-letter with a `done`, making a job the client
+        # was told had failed silently succeed. Both copies are valid answers to the same
+        # job, so the tie goes to whichever landed first and terminal stays terminal.
+        wrote = await self._redis.set(job.result_key, json.dumps(result.to_wire()),
+                                      ex=self._cfg.result_ttl_s, nx=True)
+        if not wrote:
+            self._log(f"stale {job.id} [{capability}]: already answered elsewhere while "
+                      f"this node was away — discarding this copy")
+        # Acked either way. The ack is very likely a no-op (the reclaiming reaper acked the
+        # old entry when it requeued), but leaving the entry pending if it is not would
+        # give the reaper something to churn on for a job that already has an answer.
         await self._redis.xack(
             stream_key(capability, tier), self._cfg.consumer_group, entry_id)
 
