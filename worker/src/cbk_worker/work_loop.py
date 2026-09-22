@@ -250,6 +250,26 @@ class WorkLoop:
                   f"[{', '.join(self._capabilities)}] → model {self._cfg.model_name} "
                   f"@ {self._cfg.model_server_url}")
         while not stop.is_set():
+            # A broker error is DELIBERATELY not caught here, and this is the one place
+            # in the worker where that is true — the heartbeat task swallows everything.
+            #
+            # It looks like an omission and it is not. `broker.connect` already absorbs
+            # a transient failure: ten retries over roughly ten seconds, inside the
+            # command. What still escapes is a broker that stayed away longer than that,
+            # and for THAT the right answer is to die and let the supervisor restart us
+            # (launchd `KeepAlive`, systemd `Restart=always`), because exiting takes the
+            # heartbeat down with it.
+            #
+            # That coupling is load-bearing. The coordinator treats a recent heartbeat
+            # naming this capability's streams as proof somebody is serving them, and
+            # suppresses the wake a queued job is owed on that basis (server wake.py,
+            # `nodes_serving`). A worker that survived a dead broker would keep
+            # heartbeating over HTTP — which is a different connection and still fine —
+            # while claiming nothing, and would then vouch for a queue it cannot read.
+            # Silent starvation, and harder to see than a restart loop in the logs.
+            #
+            # So: catching this needs the heartbeat to start reporting an empty `queues`
+            # the way a paused node does. Until it does, crashing is the honest option.
             did_work = await self.poll_once()
             if did_work:
                 continue

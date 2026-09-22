@@ -9,9 +9,8 @@ import signal
 from typing import Any
 
 import httpx
-from redis.asyncio import Redis
 
-from . import probe
+from . import broker, probe
 from .cli import Out
 from .config import (
     AGENT_FLAVOUR,
@@ -19,7 +18,6 @@ from .config import (
     PROTOCOL_VERSION,
     WorkerConfig,
     admin_headers,
-    normalise_redis_url,
     server_url,
     update_public_key_pem,
 )
@@ -196,7 +194,7 @@ async def run_work(args: argparse.Namespace) -> int:
         with contextlib.suppress(NotImplementedError, ValueError):
             running.add_signal_handler(sig, stop.set)
 
-    redis = Redis.from_url(normalise_redis_url(cfg.redis_url), decode_responses=True)
+    redis = broker.connect(cfg.redis_url)
     # Inference can be slow; the pull path slower still. Separate clients, separate patience.
     async with httpx.AsyncClient(timeout=600.0) as infer_http, \
                httpx.AsyncClient(timeout=30.0) as beat_http, \

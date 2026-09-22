@@ -270,3 +270,71 @@ def test_probe_reports_vram_only_where_there_is_an_accelerator():
         assert req.hw.vram_gb is None
     else:
         assert req.hw.vram_gb and req.hw.vram_gb > 0
+
+
+# --- broker connection settings (B3) --------------------------------------------------
+
+
+def _kwargs():
+    from cbk_worker import broker
+
+    return broker.connect("redis://localhost:6379/0").connection_pool.connection_kwargs
+
+
+def test_the_broker_client_states_every_setting_that_makes_sleep_survivable():
+    """These are asserted, not assumed, because assuming them is the bug.
+
+    `Redis.from_url(url, decode_responses=True)` produced a working client only because
+    the redis-py we happen to vendor defaults close to what a sleeping fleet needs. On
+    5.x the same call gives no socket timeout, no keepalive and no retries — and a
+    machine that suspends does not close its TCP connections, so the next read on the
+    dead socket blocks until the kernel gives up, which without a timeout is never. The
+    worker then sits alive and silent, claiming nothing and crashing nowhere, so neither
+    launchd nor systemd notices. A zombie is strictly worse than a crash.
+    """
+    from cbk_worker import broker
+
+    kw = _kwargs()
+    assert kw["socket_timeout"] == broker.SOCKET_TIMEOUT_S
+    assert kw["socket_connect_timeout"] == broker.CONNECT_TIMEOUT_S
+    assert kw["socket_keepalive"] is True
+    assert kw["health_check_interval"] == broker.HEALTH_CHECK_INTERVAL_S
+
+
+def test_no_setting_is_left_at_the_librarys_default():
+    """The point is not the particular numbers, it is that none of them is None/off.
+
+    A future redis-py changing its defaults must not be able to change this worker's
+    behaviour on a machine that sleeps.
+    """
+    kw = _kwargs()
+    assert kw["socket_timeout"] not in (None, 0), "None here is 'block forever after a wake'"
+    assert kw["socket_connect_timeout"] not in (None, 0)
+    assert kw["socket_keepalive"], "a peer that forgot us must be detected by the kernel"
+    assert kw["health_check_interval"], (
+        "the setting aimed squarely at suspend/resume: a connection is only ever idle "
+        "this long because the machine was not running, so the first command after a "
+        "wake must validate the socket instead of sending a real claim into a dead one"
+    )
+
+
+def test_connection_failures_are_retried_before_they_reach_the_loop():
+    """Ten attempts over ~10s: long enough to ride out a broker restart or a Wi-Fi
+    reassociation, short enough that an absent broker still surfaces as an error."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    retry = _kwargs()["retry"]
+    assert retry is not None, "an unset retry is the 5.x default: none at all"
+    assert retry.get_retries() >= 3
+    supported = set(retry._supported_errors)
+    assert RedisConnectionError in supported
+    assert RedisTimeoutError in supported
+
+
+def test_a_bare_host_port_is_still_accepted():
+    """`connect` must keep the URL normalisation the old call site had."""
+    from cbk_worker import broker
+
+    client = broker.connect("localhost:6379")
+    assert client.connection_pool.connection_kwargs["host"] == "localhost"

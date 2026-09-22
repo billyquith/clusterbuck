@@ -1,6 +1,6 @@
 [project]
 name = "cbk-worker"
-version = "0.11.0"
+version = "0.12.0"
 description = "clusterbuck worker agent — Python implementation"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,8 +12,15 @@ authors = [{ name = "Nick Trout" }]
 # and is NOT vendored: it is needed only to verify a self-update signature, and a key-holding
 # verifier has to pre-exist the update channel by construction. Absent ⇒ self-update refuses,
 # which is the same fail-closed posture as a missing pinned public key (ADR 13).
+# The redis floor is a FLOOR ON BEHAVIOUR, not just on API. On redis-py 5.x the client
+# defaults are `socket_timeout=None`, `socket_keepalive=False` and retries effectively off
+# — under which a socket left dead by a suspend blocks forever on the next read and the
+# worker becomes a zombie that never crashes, so no supervisor restarts it. `broker.py`
+# now sets all of that explicitly, so the floor is not load-bearing for correctness; it is
+# here because 8.x is the only major this is tested against and the only one the shipped
+# zipapp vendors, and a floor should mean "known to work" rather than "might".
 dependencies = [
-    "redis>=5.0",
+    "redis>=8.0",
     "httpx>=0.27",
 ]
 

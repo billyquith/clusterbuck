@@ -509,3 +509,35 @@ async def test_the_ordinary_path_still_writes_its_result(redis_client):
     assert stored["worker"] == "node-test" and stored["status"] == "done"
     assert 0 < await redis_client.ttl("res:job_fresh") <= 1234
     await http.aclose()
+
+
+async def test_a_broker_error_takes_the_loop_down_rather_than_being_swallowed(redis_client):
+    """Pinning a decision that looks like an omission, so nobody "fixes" it by accident.
+
+    `broker.connect` already absorbs a transient failure inside the command — ten retries
+    over roughly ten seconds. What escapes is a broker gone for longer, and for that the
+    right answer is to exit and let launchd/systemd restart us, because exiting takes the
+    heartbeat down too.
+
+    That coupling is the point. The coordinator treats a recent heartbeat naming a
+    capability's streams as proof somebody is serving them, and suppresses the wake a
+    queued job is owed on that basis (server `wake.py`, `nodes_serving`). A worker that
+    survived a dead broker would keep heartbeating over HTTP — a different connection,
+    still healthy — while claiming nothing, and would vouch for a queue it cannot read.
+    Catching this needs the heartbeat to report an empty `queues` first, the way a paused
+    node does.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+
+    async def broker_gone(*a, **kw):
+        raise RedisConnectionError("broker went away and stayed away")
+
+    loop.poll_once = broker_gone
+    with pytest.raises(RedisConnectionError):
+        await loop.run(asyncio.Event())
+    await http.aclose()

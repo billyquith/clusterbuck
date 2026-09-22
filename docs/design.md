@@ -520,6 +520,29 @@ Never write a file the worker parses with `Set-Content -Encoding UTF8`: on Power
 that emits a BOM, and cmd's `for /f` folds a BOM into the *first variable's name* — so the
 first setting in the file is silently never applied.
 
+### Surviving suspend
+
+A machine that suspends does not close its TCP connections. On wake the socket to the
+broker is dead but not reset, so a read on it blocks until the kernel gives up — which,
+with no socket timeout, is never. The worker would then sit **alive and silent**: claiming
+nothing, and crashing nowhere, so neither launchd's `KeepAlive` nor systemd's
+`Restart=always` would notice. A zombie is strictly worse than a crash, because a crash is
+recovered in seconds.
+
+So the worker's broker client states every setting that makes this survivable rather than
+inheriting it — a socket timeout, connect timeout, TCP keepalive, a health check that
+PINGs a connection idle longer than the poll interval could explain, and a bounded retry
+(`worker/src/cbk_worker/broker.py`, each value with its reason). The client library's
+defaults happen to be close to these today; they are not a promise, and this is the one
+behaviour the fleet is named after.
+
+Past that retry budget the worker **exits on purpose** rather than carrying on, because
+exiting takes its heartbeat down with it. A worker that survived a dead broker would keep
+heartbeating over HTTP — a different connection, still healthy — while claiming nothing,
+and the coordinator would read that heartbeat as proof the queue is being served and
+suppress the wake a job is owed. Silent starvation is worse than a restart loop, and much
+harder to see.
+
 ### Wake
 
 **Wake-on-LAN** needs "wake for network access" enabled per node and its MAC in the
@@ -680,6 +703,9 @@ Short list, because reversing one of these quietly breaks something.
   that is wrong the moment a laptop closes.
 - **Streams, not lists.** The pending-entries list is what makes a dead worker's job
   recoverable at all.
+- **Connection behaviour is stated, not inherited.** A client library's defaults are not
+  a contract, and the one they would silently change is the one a sleeping fleet depends
+  on.
 - **A job's payload lives only on the stream**, so any operation that moves it between
   streams is one atomic step, and never deletes an entry it cannot prove is unclaimed.
   Split into delete-then-add, an interrupted move destroys the job *and* hides it from
