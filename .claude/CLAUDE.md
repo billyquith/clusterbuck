@@ -66,6 +66,9 @@ Worker CLI: `work | submit | status | fleet | enroll | pause | resume`.
 
 Each `deploy/e2e/*.sh` proves one property against real processes and a real Redis, and
 they share `deploy/e2e/lib.sh` — put new harness helpers there, not in a script.
+`abandon.sh` is the one that interrupts: it SIGKILLs a worker mid-generation (the stub's
+`--stall-s` is what holds a job open long enough) and proves the coordinator recovers the
+job. Check a new recovery property against it, not only against unit tests.
 `USE_OLLAMA=1` runs them against real inference instead of the stub.
 
 Configuration is read in `server/clusterbuck/config.py`; every knob is documented at its

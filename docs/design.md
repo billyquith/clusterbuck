@@ -775,6 +775,10 @@ Short list, because reversing one of these quietly breaks something.
   optimises for availability and gives nothing back; a shared one yields to its owner on
   demand. Applying one policy to both wastes a cold load on one or loses a person their
   laptop on the other.
+- **The recovery path is proven by interrupting a real process.** `deploy/e2e/abandon.sh`
+  SIGKILLs a worker mid-generation and watches the job come back. Unit tests can only
+  simulate an abandoned entry; nothing else in the suite ever leaves one behind, because
+  every other script's jobs complete.
 - **An interrupted job is not a failed one.** Eviction leaves no result and no ack, so
   the job returns through the visibility timeout like any abandoned one. Answering it
   would hand a client a permanent error because somebody sat down at a laptop.
