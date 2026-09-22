@@ -354,3 +354,43 @@ async def test_a_move_that_finds_nothing_leaves_the_delivery_cleared(store, queu
     row = store.get("job_a")
     assert (row.entry_id, row.stream) == (None, None), \
         "a row naming a deleted entry is one nothing repairs; cleared, the sweep can act"
+
+
+# --- a silent node abstains, it does not veto -----------------------------------------
+
+
+def test_a_paused_node_does_not_switch_tiering_off_for_the_whole_capability(store):
+    """`queues` is what a node says it is claiming from RIGHT NOW, so it is empty
+    whenever the node is not claiming — which a paused one is not, and nor is one that
+    cannot currently reach the broker. Reading that as "not tier-aware" meant `cbk pause`
+    on a single modern worker silently switched urgent tiering off for its whole
+    capability, and every urgent job then queued behind the patient backlog the tier
+    exists to jump."""
+    _enrol(store, "node-a", tier_aware=True)
+    _enrol(store, "node-b", tier_aware=True)
+    assert tiering_ready(store, None, CAP) is True
+
+    store.record_heartbeat(node_id="node-b", mode="paused", installed="[]", loaded="[]",
+                           queues=json.dumps([]), jobs_done=0, tps=None,
+                           last_heartbeat="t")
+
+    assert tiering_ready(store, None, CAP) is True, \
+        "an abstaining node must not veto what the others have proved"
+
+
+def test_an_old_worker_that_is_actually_claiming_still_vetoes(store):
+    """The gate's real job is unchanged: a node demonstrably reading only the base
+    stream would strand an urgent-tier job, so it still shuts the gate."""
+    _enrol(store, "node-a", tier_aware=True)
+    _enrol(store, "node-old", tier_aware=False)
+    assert tiering_ready(store, None, CAP) is False
+
+
+def test_a_capability_whose_nodes_are_all_silent_stays_untiered(store):
+    """No evidence either way is the same answer as an empty fleet. The one node might
+    be an old build, and nothing has said otherwise."""
+    _enrol(store, "node-a", tier_aware=True)
+    store.record_heartbeat(node_id="node-a", mode="paused", installed="[]", loaded="[]",
+                           queues=json.dumps([]), jobs_done=0, tps=None,
+                           last_heartbeat="t")
+    assert tiering_ready(store, None, CAP) is False

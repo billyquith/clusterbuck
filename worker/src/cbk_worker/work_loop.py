@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 
 from redis.asyncio import Redis
-from redis.exceptions import ResponseError
+from redis.exceptions import RedisError, ResponseError
 
 from .config import WorkerConfig
 from .model_client import ModelClient
@@ -102,6 +102,10 @@ class WorkLoop:
         # started, and that job would then read a completion of its own as an eviction.
         self._inflight: asyncio.Task | None = None
         self._evicted_task: asyncio.Task | None = None
+        # Whether the broker is answering. Reported on the heartbeat by emptying `queues`
+        # — a node that cannot reach Redis is claiming from nothing, and saying otherwise
+        # would have the coordinator suppress a wake on this node's behalf.
+        self.broker_ok = True
 
     @property
     def tps(self) -> float | None:
@@ -317,27 +321,39 @@ class WorkLoop:
                   f"[{', '.join(self._capabilities)}] → model {self._cfg.model_name} "
                   f"@ {self._cfg.model_server_url}")
         while not stop.is_set():
-            # A broker error is DELIBERATELY not caught here, and this is the one place
-            # in the worker where that is true — the heartbeat task swallows everything.
+            # A broker outage no longer kills this loop, because the heartbeat can now
+            # tell the truth about it.
             #
-            # It looks like an omission and it is not. `broker.connect` already absorbs
-            # a transient failure: ten retries over roughly ten seconds, inside the
-            # command. What still escapes is a broker that stayed away longer than that,
-            # and for THAT the right answer is to die and let the supervisor restart us
-            # (launchd `KeepAlive`, systemd `Restart=always`), because exiting takes the
-            # heartbeat down with it.
+            # It used to, deliberately: the coordinator treats a recent heartbeat naming
+            # a capability's streams as proof somebody is serving them and suppresses the
+            # wake a queued job is owed (server wake.py, `nodes_serving`). A worker that
+            # survived a dead broker kept heartbeating over HTTP — a different connection,
+            # still healthy — while claiming nothing, and so vouched for a queue it could
+            # not read. Exiting was what took the heartbeat down with it, and silent
+            # starvation is worse than a restart loop.
             #
-            # That coupling is load-bearing. The coordinator treats a recent heartbeat
-            # naming this capability's streams as proof somebody is serving them, and
-            # suppresses the wake a queued job is owed on that basis (server wake.py,
-            # `nodes_serving`). A worker that survived a dead broker would keep
-            # heartbeating over HTTP — which is a different connection and still fine —
-            # while claiming nothing, and would then vouch for a queue it cannot read.
-            # Silent starvation, and harder to see than a restart loop in the logs.
+            # `broker_ok` closes that instead, without the restart: the heartbeat reports
+            # an empty `queues` while this is false, which is the literal truth (a node
+            # that cannot reach Redis is claiming from nothing) and which the coordinator
+            # already reads as "not serving". Staying up is strictly better — the node
+            # remains visible on the dashboard, its `mode` and inventory keep flowing, and
+            # it resumes the instant the broker returns rather than after a supervisor
+            # backoff.
             #
-            # So: catching this needs the heartbeat to start reporting an empty `queues`
-            # the way a paused node does. Until it does, crashing is the honest option.
-            did_work = await self.poll_once()
+            # Only a genuine outage reaches here: `broker.connect` absorbs a transient
+            # failure inside the command, ten retries over roughly ten seconds.
+            try:
+                did_work = await self.poll_once()
+            except RedisError as e:
+                if self.broker_ok:          # log the edge, not every retry
+                    self._log(f"broker unreachable: {e} — not claiming, and saying so "
+                              f"on the next heartbeat")
+                self.broker_ok = False
+                did_work = False
+            else:
+                if not self.broker_ok:
+                    self._log("broker is back — claiming again")
+                self.broker_ok = True
             if did_work:
                 continue
             # Idle: wait out the poll interval, but wake immediately on shutdown.

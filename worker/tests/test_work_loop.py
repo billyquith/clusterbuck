@@ -511,21 +511,17 @@ async def test_the_ordinary_path_still_writes_its_result(redis_client):
     await http.aclose()
 
 
-async def test_a_broker_error_takes_the_loop_down_rather_than_being_swallowed(redis_client):
-    """Pinning a decision that looks like an omission, so nobody "fixes" it by accident.
+async def test_a_broker_outage_does_not_kill_the_loop_but_is_reported(redis_client):
+    """The inversion of an earlier decision, and the condition that earned it.
 
-    `broker.connect` already absorbs a transient failure inside the command — ten retries
-    over roughly ten seconds. What escapes is a broker gone for longer, and for that the
-    right answer is to exit and let launchd/systemd restart us, because exiting takes the
-    heartbeat down too.
+    This loop used to let a broker error kill the process on purpose, because exiting
+    took the heartbeat down with it — and the coordinator reads a recent heartbeat naming
+    a capability's streams as proof somebody is serving them, so a worker that survived a
+    dead broker would vouch for a queue it could not read and quietly starve it.
 
-    That coupling is the point. The coordinator treats a recent heartbeat naming a
-    capability's streams as proof somebody is serving them, and suppresses the wake a
-    queued job is owed on that basis (server `wake.py`, `nodes_serving`). A worker that
-    survived a dead broker would keep heartbeating over HTTP — a different connection,
-    still healthy — while claiming nothing, and would vouch for a queue it cannot read.
-    Catching this needs the heartbeat to report an empty `queues` first, the way a paused
-    node does.
+    `broker_ok` closes that without the restart, so the loop can stay up: the heartbeat
+    reports an empty `queues` while this is false, which is literally true and which the
+    coordinator already reads as "not serving".
     """
     from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -534,12 +530,69 @@ async def test_a_broker_error_takes_the_loop_down_rather_than_being_swallowed(re
     loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
     await loop.ensure_groups()
 
-    async def broker_gone(*a, **kw):
-        raise RedisConnectionError("broker went away and stayed away")
+    calls = {"n": 0}
 
-    loop.poll_once = broker_gone
-    with pytest.raises(RedisConnectionError):
-        await loop.run(asyncio.Event())
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RedisConnectionError("broker went away")
+        stop.set()
+        return False
+
+    stop = asyncio.Event()
+    loop.poll_once = flaky
+    await loop.run(stop)                       # survives rather than raising
+
+    assert calls["n"] >= 2, "it kept going after the outage"
+    await http.aclose()
+
+
+async def test_the_broker_flag_tracks_the_outage_and_the_recovery(redis_client):
+    """One flag, both edges: the heartbeat needs to stop vouching and then start again."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    assert loop.broker_ok is True
+
+    state = {"down": True}
+
+    async def flaky():
+        if state["down"]:
+            raise RedisConnectionError("nope")
+        return False
+
+    loop.poll_once = flaky
+    stop = asyncio.Event()
+
+    async def drive():
+        await asyncio.sleep(0.05)
+        assert loop.broker_ok is False, "an outage must stop this node vouching"
+        state["down"] = False
+        await asyncio.sleep(0.05)
+        assert loop.broker_ok is True, "and it must resume the moment the broker returns"
+        stop.set()
+
+    await asyncio.gather(loop.run(stop), drive())
+    await http.aclose()
+
+
+async def test_a_shutdown_still_stops_the_loop_during_an_outage(redis_client):
+    """Surviving a broker must not mean ignoring SIGTERM."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+
+    async def always_down():
+        raise RedisConnectionError("nope")
+
+    loop.poll_once = always_down
+    stop = asyncio.Event()
+    stop.set()
+    await asyncio.wait_for(loop.run(stop), timeout=5)
     await http.aclose()
 
 

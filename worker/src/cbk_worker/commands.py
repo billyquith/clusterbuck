@@ -225,7 +225,13 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 resp = await registry.heartbeat(state.node_id, state.node_key,
                     HeartbeatRequest(
                         mode=effective, installed=installed, loaded=loaded,
-                        digests=digests or None, queues=queue_names(caps),
+                        # Empty while the broker is unreachable: `queues` means "the
+                        # streams I am claiming from", and a node that cannot reach Redis
+                        # is claiming from none. This is what lets the work loop survive
+                        # an outage without the coordinator counting this node as serving
+                        # a queue it cannot read (server wake.py, `nodes_serving`).
+                        digests=digests or None,
+                        queues=queue_names(caps) if loop.broker_ok else [],
                         stats=stats,
                         protocol_version=PROTOCOL_VERSION,
                         agent_version=AGENT_VERSION,

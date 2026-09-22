@@ -115,6 +115,7 @@ class _FakeLoop:
     jobs_done = 0
     tps = None
     load_s = None
+    broker_ok = True
 
     def __init__(self) -> None:
         self.evicted = 0
@@ -168,6 +169,7 @@ class _FakeRegistry:
     async def heartbeat(self, node_id, node_key, req):
         self.beats += 1
         self.mode = req.mode
+        self.queues = list(req.queues)
         if self.beats >= 2:          # one beat paused, then let the loop exit
             self._stop.set()
         return _FakeResponse()
@@ -273,3 +275,53 @@ async def test_a_node_enrolled_before_profiles_were_persisted_still_yields(tmp_p
 
     assert loop.evicted == 1
     assert manager.unloaded == ["qwen2.5:32b"]
+
+
+# --- telling the coordinator the broker is gone ---------------------------------------
+
+
+async def _beat_with(tmp_path, *, broker_ok: bool):
+    """One heartbeat from a node whose broker is up or down, returning what it reported."""
+    import asyncio
+
+    from cbk_worker.commands import _heartbeat_loop
+    from cbk_worker.config import WorkerConfig
+    from cbk_worker.presence import PresenceLadder
+    from cbk_worker.registry import NodeState, save_state
+
+    state_path = tmp_path / "node.json"
+    save_state(state_path, NodeState(
+        node_id="node-a", node_key="k", server="http://127.0.0.1:1",
+        capabilities=["8b-extract"], ladder=None, mode="active", profile="shared",
+    ))
+    cfg = WorkerConfig(worker_id="node-a", consumer_group="cbk-workers",
+                       capabilities=("8b-extract",), heartbeat_s=0.01)
+    loop = _FakeLoop()
+    loop.broker_ok = broker_ok
+    stop = asyncio.Event()
+    registry = _FakeRegistry(stop)
+    await _heartbeat_loop(registry, loop, PresenceLadder(None, ["8b-extract"]),
+                          _FakeInventory([]), _FakeManager(), None, state_path, cfg, stop)
+    return registry
+
+
+async def test_a_node_that_can_reach_the_broker_reports_its_queues(tmp_path):
+    registry = await _beat_with(tmp_path, broker_ok=True)
+    assert "q:8b-extract" in registry.queues
+
+
+async def test_a_node_cut_off_from_the_broker_reports_no_queues(tmp_path):
+    """The condition that lets the work loop survive an outage instead of exiting.
+
+    `queues` means "the streams I am claiming from", and a node that cannot reach Redis
+    is claiming from none — so this is the literal truth, not a signal smuggled through a
+    field that means something else. The coordinator already reads an empty `queues` as
+    "not serving" (server wake.py, `nodes_serving`), so the wake a queued job is owed
+    still fires instead of being suppressed by a node that cannot answer it.
+    """
+    registry = await _beat_with(tmp_path, broker_ok=False)
+    assert registry.queues == []
+    assert registry.mode == "active", (
+        "it is not paused and must not claim to be — the owner has not taken it, "
+        "it simply cannot reach the broker"
+    )

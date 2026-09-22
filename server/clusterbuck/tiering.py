@@ -15,6 +15,14 @@ Two details that decide correctness:
 * It gates on **enrolled** nodes, not live ones, and requires **at least one**. "Every
   live node is tier-aware" is vacuously true on a cold fleet with nothing awake — and the
   asleep node is exactly the one that will wake up and claim the job.
+* A node reporting **no queues at all** is missing evidence, not evidence against, and
+  does not get a vote. `queues` is what a node says it is claiming from *right now*, so
+  it is empty whenever the node is not claiming — which a paused node is not, and nor is
+  one that cannot currently reach the broker. Counting that as "not tier-aware" meant
+  `cbk pause` on a single modern worker silently switched urgent tiering off for its
+  whole capability, and every urgent job then queued behind the patient backlog the tier
+  exists to jump. If no node has evidence either way the gate stays shut, which is the
+  same "no evidence ⇒ do not tier" rule as an empty fleet.
 * Cloud-only capabilities are always tier-aware: their only consumer is the coordinator's
   own executor, which ships with this code.
 """
@@ -42,9 +50,13 @@ def tiering_ready(
         return True  # drained in-process by this build's own executor
 
     serving = [n for n in store.list_nodes() if _serves(n, capability)]
-    if not serving:
-        return False  # nothing enrolled: no evidence, so do not tier
-    return all(_tier_aware(n) for n in serving)
+    # Only nodes that reported SOMETHING get a vote. An empty `queues` means the node is
+    # not claiming anything at the moment (paused, or cut off from the broker), which
+    # says nothing about whether it could read an urgent stream when it resumes.
+    speaking = [n for n in serving if json_list(n.queues)]
+    if not speaking:
+        return False  # nothing enrolled, or nobody claiming: no evidence, so do not tier
+    return all(_tier_aware(n) for n in speaking)
 
 
 def _serves(node, capability: str) -> bool:

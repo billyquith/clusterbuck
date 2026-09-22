@@ -592,12 +592,24 @@ PINGs a connection idle longer than the poll interval could explain, and a bound
 defaults happen to be close to these today; they are not a promise, and this is the one
 behaviour the fleet is named after.
 
-Past that retry budget the worker **exits on purpose** rather than carrying on, because
-exiting takes its heartbeat down with it. A worker that survived a dead broker would keep
-heartbeating over HTTP — a different connection, still healthy — while claiming nothing,
-and the coordinator would read that heartbeat as proof the queue is being served and
-suppress the wake a job is owed. Silent starvation is worse than a restart loop, and much
-harder to see.
+Past that budget the worker **stays up and says so**. It reports an empty `queues` on
+the heartbeat, which is the literal truth — that field means "the streams I am claiming
+from", and a node that cannot reach the broker is claiming from none — and which the
+coordinator already reads as "not serving". So the wake a queued job is owed still fires,
+the node stays visible with its mode and inventory flowing, and it resumes the instant the
+broker returns rather than after a supervisor backoff.
+
+It used to exit instead, deliberately, because exiting was the only thing that took the
+heartbeat down with it: a worker that survived a dead broker kept heartbeating over HTTP —
+a different connection, still healthy — and so vouched for a queue it could not read.
+Silent starvation is worse than a restart loop. Reporting the outage is better than both.
+
+**A node that reports no queues abstains; it does not vote.** Which matters beyond this,
+because the urgency-tier rollout gate reads the same field as its evidence. Counting an
+empty `queues` as "not tier-aware" meant `cbk pause` on one modern worker silently
+switched urgent tiering off for its whole capability. Absence of evidence is not evidence
+against — though with no node speaking at all the gate still stays shut, which is the same
+answer an empty fleet gets.
 
 ### Wake
 
