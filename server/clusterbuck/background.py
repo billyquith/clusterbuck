@@ -12,9 +12,12 @@ the one tick that had its own handler was the purely observational one that matt
 least. Now every tick gets the same treatment, and a failure costs only its own turn.
 
 Cadences, fastest to slowest: escalation / reservations / usage / observe run every tick;
-the reaper and the terminating backstops run on `reaper_every` because the thresholds they
-enforce are measured in minutes; evals on `eval_every`; the planner on `planner_every`,
-because it is advisory and compares slow-moving state.
+the wake reconciler on `wake_every`, which is tied to the wake cooldown rather than chosen
+— `maybe_wake` coalesces to at most one wake per capability per `wake_cooldown_s`, so
+scanning faster than that window can only burn queries; the reaper and the terminating
+backstops run on `reaper_every` because the thresholds they enforce are measured in
+minutes; evals on `eval_every`; the planner on `planner_every`, because it is advisory and
+compares slow-moving state.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from .reaper import reaper_scan
 from .reservations import reservation_tick
 from .store import Store
 from .usage import usage_scan
-from .wake import WakeCoordinator
+from .wake import WakeCoordinator, wake_reconcile_scan
 
 _log = logging.getLogger("clusterbuck.coordinator")
 
@@ -65,6 +68,7 @@ async def coordinator_loop(
     planner_every: int = 30,
     eval_every: int = 5,
     reaper_every: int = 6,
+    wake_every: int = 6,
 ) -> None:
     """Tick escalation + reservations + usage + observation + evals + the planner."""
     ticks = 0
@@ -77,6 +81,14 @@ async def coordinator_loop(
             await reservation_tick(store, wake)
         with _isolated("usage"):
             await usage_scan(store, queue, fleet)
+
+        if ticks % wake_every == 0:
+            # Retry a wake that was owed and may simply not have landed: WoL is
+            # unacknowledged UDP, and every other caller of `maybe_wake` fires once on an
+            # edge. Without this a lost packet left an urgent job queued with no terminal
+            # state and nothing to try again.
+            with _isolated("wake-reconcile"):
+                await wake_reconcile_scan(store, queue, wake)
 
         if ticks % reaper_every == 0:
             # Recover jobs abandoned by a worker that died mid-run (ADR 20): XAUTOCLAIM

@@ -513,6 +513,27 @@ registry, and works **only on the same LAN**: a laptop at another site is
 opportunistic-only and simply does not drain until it comes home. **Scheduled wake**
 (`pmset repeat wake` on macOS) opens predictable batch windows.
 
+**A wake fired is not a wake delivered.** A magic packet is unacknowledged UDP and is
+lost for ordinary reasons — a sleeping machine that never registered with a sleep proxy,
+a node on another subnet, a switch that aged out the MAC, a node reachable only over a
+tunnel and so holding no MAC at all. Every wake trigger is an *edge* (submit, escalation,
+a reservation's warming edge), so a lost packet used to be the end of it: an `urgent` job
+got one attempt and then waited, with no terminal state to reach, because escalation
+revisits only `waitable` rows and the reaper only sees entries a worker has claimed. A
+**reconciler** on the coordinator tick therefore re-offers the wake any unserved job with
+wake rights is owed, coalesced by the same per-capability cooldown. It changes no
+urgency and promotes nothing: it is a retry, not the backlog-watermark escalation
+trigger described under *Urgency is a trajectory*.
+
+**Liveness needs two signals, and "asleep" is the question they answer.** A node
+heartbeats every ten seconds from a task that is never blocked by inference, reporting
+the streams it is claiming — accurate, and precise enough that a paused node reports none
+and correctly stops counting. Stream-consumer idle time covers what the heartbeat cannot:
+a worker configured purely from the environment, which never enrolled. Either suffices.
+Consumer idle alone was wrong in the expensive direction: a worker mid-generation is not
+polling, so a node serving a long job read as *dead* and had packets broadcast at its
+sleeping peers every cooldown window — in a fleet whose whole resting state is asleep.
+
 ### Network and security
 
 - **LAN-only by default.** Bind the coordinator, Redis and model servers to the local
@@ -645,6 +666,11 @@ Short list, because reversing one of these quietly breaks something.
   that is wrong the moment a laptop closes.
 - **Streams, not lists.** The pending-entries list is what makes a dead worker's job
   recoverable at all.
+- **Every wake is retried, and liveness is read from two signals.** Wake-on-LAN cannot be
+  acknowledged, so a trigger that fires once is a job that waits forever; and a worker
+  busy on a long inference is not polling, so consumer idle time alone reports the
+  hardest-working node as gone. Both mistakes are silent, and both cost exactly what a
+  cold-by-default fleet is trying to save.
 - **Adopt LiteLLM.** The sync plane is a solved problem; rebuilding it buys nothing.
 - **Address by capability or need, never by machine.** Adding or removing hardware must
   not touch a client.

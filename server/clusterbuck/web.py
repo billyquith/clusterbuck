@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import settings
 from .usage import build_usage_summary
+from .wake import heartbeat_age_s
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -29,33 +30,12 @@ web_routes = APIRouter()
 # The registry knows when a node last spoke (`last_heartbeat`, written on every heartbeat)
 # but nothing ever compared that stamp to the clock, so every surface that renders a node
 # showed the `mode` it last declared — forever. A box powered off in July still drew an
-# `active` pill in September. These two helpers are the missing comparison; the queues
+# `active` pill in September. `heartbeat_age_s` is the missing comparison; the queues
 # panel already does the equivalent for stream consumers via `live_worker_consumers`.
-
-
-def _parse_iso(ts: str | None) -> datetime | None:
-    if not ts:
-        return None
-    try:
-        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    # Stamps are written UTC-aware, but a hand-edited or migrated row may be naive.
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def heartbeat_age_s(node, *, now: datetime) -> float | None:
-    """Seconds since this node last spoke, or None if it has no readable stamp at all.
-
-    Falls back to `enrolled_at`, because `Store.enroll_node` does not set
-    `last_heartbeat` — a node that enrolled and never heartbeated has been silent since it
-    enrolled, and reading that as "no information" would exempt precisely the nodes that
-    never came up.
-    """
-    at = _parse_iso(node.last_heartbeat) or _parse_iso(node.enrolled_at)
-    if at is None:
-        return None
-    return max(0.0, (now - at).total_seconds())
+#
+# It lives in `wake.py` now, not here: the same stamp decides whether to broadcast a
+# magic packet at a machine, so it stopped being a presentation concern. Only the
+# rendering half — turning an age into "3d" — is still this module's business.
 
 
 def humanize_age(seconds: float) -> str:

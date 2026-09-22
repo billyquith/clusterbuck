@@ -21,11 +21,9 @@ Two details that decide correctness:
 
 from __future__ import annotations
 
-import json
-
 from .fleet import Fleet
 from .queue import URGENT_TIER, stream_key
-from .store import Store
+from .store import Store, json_list
 
 _URGENT_SUFFIX = f":{URGENT_TIER}"
 
@@ -50,22 +48,12 @@ def tiering_ready(
 
 
 def _serves(node, capability: str) -> bool:
-    return capability in _json_list(node.capabilities)
+    return capability in json_list(node.capabilities)
 
 
 def _tier_aware(node) -> bool:
     """True if this node's last heartbeat listed an urgent stream among its queues."""
-    return any(q.endswith(_URGENT_SUFFIX) for q in _json_list(node.queues))
-
-
-def _json_list(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        return []
-    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+    return any(q.endswith(_URGENT_SUFFIX) for q in json_list(node.queues))
 
 
 async def move_to_urgent_tier(store: Store, queue, row, *, group: str) -> bool:

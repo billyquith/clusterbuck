@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -35,6 +35,27 @@ from .orm.perf_sample import PerfSample
 from .orm.proposal import Proposal
 from .orm.reservation import Reservation
 from .orm.usage import Usage
+
+
+def json_list(raw: str | None) -> list[str]:
+    """Read one of the nodes table's JSON-array columns (`queues`, `capabilities`, …).
+
+    SQLite has no array type, so these columns are JSON text written at the heartbeat
+    boundary. Shared rather than reimplemented per caller because two modules now decide
+    real behaviour from the same `queues` column — `tiering.py` (is this node tier-aware?)
+    and `wake.py` (is this node claiming this capability?) — and a parser that disagreed
+    between them would make those two answers disagree about the same heartbeat.
+
+    Anything unreadable reads as empty: a malformed column is missing evidence, and both
+    callers are written so that missing evidence is the safe answer.
+    """
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return []
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
 
 class Store:
@@ -306,6 +327,39 @@ class Store:
                 # with a due escalation still promotes and may WAKE A MACHINE, which is
                 # the worst outcome available in a cold-by-default fleet.
                 Job.status.not_in(TERMINAL_STATUSES),
+            )
+            return list(s.exec(stmt))
+
+    def jobs_awaiting_capacity(self, now: float) -> list[Job]:
+        """Queued jobs entitled to demand capacity — the wake reconciler's population.
+
+        Four filters, each excluding a job it would be wrong to wake a machine for:
+
+        * `status == "queued"` — not terminal, and not observed as claimed. `mark_started`
+          advances a claimed job to `running`, and the reaper puts an abandoned one back to
+          `queued`, so this column already tracks exactly "nobody is known to have it".
+        * `urgency in (urgent, necessary)` — the wake rights of ADR 18. A `waitable` job
+          never creates capacity for itself; it reaches this set only once escalation has
+          promoted it, which rewrites `urgency` in place.
+        * not `cancel_requested` — the same reasoning `due_for_escalation` records: waking a
+          machine for a job the client has already abandoned is the worst outcome available
+          in a cold-by-default fleet.
+        * deadline not passed — a job nobody can answer in time must not cost a wake. The
+          usage scan expires these within a tick anyway, but ordering between two scans in
+          the same tick is not a thing to depend on.
+
+        Cloud-backed jobs are deliberately NOT excluded here. They sit `queued` like any
+        other while the in-process executor drains them, and it is the liveness check in
+        `maybe_wake` that correctly declines to wake a machine for them — the cloud
+        executor counts as someone serving. Filtering them out in SQL would duplicate that
+        rule in a second place, where it could drift.
+        """
+        with self._session() as s:
+            stmt = select(Job).where(
+                Job.status == "queued",
+                Job.urgency.in_(("urgent", "necessary")),
+                Job.cancel_requested == 0,
+                or_(Job.deadline_epoch.is_(None), Job.deadline_epoch > now),
             )
             return list(s.exec(stmt))
 

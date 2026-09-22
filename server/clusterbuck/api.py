@@ -237,7 +237,10 @@ def create_app(
         seed_ability(app.state.store, now=_now_iso())
         seed_catalog(app.state.store, now=_now_iso())
 
-        # Wake coordinator (needs the fleet for MAC lookup + Redis for liveness).
+        # Wake coordinator: the fleet for MAC lookup, and BOTH liveness signals — Redis
+        # for stream-consumer idle time, the store for heartbeats. The heartbeat is the
+        # one that keeps a node serving a long inference from reading as dead, since that
+        # task is never blocked by the model call (see wake.py).
         app.state.wake = WakeCoordinator(
             app.state.fleet,
             app.state.queue.client,
@@ -246,6 +249,8 @@ def create_app(
             cooldown_s=settings.wake_cooldown_s,
             broadcast=settings.wol_broadcast,
             port=settings.wol_port,
+            store=app.state.store,
+            silent_s=settings.node_silent_s,
         )
 
         # Escalation engine: background scan promoting due waitable jobs.

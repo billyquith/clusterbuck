@@ -98,6 +98,7 @@ def test_a_failing_tick_does_not_cost_its_siblings_their_turn(calls, tick_errors
     calls("eval_tick")
     calls("reaper_scan")
     calls("backstop_scan")
+    calls("wake_reconcile_scan")
     calls("scan_all", sync=True)
     seen = calls.seen
 
@@ -115,7 +116,7 @@ def test_a_failing_tick_does_not_stall_the_slow_cadences(calls):
     """`ticks` increments before any scan runs, so a failure cannot freeze the modulo."""
     calls("escalation_scan", raises=RuntimeError("down"))
     for name in ("reservation_tick", "usage_scan", "observe_tick",
-                 "eval_tick", "reaper_scan", "backstop_scan"):
+                 "eval_tick", "reaper_scan", "backstop_scan", "wake_reconcile_scan"):
         calls(name)
     calls("scan_all", sync=True)
     seen = calls.seen
@@ -131,7 +132,7 @@ def test_the_reaper_and_the_backstops_share_a_cadence_but_not_a_failure(calls, t
     """They run together and are deliberately separate: XAUTOCLAIM cannot see what the
     SQLite sweeps look for, so one failing must not suppress the other."""
     for name in ("escalation_scan", "reservation_tick", "usage_scan",
-                 "observe_tick", "eval_tick"):
+                 "observe_tick", "eval_tick", "wake_reconcile_scan"):
         calls(name)
     calls("reaper_scan", raises=RuntimeError("PEL unavailable"))
     calls("backstop_scan")
@@ -147,8 +148,8 @@ def test_the_reaper_and_the_backstops_share_a_cadence_but_not_a_failure(calls, t
 
 def test_the_synchronous_planner_is_isolated_too(calls, tick_errors):
     """`scan_all` is the one non-async tick; it must get the same treatment."""
-    for name in ("escalation_scan", "reservation_tick", "usage_scan",
-                 "observe_tick", "eval_tick", "reaper_scan", "backstop_scan"):
+    for name in ("escalation_scan", "reservation_tick", "usage_scan", "observe_tick",
+                 "eval_tick", "reaper_scan", "backstop_scan", "wake_reconcile_scan"):
         calls(name)
     calls("scan_all", sync=True, raises=RuntimeError("catalog broken"))
     seen = calls.seen
@@ -158,3 +159,42 @@ def test_the_synchronous_planner_is_isolated_too(calls, tick_errors):
     assert seen["scan_all"] == 2
     assert seen["observe_tick"] == 2, "observe runs after the planner and must survive it"
     assert any("'planner' failed" in m for m in tick_errors), tick_errors
+
+
+def test_the_wake_reconciler_runs_on_its_own_cadence(calls):
+    """It has to actually be wired in, on a cadence of its own.
+
+    The retry it provides is the only thing standing between a lost magic packet and a
+    job that waits forever, and a scan that exists but is never called would leave that
+    gap open while every unit test of the scan itself stayed green.
+
+    Its cadence is tied to `wake_cooldown_s`, not chosen: `maybe_wake` coalesces to at
+    most one wake per capability per cooldown window, so scanning faster can only burn
+    queries.
+    """
+    for name in ("escalation_scan", "reservation_tick", "usage_scan", "observe_tick",
+                 "eval_tick", "reaper_scan", "backstop_scan", "wake_reconcile_scan"):
+        calls(name)
+    calls("scan_all", sync=True)
+    seen = calls.seen
+
+    _run(stop_after=6, planner_every=100, eval_every=100, reaper_every=100, wake_every=2)
+
+    assert seen["wake_reconcile_scan"] == 3, "ticks 2, 4 and 6"
+
+
+def test_a_failing_wake_reconcile_does_not_cost_its_siblings_their_turn(calls, tick_errors):
+    """It talks to both SQLite and Redis, so it has as many ways to fail as the reaper."""
+    for name in ("escalation_scan", "reservation_tick", "usage_scan", "observe_tick",
+                 "eval_tick", "reaper_scan", "backstop_scan"):
+        calls(name)
+    calls("wake_reconcile_scan", raises=RuntimeError("redis gone"))
+    calls("scan_all", sync=True)
+    seen = calls.seen
+
+    _run(stop_after=2, planner_every=100, eval_every=100, reaper_every=1, wake_every=1)
+
+    assert seen["wake_reconcile_scan"] == 2
+    assert seen["reaper_scan"] == 2, "the reaper must still run when the reconciler fails"
+    assert seen["observe_tick"] == 2
+    assert any("'wake-reconcile' failed" in m for m in tick_errors), tick_errors
