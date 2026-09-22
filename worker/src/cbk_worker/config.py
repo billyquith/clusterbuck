@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlparse
 # `py3-none-any` build, never a platform-specific id. It is a constant, not a setting
 # because a worker that misreports it would install a foreign executable over its own
 # entrypoint — the coordinator verifies nothing about our runtime, it trusts this.
-AGENT_VERSION = "0.13.0"
+AGENT_VERSION = "0.14.0"
 AGENT_FLAVOUR = "python"
 
 # The queue-contract protocol version this worker speaks (protocols.md §7).
@@ -47,8 +47,13 @@ class WorkerConfig:
     poll_s: float = 1.0
     result_ttl_s: int = 86400
     heartbeat_s: float = 10.0
-    # Which model-manager adapter handles the non-OpenAI bits (loaded state, digests,
-    # installs): auto | ollama | none. `none` = discovery via /v1/models only.
+    # Which model-manager adapter handles the non-OpenAI bits (residency, digests,
+    # installs, unloading): auto | ollama | lmstudio | none.
+    #
+    # `auto` PROBES for whichever native API answers rather than assuming Ollama, which
+    # is what it used to mean — an LM Studio node left on the default therefore reported
+    # nothing warm and no digests, indistinguishable from a healthy idle one. `none`
+    # opts out of native calls entirely: discovery via the portable /v1/models only.
     model_manager: str = "auto"
     # How long the owner must be stably away before the ladder climbs to the big models
     # (ADR 10). Cold loads are expensive, so this is damped by default.

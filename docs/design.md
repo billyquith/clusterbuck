@@ -346,12 +346,32 @@ being wrong costs one cold load, and being wrong the other way leaves a person i
 of their own laptop without it.
 
 Two honest limits. **Unloading is vendor-specific**, like installing: Ollama has no
-unload endpoint, so it is asked via `keep_alive: 0`, while llama.cpp and vLLM hold one
+unload endpoint and is asked via `keep_alive: 0`; LM Studio grew a real one in 0.4.0
+(`POST /api/v1/models/unload`) and has none before that; llama.cpp and vLLM hold one
 model for the life of the process and cannot do it at all — there the weights stay
 resident and the worker says so rather than reporting a success. And **ladder descent is
 not covered**: dropping from `away` to `active` changes which capabilities are served,
 and mapping those back to artifacts needs a table the worker does not have. Only an
 explicit pause releases the machine.
+
+### Which model server this is, discovered
+
+The portable `GET /v1/models` says what a node can serve, and every server answers it.
+Everything else worth knowing — what is *warm*, what its content digest is, how to pull
+or drop one — is outside the OpenAI standard and needs a per-server adapter.
+
+`auto` used to mean Ollama. An LM Studio node left on the default therefore probed Ollama
+paths, collected 404s, and reported nothing warm and no digests — which is
+indistinguishable from a healthy node sitting idle, and is why `stats.load_s` was never
+measurable there: coldness has to be *proven*, and a server that cannot say what is
+resident can never prove it. That silently cost those nodes their reservation pre-warm
+lead time as well, since it falls back to a constant without a measurement.
+
+`auto` now probes for whichever native API answers, in a fixed order, because both
+products serve a `models` key on some path and only the path distinguishes them. A
+successful detection is remembered; a failed one is not, so a model server started after
+the worker is still found on a later beat. Detection lives in one place and the manager
+follows it, so the two halves cannot disagree about what the node is running.
 
 A node that slept through its own inference is the awkward case, because it is not dead:
 the reaper hands the work on, and hours later the sleeper wakes and finishes the

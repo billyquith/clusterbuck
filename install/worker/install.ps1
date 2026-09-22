@@ -27,7 +27,7 @@
       Invoke-RestMethod http://coordinator:8018/nodes/tokens -Method Post -Headers @{...}
 
 .PARAMETER ModelManager
-    Model manager adapter: auto | ollama | none.  Default: auto
+    Model manager adapter: auto | ollama | lmstudio | none.  Default: auto
 
 .PARAMETER ModelServerUrl
     Local model server URL.  Default: http://127.0.0.1:11434/v1

@@ -275,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                          "CBK_JOIN_PASSWORD — an argument lands in shell history")
     ap.add_argument("--model-server", default="http://127.0.0.1:11434/v1",
                     help="local model server (default: Ollama; LM Studio is :1234)")
-    ap.add_argument("--model-manager", default="auto", choices=["auto", "ollama", "none"])
+    ap.add_argument("--model-manager", default="auto",
+                    choices=["auto", "ollama", "lmstudio", "none"])
     ap.add_argument("--node-state",
                     help="path the installer persists node identity to "
                          "(default: the platform location; override for testing)")

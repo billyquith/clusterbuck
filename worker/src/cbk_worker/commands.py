@@ -291,7 +291,8 @@ async def run_work(args: argparse.Namespace) -> int:
                httpx.AsyncClient(timeout=3600.0, follow_redirects=True) as mgr_http:
         loop = WorkLoop(redis, ModelClient(infer_http, cfg), cfg, log=Out.dim)
         inventory = ModelInventory(beat_http, cfg.model_server_url, cfg.model_manager)
-        manager = ModelManager(mgr_http, inventory.native_base, cfg.model_manager)
+        manager = ModelManager(mgr_http, inventory.native_base, cfg.model_manager,
+                               flavour=inventory.flavour)
         applier = UpdateApplier(mgr_http, update_public_key_pem(), log=Out.info)
 
         tasks = [asyncio.create_task(loop.run(stop))]

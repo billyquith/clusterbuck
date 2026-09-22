@@ -18,7 +18,8 @@
 #   --artifact PATH     Path to cbk.pyz, or an https:// URL to download it from
 #                       (default: looks for an existing binary at /opt/clusterbuck/cbk)
 #   --token TOKEN       One-time join token to enroll this node with the coordinator
-#   --model-manager M   Model manager adapter: auto | ollama | none  (default: auto)
+#   --model-manager M   Model manager adapter: auto | ollama | lmstudio | none
+#                       (default: auto, which probes for whichever API answers)
 #   --model-server URL  Local model server URL (default: http://127.0.0.1:11434/v1)
 #   --profile P         Who this machine is for: dedicated | shared | background
 #                       (default: shared). `dedicated` means it exists to serve, so

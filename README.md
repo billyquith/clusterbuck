@@ -242,7 +242,7 @@ Bump only the first two and every node is told it is `stale` while being offered
 ```bash
 cd worker && uv run python build.py                    # → dist/cbk.pyz
 # on the coordinator, as the clusterbuck user:
-install -m 0755 cbk.pyz /var/lib/clusterbuck/releases/cbk-0.13.0.pyz
+install -m 0755 cbk.pyz /var/lib/clusterbuck/releases/cbk-0.14.0.pyz
 cp release.json release.json.bak-0.9.0                 # rollback needs the old manifest,
                                                        # not just the old artifact
 # rewrite release.json with the new version, url and sha256, refresh the join artifact,
