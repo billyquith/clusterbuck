@@ -35,6 +35,7 @@ score derived from a deterministic suite, which is what lets a client ask for
 
 [**docs/design.md**](docs/design.md) is the full picture — how it works and how to run it.
 [docs/protocols.md](docs/protocols.md) is the exact wire contract.
+[llms.txt](llms.txt) is the compact client-integration guide for AI-assisted projects.
 
 ## Quick start (one machine)
 
