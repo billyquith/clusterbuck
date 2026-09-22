@@ -287,6 +287,11 @@ heartbeat to send and a pause flag to notice, so it must come back to its own lo
  indistinguishable from an abandoned one. Acknowledge even when the result write was
  refused (see *Idempotency*): a refused write means the job already has an answer, and
  leaving the entry pending only gives the reaper something to reclaim.
+- **Release:** a worker may abandon a claimed entry without answering it — the owner
+ pausing the node cancels the in-flight call (protocols.md is silent on *why* a worker
+ stops; it need not say). Write no result and do not ack: an interrupted job has not
+ failed, and leaving the entry pending is what returns it through the recovery path
+ below. Answering it with `failed` would make a retryable job terminal.
 - **Recovery:** entries left pending longer than the coordinator's idle threshold
  (`CBK_REAPER_MIN_IDLE_MS`, default 10 min) are reclaimed with `XAUTOCLAIM`, re-appended to
  the stream with `attempts` incremented, and the stale delivery acked away. Past

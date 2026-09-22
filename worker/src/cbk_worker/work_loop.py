@@ -51,6 +51,21 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+class Evicted(BaseException):
+    """The owner took the machine back while this job was running (ADR 10).
+
+    Derived from `BaseException`, not `Exception`, and that is the whole point of the
+    class. `_process` turns any `Exception` into a terminal `failed` result — correct for
+    a job that genuinely cannot be served, and catastrophic for this one: an evicted job
+    has not failed, it has been interrupted, and it must go back to its queue. Sharing an
+    ancestor with the handler that would answer it is a single misplaced `except` away
+    from telling a client their job failed because someone sat down at a laptop.
+
+    `asyncio.CancelledError` is `BaseException` for exactly this reason, and this is the
+    same signal wearing a name that says which cancellation it was.
+    """
+
+
 class WorkLoop:
     def __init__(self, redis: Redis, model: ModelClient, cfg: WorkerConfig,
                  log: Callable[[str], None] | None = None) -> None:
@@ -81,6 +96,12 @@ class WorkLoop:
         # say (LM Studio, llama.cpp), which is unknown, not "nothing loaded" — and unknown
         # is never evidence that a job was a cold start.
         self._resident: frozenset[str] | None = None
+        # The model call currently in flight, and the one `evict` cancelled. Held as the
+        # TASK OBJECT rather than a boolean flag so the two can be compared by identity:
+        # a flag set just as a job finished would still be standing when the next job
+        # started, and that job would then read a completion of its own as an eviction.
+        self._inflight: asyncio.Task | None = None
+        self._evicted_task: asyncio.Task | None = None
 
     @property
     def tps(self) -> float | None:
@@ -218,6 +239,52 @@ class WorkLoop:
                 if "BUSYGROUP" not in str(e):
                     raise
 
+    def evict(self) -> bool:
+        """Stop the job running right now. True if there was one to stop.
+
+        The owner's half of `cbk pause` (ADR 10): pausing already stops this node CLAIMING
+        new work, but a 30B generation started a minute ago would otherwise hold the
+        machine for minutes more, which is not what a person reaching for their own laptop
+        means by "pause".
+
+        Deliberately leaves the entry **unacked with no result**, so the job returns to its
+        queue through the visibility timeout exactly as an abandoned one does — that path
+        is already built and already tested, and writing a `failed` result here would turn
+        an interruption into a terminal answer the client cannot retry.
+
+        What this does NOT promise: that the model server stops generating. Cancelling
+        closes the connection (verified: the server sees the client hang up mid-response),
+        so the worker stops waiting immediately and the job is released — but whether the
+        server abandons the generation behind it is the server's business. Freeing the RAM
+        is the separate job of `ModelManager.unload`.
+        """
+        task = self._inflight
+        if task is None or task.done():
+            return False
+        self._evicted_task = task
+        task.cancel()
+        return True
+
+    async def _complete(self, job: Job) -> tuple[dict, dict | None]:
+        """Run the model call as a task, so `evict` has something to cancel.
+
+        Translates a cancellation WE caused into `Evicted`, and lets any other one through
+        untouched: a genuine shutdown must stay a `CancelledError` or the process would
+        stop exiting when asked.
+        """
+        task = asyncio.ensure_future(self._model.complete(job))
+        self._inflight = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if self._evicted_task is task:
+                raise Evicted() from None
+            raise
+        finally:
+            self._inflight = None
+            if self._evicted_task is task:
+                self._evicted_task = None
+
     async def poll_once(self) -> bool:
         """Read at most one job per capability and process it. True if it did work."""
         if self.paused:
@@ -311,7 +378,7 @@ class WorkLoop:
             refusal = self._refuse_reason(job)
             if refusal is not None:
                 raise RuntimeError(refusal)
-            completion, usage = await self._model.complete(job)
+            completion, usage = await self._complete(job)
             elapsed = time.monotonic() - t0
             result = Result(job_id=job.id, status="done", worker=self._cfg.worker_id,
                             started_at=started_at, finished_at=_now_iso(),
@@ -324,6 +391,14 @@ class WorkLoop:
             else:
                 self._record_tps(usage, elapsed)
             self._log(f"done  {job.id} [{capability}]")
+        # Evicted FIRST, and it is not an `Exception` at all, so the handler below cannot
+        # reach it however this is later edited. Nothing is written and nothing is acked:
+        # the entry stays in the pending list and the coordinator's reaper requeues it,
+        # which is precisely the recovery path a worker that died mid-job already uses.
+        except Evicted:
+            self._log(f"evict {job.id} [{capability}]: the owner took the machine back — "
+                      f"returned to its queue for another node")
+            return
         # Any failure becomes a terminal `failed` result rather than an exception that kills
         # the loop: the caller is waiting on a result key and deserves an answer either way.
         except Exception as e:

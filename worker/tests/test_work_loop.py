@@ -541,3 +541,104 @@ async def test_a_broker_error_takes_the_loop_down_rather_than_being_swallowed(re
     with pytest.raises(RedisConnectionError):
         await loop.run(asyncio.Event())
     await http.aclose()
+
+
+# --- the owner takes the machine back, mid-job (C1) -----------------------------------
+
+
+async def test_evicting_leaves_no_result_and_leaves_the_entry_claimable(redis_client):
+    """The property that matters most, and the one a careless fix would break.
+
+    An evicted job has not FAILED — it was interrupted — so it must not get a terminal
+    result. `_process` turns any `Exception` into a `failed` result, which is right for a
+    job that cannot be served and catastrophic for this one: the client would be handed a
+    permanent error because somebody sat down at a laptop. Nothing written, nothing acked,
+    entry still pending, and the coordinator's reaper requeues it on the path an abandoned
+    job already uses.
+    """
+    started = asyncio.Event()
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.sleep(30)                      # a long generation
+        return httpx.Response(200, json=_OK)
+
+    cfg = _cfg()
+    http, model = _model(hang)
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_eviction")})
+
+    polling = asyncio.create_task(loop.poll_once())
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    assert loop.evict() is True
+    assert await asyncio.wait_for(polling, timeout=5) is True
+
+    assert await redis_client.get("res:job_eviction") is None, \
+        "an interrupted job must not be answered — it has to be retryable"
+    pending = await redis_client.xpending(stream_key("8b-extract"), cfg.consumer_group)
+    assert pending["pending"] == 1, "still claimed, so the reaper will requeue it"
+    await http.aclose()
+
+
+async def test_evicting_when_nothing_is_running_is_a_no_op(redis_client):
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    assert loop.evict() is False
+    await http.aclose()
+
+
+async def test_a_job_completed_before_the_evict_is_not_mistaken_for_one(redis_client):
+    """Why the cancelled task is remembered by identity rather than a boolean.
+
+    A flag set just as a job finished would still be standing when the next job started,
+    and that job would read its own ordinary completion as an eviction — losing a result
+    that was already paid for.
+    """
+    cfg = _cfg()
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_one")})
+
+    assert await loop.poll_once() is True
+    assert loop.evict() is False                      # too late; it already finished
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_two")})
+    assert await loop.poll_once() is True
+
+    assert json.loads(await redis_client.get("res:job_two"))["status"] == "done"
+    await http.aclose()
+
+
+async def test_a_shutdown_cancellation_is_not_swallowed_as_an_eviction(redis_client):
+    """A genuine cancel must stay a cancel, or the process stops exiting when asked."""
+    started = asyncio.Event()
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.sleep(30)
+        return httpx.Response(200, json=_OK)
+
+    cfg = _cfg()
+    http, model = _model(hang)
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_shutdown")})
+
+    polling = asyncio.create_task(loop.poll_once())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    polling.cancel()                                  # shutdown, nobody called evict()
+    with pytest.raises(asyncio.CancelledError):
+        await polling
+    await http.aclose()
+
+
+def test_an_eviction_can_never_be_caught_as_a_failure():
+    """Structural, not behavioural: `Evicted` is not an `Exception` at all, so no
+    `except Exception` anywhere can turn an interruption into a terminal answer."""
+    from cbk_worker.work_loop import Evicted
+
+    assert issubclass(Evicted, BaseException)
+    assert not issubclass(Evicted, Exception)

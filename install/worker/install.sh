@@ -20,6 +20,11 @@
 #   --token TOKEN       One-time join token to enroll this node with the coordinator
 #   --model-manager M   Model manager adapter: auto | ollama | none  (default: auto)
 #   --model-server URL  Local model server URL (default: http://127.0.0.1:11434/v1)
+#   --profile P         Who this machine is for: dedicated | shared | background
+#                       (default: shared). `dedicated` means it exists to serve, so
+#                       `cbk pause` drains it and leaves the models warm; the others
+#                       belong to a person, so pausing stops the running job and frees
+#                       the RAM. Only settable at enrolment.
 
 set -euo pipefail
 
@@ -31,6 +36,10 @@ ARTIFACT=""
 JOIN_TOKEN=""
 MODEL_MANAGER="auto"
 MODEL_SERVER_URL="http://127.0.0.1:11434/v1"
+# Matches `cbk enroll --profile`'s own default. Erring towards "somebody owns this" is
+# the safe direction: the cost of being wrong is a cold load, not a person losing their
+# machine (worker commands.py, `yields_to_a_person`).
+PROFILE="shared"
 
 DEPLOY_DIR="/opt/clusterbuck"
 CBK_BIN="$DEPLOY_DIR/cbk"
@@ -57,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --token)         JOIN_TOKEN="$2";       shift 2 ;;
     --model-manager) MODEL_MANAGER="$2";   shift 2 ;;
     --model-server)  MODEL_SERVER_URL="$2"; shift 2 ;;
+    --profile)       PROFILE="$2";          shift 2 ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -64,6 +74,10 @@ done
 [[ -n "$COORDINATOR_URL" ]] || die "--coordinator is required  (e.g. http://coordinator.local:8018)"
 [[ -n "$REDIS_URL"       ]] || die "--redis-url is required    (e.g. redis://:pass@coordinator.local:6379/0)"
 [[ -n "$MODEL_NAME"      ]] || die "--model is required        (e.g. qwen2.5:7b)"
+case "$PROFILE" in
+  dedicated|shared|background) ;;
+  *) die "--profile must be dedicated, shared or background (got '$PROFILE')" ;;
+esac
 
 # ── prerequisite checks ───────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "run as root: sudo bash $0 ..."
@@ -221,7 +235,7 @@ if [[ -n "$JOIN_TOKEN" ]]; then
     ok "node.json already exists — skipping enrollment (node is already registered)"
   else
     env CBK_SERVER_URL="$COORDINATOR_URL" CBK_NODE_STATE="$NODE_STATE" \
-      python3 "$CBK_BIN" enroll --token "$JOIN_TOKEN"
+      python3 "$CBK_BIN" enroll --token "$JOIN_TOKEN" --profile "$PROFILE"
     if [[ "$(os_type)" == "linux" ]]; then
       chown clusterbuck:clusterbuck "$NODE_STATE"
     fi

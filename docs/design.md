@@ -313,9 +313,45 @@ the ladder is damped by hysteresis because a cold load costs tens of seconds; de
 is immediate, because freeing RAM is cheap and the owner is waiting. Never thrash on a
 coffee break.
 
-Eviction is instant and lossless: `cbk pause` stops pulling, unloads, and any aborted job
-returns to its queue through the visibility timeout. To the queue, a node dropping down
-the ladder is indistinguishable from one going to sleep.
+Eviction is instant and lossless: `cbk pause` stops pulling, **stops the job already
+running**, and unloads — and the aborted job returns to its queue through the visibility
+timeout, unanswered, so another node picks it up. To the queue, a node dropping down the
+ladder is indistinguishable from one going to sleep.
+
+"Instant" is about the machine, and two of those three halves are what make it true. A
+node that merely stopped claiming still held the GPU for however long its current
+generation had left, and still held the weights in RAM afterwards — which on a shared
+16 GB box is the whole of what the owner can feel. So the in-flight call is cancelled
+(the worker stops waiting immediately; whether the server abandons the generation behind
+it is the server's own business) and the resident models are dropped.
+
+**But only on a machine somebody owns**, and the node's `profile` is what says so. The
+two profiles want opposite things:
+
+- **dedicated** — the machine exists to serve, so it optimises for *availability*. Both
+  halves of an eviction are pure loss: dropping the weights makes the next job pay a cold
+  load while the node sits idle holding nothing, and killing the running generation
+  throws away GPU time already spent to re-run the same work elsewhere. Pausing one is an
+  operator taking it out of rotation, so it **drains** — claims nothing further, finishes
+  what is in hand, stays warm.
+- **shared / background** — the machine is somebody's, and their processes need the
+  resources back. Pausing means they want it now, so the job stops and the weights go.
+  The other half of that bargain is the presence ladder, which takes advantage of the
+  machine when it looks idle by climbing to the heavier models on `away`.
+
+The coordinator already draws this line for model pulls ("a dedicated machine exists to
+serve, so anytime; on a machine someone uses, pull only in quiet hours"), and this is the
+same distinction applied to memory and to work in flight. An unknown profile yields:
+being wrong costs one cold load, and being wrong the other way leaves a person in front
+of their own laptop without it.
+
+Two honest limits. **Unloading is vendor-specific**, like installing: Ollama has no
+unload endpoint, so it is asked via `keep_alive: 0`, while llama.cpp and vLLM hold one
+model for the life of the process and cannot do it at all — there the weights stay
+resident and the worker says so rather than reporting a success. And **ladder descent is
+not covered**: dropping from `away` to `active` changes which capabilities are served,
+and mapping those back to artifacts needs a table the worker does not have. Only an
+explicit pause releases the machine.
 
 A node that slept through its own inference is the awkward case, because it is not dead:
 the reaper hands the work on, and hours later the sleeper wakes and finishes the
@@ -703,6 +739,13 @@ Short list, because reversing one of these quietly breaks something.
   that is wrong the moment a laptop closes.
 - **Streams, not lists.** The pending-entries list is what makes a dead worker's job
   recoverable at all.
+- **`profile` decides who the machine is for, everywhere it matters.** A dedicated node
+  optimises for availability and gives nothing back; a shared one yields to its owner on
+  demand. Applying one policy to both wastes a cold load on one or loses a person their
+  laptop on the other.
+- **An interrupted job is not a failed one.** Eviction leaves no result and no ack, so
+  the job returns through the visibility timeout like any abandoned one. Answering it
+  would hand a client a permanent error because somebody sat down at a laptop.
 - **Connection behaviour is stated, not inherited.** A client library's defaults are not
   a contract, and the one they would silently change is the one a sleeping fleet depends
   on.

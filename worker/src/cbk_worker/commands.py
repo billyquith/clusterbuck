@@ -90,12 +90,94 @@ async def _execute_action(manager: ModelManager, action: ModelAction) -> ActionR
     return ActionResult(proposal_id=action.proposal_id, ok=ok, error=error)
 
 
+def owner_took_the_machine(previous: str | None, effective: str) -> bool:
+    """True on the TRANSITION into the owner's own pause, and only then.
+
+    Read off the ladder's effective mode rather than `loop.paused`, deliberately. That
+    flag is set from two independent sources — this ladder, and a coordinator quarantine
+    — and only one of them means "a person wants their laptop back". Evicting on the
+    other would abort a running job because an operator block-listed a build, which is a
+    different decision with different costs; keeping them apart here means a future change
+    to quarantine handling cannot start throwing work away by accident.
+
+    A transition, not a state, because the release below is not free: unloading on every
+    beat of a long pause would re-evict nothing and re-ask the model server ten times a
+    minute to drop models it has already dropped.
+    """
+    return effective == "paused" and previous != "paused"
+
+
+def yields_to_a_person(profile: str | None) -> bool:
+    """Whether pausing this node means giving the machine back to somebody.
+
+    The profile already answers "how much of this machine may clusterbuck take", and the
+    two answers pull in opposite directions:
+
+    * **dedicated** — the machine exists to serve, so it optimises for AVAILABILITY. No
+      one is waiting for its RAM, and both halves of an eviction are pure loss there:
+      dropping the weights makes the next job pay a cold load while the node sits idle
+      holding nothing, and killing the running generation throws away GPU time that has
+      already been spent, to re-run the same work somewhere else. Pausing one is an
+      operator taking it out of rotation, and the right shape for that is a **drain** —
+      claim nothing further, finish what is in hand, stay warm and ready.
+    * **shared / background** — the machine is somebody's, and their processes need the
+      resources. Pausing means they want it now, so the job stops and the weights go.
+      (The other side of that bargain is the presence ladder, which takes advantage of
+      the machine when it looks idle — climbing to the heavier models on `away`.)
+
+    The coordinator already draws this exact line for model pulls: "a dedicated machine
+    exists to serve, so anytime; on a machine someone uses, pull only in quiet hours"
+    (server catalog.py).
+
+    An UNKNOWN profile yields, and the asymmetry is deliberate: a node that enrolled
+    before the profile was persisted has no answer here, and somebody has just typed
+    `cbk pause` on it. Being wrong that way costs one cold load and one re-run; being
+    wrong the other way leaves a person sitting in front of their own laptop without it.
+    """
+    return profile != "dedicated"
+
+
+async def _release_the_machine(loop: WorkLoop, manager: ModelManager,
+                               inventory: ModelInventory, profile: str | None) -> None:
+    """Hand the machine back to its owner: stop the running job, then free the RAM.
+
+    Both halves, because either alone leaves the complaint intact — a node that stops
+    claiming but keeps generating holds the GPU for minutes, and one that stops
+    generating but keeps a 30B resident holds the memory until something else needs it.
+
+    Neither half on a dedicated node, which drains instead (`yields_to_a_person`).
+    Claiming has already stopped by the time this is called; that is the whole of what a
+    drain is.
+
+    Only what the inventory can SEE is unloaded, which on a server that cannot report
+    residency (LM Studio, llama.cpp) is nothing. That is honest rather than silent: the
+    eviction still happens, and `unload` says plainly that the weights stay resident.
+    Ladder DESCENT is deliberately not covered either — dropping from `away` to `active`
+    swaps which capabilities are served, and mapping those back to artifacts needs a table
+    the worker does not have (a job carries its pinned artifact; a capability does not).
+    """
+    if not yields_to_a_person(profile):
+        Out.dim("dedicated node: draining — finishing the job in hand and staying warm")
+        return
+
+    if loop.evict():
+        Out.warn("evicted the in-flight job — it returns to its queue through the "
+                 "visibility timeout, so nothing is lost")
+    for artifact in await inventory.loaded():
+        ok, error = await manager.unload(artifact)
+        if ok:
+            Out.good(f"unloaded {artifact} — RAM returned to the owner")
+        else:
+            Out.dim(f"could not unload {artifact}: {error}")
+
+
 async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: PresenceLadder,
                           inventory: ModelInventory, manager: ModelManager,
                           applier: UpdateApplier, state_path, cfg: WorkerConfig,
                           stop: asyncio.Event) -> None:
     """Re-read the persisted mode, drive the ladder, take a model inventory, report."""
     pending_result: ActionResult | None = None
+    previous_mode: str | None = None
     while not stop.is_set():
         try:
             state = load_state(state_path)
@@ -104,6 +186,14 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 loop.paused = effective == "paused"
                 caps = ladder.capabilities()
                 await loop.set_capabilities(caps)
+
+                # The owner just paused this node, so hand the machine back before doing
+                # anything else — and before the inventory below, so what it reports (and
+                # therefore what this beat tells the coordinator) is the state AFTER the
+                # unload rather than a snapshot that is already stale.
+                if owner_took_the_machine(previous_mode, effective):
+                    await _release_the_machine(loop, manager, inventory, state.profile)
+                previous_mode = effective
 
                 # Observed reality, not configuration: what this node's model server
                 # actually has, and what is warm right now.
@@ -332,7 +422,7 @@ async def run_enroll(args: argparse.Namespace) -> int:
     save_state(state_path, NodeState(
         node_id=body["node_id"], node_key=body["node_key"], server=server,
         capabilities=proposed.get("capabilities") or [], ladder=proposed.get("ladder"),
-        mode="active",
+        mode="active", profile=args.profile,
     ))
     Out.good(f"enrolled as {body['node_id']} · capabilities: "
              f"{', '.join(proposed.get('capabilities') or [])}")

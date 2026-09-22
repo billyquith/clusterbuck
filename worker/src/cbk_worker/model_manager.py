@@ -49,6 +49,33 @@ class ModelManager:
         except Exception as e:
             return (False, f"pull failed: {e}")
 
+    async def unload(self, artifact: str) -> tuple[bool, str | None]:
+        """Drop a model out of memory, returning RAM to the owner. Disk is untouched.
+
+        Deliberately not `remove`, which deletes the weights: the owner wanting their
+        machine back for an hour must not cost a multi-gigabyte re-download afterwards.
+        This is the RAM half of `cbk pause` (ADR 10 — "the owner always wins"), and on a
+        shared 16 GB box it is the half that actually matters.
+
+        Vendor-specific, like the rest of this adapter, and more so: Ollama has no unload
+        endpoint at all. The documented mechanism is an empty generate carrying
+        `keep_alive: 0`, which tells the server to evict the model as soon as it is done —
+        which, with no prompt, is immediately. llama.cpp and vLLM hold one model for the
+        life of the process and cannot do this at any price, so there the honest answer is
+        that the weights stay resident until their server is stopped.
+        """
+        if not self.can_manage:
+            return (False, f"model manager '{self._manager}' cannot unload; {artifact} "
+                           f"stays resident until its model server evicts it")
+        try:
+            resp = await self._client.post(f"{self._base}/api/generate",
+                                           json={"model": artifact, "keep_alive": 0})
+            if resp.status_code >= 400:
+                return (False, f"unload failed: HTTP {resp.status_code} {_trim(resp.text)}")
+            return (True, None)
+        except Exception as e:
+            return (False, f"unload failed: {e}")
+
     async def remove(self, artifact: str) -> tuple[bool, str | None]:
         """Remove an artifact, returning disk to the owner."""
         if not self.can_manage:

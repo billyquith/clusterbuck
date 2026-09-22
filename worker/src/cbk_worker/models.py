@@ -245,13 +245,18 @@ class NodeState:
     capabilities: list[str] = field(default_factory=list)
     ladder: dict[str, list[str]] | None = None
     mode: str = "active"
+    # How much of this machine clusterbuck may take: dedicated | shared | background
+    # (design.md → "The owner always wins"). Sent at enrolment and, until now, promptly
+    # forgotten — so the running worker could not tell whether anybody else owned the
+    # machine it was on. `None` on a node that enrolled before this was persisted.
+    profile: str | None = None
 
     @staticmethod
     def from_wire(d: dict[str, Any]) -> NodeState:
         return NodeState(
             node_id=d["node_id"], node_key=d["node_key"], server=d.get("server", ""),
             capabilities=d.get("capabilities") or [], ladder=d.get("ladder"),
-            mode=d.get("mode", "active"),
+            mode=d.get("mode", "active"), profile=d.get("profile"),
         )
 
     def to_wire(self) -> dict[str, Any]:
@@ -262,4 +267,5 @@ class NodeState:
             "capabilities": self.capabilities,
             "ladder": self.ladder,
             "mode": self.mode,
+            "profile": self.profile,
         })
