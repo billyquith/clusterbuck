@@ -1,7 +1,9 @@
 """Reservations (protocols.md §8): admission, the reconciler-tick lifecycle, and the API.
 
 The lifecycle proof is the tick driven directly through now = warm_by → starts → ends,
-asserting the state sequence and that the wake side-effect fires exactly once.
+asserting the state sequence, that each STATE transition happens once, and that the wake
+deliberately does not — it is re-offered for the whole warming window, because one
+unacknowledged packet was otherwise a reservation's only chance of a woken machine.
 """
 
 from __future__ import annotations
@@ -38,15 +40,46 @@ def store(tmp_path) -> Store:
     return s
 
 
+@pytest.fixture()
+def warnings():
+    """Capture `clusterbuck.reservations` warnings straight off that logger.
+
+    Not `caplog`, for the reason test_background.py records: importing the sync plane
+    pulls in LiteLLM, which reconfigures root logging, so caplog's root handler sees
+    nothing once the full suite has run. Attaching here is independent of that.
+    """
+    import logging
+
+    records: list[str] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    log = logging.getLogger("clusterbuck.reservations")
+    sink = _Sink(level=logging.WARNING)
+    log.addHandler(sink)
+    previous, log.level = log.level, logging.WARNING
+    try:
+        yield records
+    finally:
+        log.removeHandler(sink)
+        log.level = previous
+
+
 class SpyWake:
     """Duck-typed WakeCoordinator that records maybe_wake calls (no Redis, no packets)."""
 
-    def __init__(self) -> None:
+    def __init__(self, live: bool = False) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.live = live
 
     async def maybe_wake(self, capability: str, *, reason: str) -> list[str]:
         self.calls.append((capability, reason))
         return []
+
+    async def has_live_consumer(self, capability: str) -> bool:
+        return self.live
 
 
 # --- admission ---------------------------------------------------------------
@@ -92,7 +125,15 @@ def _seed(store: Store, *, warm_by, starts, ends, state="scheduled"):
     )
 
 
-async def test_lifecycle_progresses_and_wakes_once(tmp_path):
+async def test_lifecycle_progresses_and_keeps_offering_the_wake(tmp_path):
+    """States advance once each; the wake is re-offered for the whole warming window.
+
+    It used to fire only on the scheduled→warming edge, which made a reservation's
+    entire chance of a woken machine rest on one unacknowledged UDP packet — lose it and
+    the window opened onto a node still asleep, which is the exact outcome booking one
+    is meant to prevent. Retrying costs nothing: `maybe_wake` short-circuits the moment
+    anything is serving, and coalesces per capability per cooldown regardless.
+    """
     store = Store(str(tmp_path / "r.db"))
     _seed(store, warm_by=100, starts=200, ends=300)
     spy = SpyWake()
@@ -101,13 +142,13 @@ async def test_lifecycle_progresses_and_wakes_once(tmp_path):
     assert store.get_reservation("rsv1").state == "scheduled"
     assert spy.calls == []
 
-    await reservation_tick(store, spy, now=150)  # ≥ warm_by → warming (+ wake once)
+    await reservation_tick(store, spy, now=150)  # ≥ warm_by → warming (+ wake)
     assert store.get_reservation("rsv1").state == "warming"
     assert len(spy.calls) == 1
 
-    await reservation_tick(store, spy, now=160)  # still warming, before starts
+    await reservation_tick(store, spy, now=160)  # still warming → offer it again
     assert store.get_reservation("rsv1").state == "warming"
-    assert len(spy.calls) == 1                   # idempotent — no second wake
+    assert len(spy.calls) == 2, "a lost packet must not be a reservation's only chance"
 
     await reservation_tick(store, spy, now=250)  # ≥ starts → open
     assert store.get_reservation("rsv1").state == "open"
@@ -117,7 +158,46 @@ async def test_lifecycle_progresses_and_wakes_once(tmp_path):
 
     await reservation_tick(store, spy, now=360)  # draining → closed
     assert store.get_reservation("rsv1").state == "closed"
-    assert len(spy.calls) == 1
+    assert len(spy.calls) == 2, "and no wake once the warming window is over"
+
+
+async def test_the_wake_stops_once_something_is_serving(tmp_path):
+    """`maybe_wake` owns that rule, so the tick can retry freely — it is a no-op against
+    a capability that already has a live consumer."""
+    store = Store(str(tmp_path / "r.db"))
+    _seed(store, warm_by=100, starts=200, ends=300)
+    spy = SpyWake(live=True)
+
+    await reservation_tick(store, spy, now=150)
+    await reservation_tick(store, spy, now=160)
+    assert len(spy.calls) == 2, "the tick offers; the coordinator decides"
+
+
+async def test_a_window_that_opens_onto_nothing_says_so(tmp_path, warnings):
+    """The failure this lifecycle could not previously express.
+
+    Every transition above is clock arithmetic, and none of it knows whether a machine
+    actually woke — so a reservation whose node never came up advanced through warming,
+    open and closed looking exactly like one that worked.
+    """
+    store = Store(str(tmp_path / "r.db"))
+    _seed(store, warm_by=100, starts=200, ends=300)
+    spy = SpyWake(live=False)
+    await reservation_tick(store, spy, now=150)
+    await reservation_tick(store, spy, now=250)     # → open, with nobody serving
+
+    assert store.get_reservation("rsv1").state == "open"
+    assert any("nothing serving" in m for m in warnings), warnings
+
+
+async def test_a_window_that_opens_onto_a_live_node_is_quiet(tmp_path, warnings):
+    store = Store(str(tmp_path / "r.db"))
+    _seed(store, warm_by=100, starts=200, ends=300)
+    spy = SpyWake(live=True)
+    await reservation_tick(store, spy, now=150)
+    await reservation_tick(store, spy, now=250)
+
+    assert warnings == []
 
 
 async def test_lifecycle_missed_window_closes_without_waking(tmp_path):

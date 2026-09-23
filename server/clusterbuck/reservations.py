@@ -14,7 +14,16 @@ just a state flip the tick ignores, and it's driven directly in tests. Absolute 
 
 M2b scope: one-shot windows (asap / "HH:MM"); recurrence, counter-offers, real job-drain
 and idle-timeout, and priority *enforcement* are deferred (priority is stored, not acted
-on — that's intra-queue ordering, ADR 24).
+on — that's intra-queue ordering, ADR 24). So is the **pre-load**, which still only logs
+what it would warm.
+
+**Re-planning is deferred too, and is smaller than it sounds.** A reservation wakes and
+warms; it does not dispatch. The `node` it names is advisory, because jobs address a
+capability and any capable node may claim one — so "re-plan to another node" changes
+nothing a job could observe, and cloud is a per-job routing decision rather than a
+per-booking one. What a booking genuinely owes its holder is a machine awake when the
+window opens; the wake retry and the opened-onto-nothing warning below are that promise
+kept, rather than the dispatch machinery design.md once implied.
 """
 
 from __future__ import annotations
@@ -131,8 +140,18 @@ async def reservation_tick(
 ) -> None:
     """Advance each active reservation's lifecycle based on stored absolute times.
 
-    Side-effects (wake + pre-load) fire exactly once, on the scheduled→warming edge,
-    because the transition is gated on the current state — the tick is idempotent.
+    State transitions fire exactly once, because each is gated on the current state.
+    The **wake does not**: it is re-offered on every tick of the warming window, for the
+    same reason job wakes are retried (`wake.wake_reconcile_scan`). Wake-on-LAN is
+    unacknowledged UDP, so a single packet on the scheduled→warming edge was the whole
+    of a reservation's chance — lose it and the window opened onto a machine still
+    asleep, which is precisely the outcome booking one is meant to prevent. Retrying is
+    nearly free: `maybe_wake` short-circuits the moment anything is serving, and
+    coalesces to one packet per capability per cooldown either way.
+
+    And if the window opens onto nothing regardless, it says so. That was silent: the
+    states advanced on the clock alone, so a reservation whose node never came up looked
+    exactly like one that worked.
     """
     now = time.time() if now is None else now
     for r in store.active_reservations():
@@ -153,6 +172,18 @@ async def reservation_tick(
                 store.set_reservation_state(rid, "draining")
             elif now >= r.starts:
                 store.set_reservation_state(rid, "open")
+                # The one moment the booking is meant to have paid off. Checked rather
+                # than assumed, because everything above this line is clock arithmetic
+                # and none of it knows whether a machine actually woke.
+                if not await wake.has_live_consumer(r.capability):
+                    _log.warning(
+                        "reservation %s opened with nothing serving %s — the window is "
+                        "live but no node answered the wake", rid, r.capability,
+                    )
+            else:
+                # Still warming: keep offering the wake rather than resting on the one
+                # packet sent at warm_by, which nothing acknowledges.
+                await wake.maybe_wake(r.capability, reason=f"reservation:{rid}")
         elif state == "open":
             if now >= r.ends:
                 store.set_reservation_state(rid, "draining")

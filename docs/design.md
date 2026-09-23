@@ -398,8 +398,23 @@ derived from that node's measured `load_s` — it wakes the node and pre-loads t
 so the cold-load cost is paid before the window opens rather than by the first job.
 
 The commitment is **soft**. This is a home fleet: the reserved node roams off-LAN, or its
-owner comes back and the presence ladder evicts, which always wins. The coordinator
-re-plans — another node, cloud if the jobs are `cloud_ok`, or slip the window.
+owner comes back and the presence ladder evicts, which always wins.
+
+*Softer than it reads, and honestly so.* A reservation **wakes and warms; it does not
+dispatch**. The `node` it names is advisory — nothing routes a job to it, because jobs
+address a capability and any capable node may claim one. So the re-planning this
+paragraph used to promise ("another node, cloud if the jobs are `cloud_ok`, or slip the
+window") has little to re-plan: picking a different node changes nothing a job can
+observe, and cloud is decided per job by routing, not per booking. What a reservation
+actually owes its holder is a machine that is awake when the window opens, and that is
+what it is now held to: the wake is re-offered for the whole warming window rather than
+staked on a single unacknowledged packet, and a window that opens with nothing serving
+says so instead of advancing through the states on the clock alone.
+
+The pre-load remains a **stub** — it logs what it would warm. Until it is real, "warm by
+appointment" means woken by appointment, and the first job through still pays the cold
+load. Making it real needs a load path in the model-manager adapter, which is deliberately
+absent (see *Which model server this is*).
 
 ### Urgency is a trajectory, not a label
 
