@@ -47,10 +47,12 @@ POST /jobs
  "privacy": "local_only", // local_only | cloud_ok (default local_only —
  // local_only NEVER routes to cloud)
  "deadline": "2026-01-01T00:00:00Z",// optional expiry; see expires_at below.
- // Enforced by a coordinator sweep, NOT by
- // removing the queued entry, and the worker
- // does not check it — a job already claimed
- // runs to completion regardless.
+ // Enforced by a coordinator sweep, which
+ // withdraws an unclaimed entry and marks the
+ // job `expired`. The worker does not check
+ // it: a job already claimed runs on, and its
+ // late result is discarded — `expired` is
+ // final.
  "submitter": { // optional caller provenance (all fields optional)
  "app": "nightly-importer", // which client
  "instance": "workstation-2", // on which machine

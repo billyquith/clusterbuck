@@ -106,6 +106,13 @@ def _validated_idempotency_key(raw: str | None) -> str | None:
     return key
 
 
+# Statuses the COORDINATOR decides, from its own clock or a client's DELETE, rather than
+# from an executor's result. Once recorded they are final and no result blob overrides
+# them. (`done` and `failed` need no such rule: they come from the first result written,
+# and result writes are first-writer-wins.)
+_SEALED_STATUSES = frozenset({"expired", "cancelled"})
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -806,6 +813,13 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown job id")
 
         result = await app.state.queue.read_result(row.result_key)
+        if row.status in _SEALED_STATUSES and (result or {}).get("status") != row.status:
+            # The coordinator gave up on this job. A result that lands afterwards comes
+            # from a worker that had already claimed it and ran on regardless; it must not
+            # turn `expired` into `done`, or `cancelled` into anything, after the client
+            # was told to stop waiting. Terminal has to mean terminal. (A blob that AGREES
+            # — the backstop's own `expired`, carrying its reason — is kept.)
+            result = None
         if result is None:
             # No terminal result yet — report the queue-state we last recorded.
             return {

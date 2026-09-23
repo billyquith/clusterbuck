@@ -46,7 +46,8 @@ def _job_cost(fleet: Fleet | None, capability: str, tin: int, tout: int) -> floa
 
 
 async def usage_scan(
-    store: Store, queue: Queue, fleet: Fleet | None, *, now: float | None = None
+    store: Store, queue: Queue, fleet: Fleet | None, *, now: float | None = None,
+    group: str | None = None,
 ) -> int:
     """Capture usage for jobs whose terminal result newly appeared. Returns count captured."""
     now = time.time() if now is None else now
@@ -67,6 +68,19 @@ async def usage_scan(
                 # picks it up (see store.request_cancel). Reporting it as `expired`
                 # would attribute it to a deadline the client may never have set.
                 outcome = "cancelled" if row.cancel_requested else "expired"
+                # Take it off the stream first, so a job past its deadline is never
+                # handed to a worker afterwards. This sweep used to set the status only,
+                # leaving the entry queued: a worker claimed it later, ran it, and the
+                # result it wrote flipped `expired` to `done`. Only an UNCLAIMED entry is
+                # withdrawn — a worker already generating is left to finish, as the
+                # backstop does (backstop._terminalise explains why a plain withdraw
+                # would orphan its pending row). Its late answer is then ignored, because
+                # GET /jobs treats the status recorded here as final.
+                if row.entry_id and row.stream:
+                    from .config import settings
+
+                    await queue.withdraw_if_unclaimed(
+                        row.stream, row.entry_id, group=group or settings.consumer_group)
                 store.set_status(row.id, outcome)
                 store.record_usage(
                     job_id=row.id, ts=ts, capability=row.capability, model=None,

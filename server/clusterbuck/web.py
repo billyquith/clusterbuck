@@ -16,7 +16,9 @@ over HTTP. The dashboard is for looking at; every figure it drops is still on th
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -29,6 +31,27 @@ from .wake import heartbeat_age_s
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
+
+
+# StaticFiles sends an ETag but no Cache-Control, so a browser falls back to heuristic
+# freshness (a fraction of the file's age) and can reuse a stale copy for days without
+# asking. After a deploy that meant new HTML running against the old stylesheet and
+# script: tabs that did nothing, cards with no styling. Each asset URL carries a hash of
+# its contents instead, so a changed file is a new URL with nothing stale to reuse.
+# Cached per process: the files only change on a deploy, which restarts it.
+@cache
+def _asset_version(name: str) -> str:
+    try:
+        return hashlib.sha256((WEB_DIR / "static" / name).read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "0"
+
+
+def static_url(name: str) -> str:
+    return f"/static/{name}?v={_asset_version(name)}"
+
+
+templates.env.globals["static_url"] = static_url
 
 web_routes = APIRouter()
 

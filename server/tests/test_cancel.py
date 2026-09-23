@@ -222,3 +222,66 @@ async def test_withdraw_reports_claimed_when_a_consumer_holds_it(queue):
 async def test_withdraw_reports_gone_for_an_entry_that_is_not_there(queue):
     await queue.ensure_group(CAP)
     assert await queue.withdraw(stream_key(CAP), "1-1", group=GROUP) == "gone"
+
+
+# --- expired and cancelled are final ---------------------------------------------------
+#
+# The deadline sweep used to set the status only. The entry stayed queued, a worker could
+# claim it later, and the result it wrote flipped `expired` to `done` on the next GET —
+# the same route by which a `cancelling` job's "discarded" result came back as `done`.
+
+def _sweep(client, redis_url) -> None:
+    import anyio
+
+    async def sweep():
+        queue = Queue.from_url(redis_url)
+        try:
+            await usage_scan(client.app.state.store, queue, None)
+        finally:
+            await queue.aclose()
+
+    anyio.run(sweep)
+
+
+def _late_result(redis_url, job_id) -> None:
+    conn = redis.from_url(redis_url, decode_responses=True)
+    conn.set(f"res_{job_id[4:]}", json.dumps({
+        "job_id": job_id, "status": "done", "worker": "node-alpha",
+        "completed_at": "2026-09-02T00:00:00Z",
+        "completion": {"id": "c1", "choices": []},
+    }))
+    conn.close()
+
+
+def test_an_expired_job_is_taken_off_the_queue(client, redis_url):
+    """Past its deadline and never claimed: no worker may be handed it afterwards."""
+    job_id = _submit(client, deadline="2020-01-01T00:00:00Z").json()["id"]
+    assert _stream_len(redis_url) == 1
+    _sweep(client, redis_url)
+    assert client.get(f"/jobs/{job_id}").json()["status"] == "expired"
+    assert _stream_len(redis_url) == 0
+
+
+def test_a_late_result_does_not_resurrect_an_expired_job(client, redis_url):
+    job_id = _submit(client, deadline="2020-01-01T00:00:00Z").json()["id"]
+    _claim(redis_url)  # a worker already holds it, so it is left to finish
+    _sweep(client, redis_url)
+    assert _stream_len(redis_url) == 1, "a claimed entry is not withdrawn from under it"
+
+    _late_result(redis_url, job_id)
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["status"] == "expired", "terminal means terminal"
+    assert got["result"] is None
+
+
+def test_a_cancelling_jobs_late_result_is_discarded(client, redis_url):
+    """What `cancelling` always promised, and did not deliver."""
+    job_id = _submit(client).json()["id"]
+    _claim(redis_url)
+    client.delete(f"/jobs/{job_id}")
+    _sweep(client, redis_url)
+
+    _late_result(redis_url, job_id)
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["status"] == "cancelled"
+    assert got["result"] is None

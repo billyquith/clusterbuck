@@ -42,10 +42,16 @@ Content-Type: application/json
 ```
 
 The `model` is a Clusterbuck capability alias, not necessarily the underlying model
-name. Discover currently registered aliases with `GET /v1/models`. A successful
-response is a normal OpenAI-style chat completion. A `502` means the coordinator
-could not complete the request through the synchronous model-server route; do not
-assume that means the async worker route is unavailable.
+name. Discover currently registered aliases with `GET /v1/models`, or `GET /fleet` for
+each alias's configured model, `cloud` flag and a human-readable `description`. A
+successful response is a normal OpenAI-style chat completion. A `502` means the
+coordinator could not complete the request through the synchronous model-server route; do
+not assume that means the async worker route is unavailable. A `503` means no fleet is
+configured for the sync plane.
+
+The sync path forwards straight to a capability's model server: it does not route by
+ability, apply `requires`, meter usage, or wake a sleeping machine. Anything that needs
+those goes through `POST /jobs`.
 
 Use the asynchronous path for batch work, long-running work, or requests that may
 wait for capacity. It is the correct route when a sleeping worker may be woken or a
@@ -64,29 +70,71 @@ Content-Type: application/json
   "urgency": "waitable",
   "privacy": "local_only",
   "deadline": "2026-09-23T12:00:00Z",
+  "requires": {"context_tokens": 32768},
   "submitter": {"app": "my-client", "request_id": "req_123"}
 }
 ```
 
 The asynchronous request must use exactly one addressing method:
 
-- Preferred: `task_class` plus `min_ability`, so Clusterbuck selects a measured,
-  sufficiently capable artifact.
+- Preferred: `task_class` plus `min_ability` (1-10), so Clusterbuck selects a measured,
+  sufficiently capable artifact. Task classes are `extract`, `summarize`, `reason` and
+  `code`.
 - Advanced: `capability`, such as `8b-extract` or `30b-reason`, to select a
   supply-side tier directly.
+
+Send either `messages` (OpenAI-style, roles `system` / `user` / `assistant`) or a
+`prompt` string. A single content string is capped at 1 MiB and `messages` at 512
+entries; larger requests are rejected with `422`.
 
 `privacy` defaults to `local_only`; that setting never allows cloud routing. Set
 `cloud_ok` only when the data and budget policy allow a hosted provider. Use `urgent`,
 `necessary`, or `waitable` for `urgency`. Give user-visible work a `deadline` and/or
 `escalate_after_min`: a waitable job with neither may wait indefinitely.
 
+## Hard requirements: `requires`
+
+`requires` states what the model must be able to do, separately from how well it does
+it. It is a filter applied before ability is compared, and it works with both
+addressing forms:
+
+```json
+"requires": {"context_tokens": 60000, "tools": true, "json_schema": true, "vision": true}
+```
+
+- Every field is optional. Only truthy values filter: `"vision": false` means "I don't
+  need vision", not "exclude models that have it".
+- `context_tokens` is declared by you. Clusterbuck does not estimate prompt size, so a
+  client sending a large document must say how much context it needs, or risk it being
+  routed to a model that silently truncates it.
+- A model that does not declare a feature counts as not having it. If nothing qualifies,
+  the submit fails with `422` naming the model and the missing feature. That is a
+  different fix from an ability miss (also `422`): usually an operator catalog entry,
+  not a better model.
+- For structured output, set both `requires.json_schema: true` and
+  `params.response_format` (e.g. `{"type": "json_object"}`). Without the requirement,
+  `response_format` is dropped on the async path, because routing has not checked the
+  model can honour it. Validate the JSON you get back either way.
+
 ## Poll, persist, and cancel async work
 
 `POST /jobs` returns `202` with `{ "id", "result_key", "status": "queued" }`.
 Poll `GET /jobs/{id}` until `status` is terminal: `done`, `failed`, `expired`, or
-`cancelled`. A completed job returns its OpenAI-style chat completion in `result`.
-Persist that result immediately if it matters: completions expire after
-`CBK_RESULT_TTL_S` (24 hours by default).
+`cancelled`. A completed job returns its OpenAI-style chat completion in `result`, with
+token counts in `usage` and a message in `error` on failure. Persist that result
+immediately if it matters: completions expire after `CBK_RESULT_TTL_S` (24 hours by
+default).
+
+All four terminal statuses are final. `done` and `failed` come from the first result
+written, so a job reported `failed` will not later turn up `done`. `expired` and
+`cancelled` are decided by the coordinator, and a result that arrives afterwards (from a
+worker that had already claimed the job) is discarded. A queued job whose queue entry was
+trimmed away is reported `failed` rather than left `queued` forever.
+
+The poll response also carries `deadline`, `escalates_at` and `expires_at`.
+`expires_at: null` means nothing will ever give up on the job: a `waitable` job with no
+`deadline` and no `escalate_after_min` waits for a capable worker indefinitely, which on
+a fleet that sleeps is by design.
 
 `queue_position` counts only unclaimed jobs ahead of yours; `0` can still mean work is
 in flight. `started_at` and `worker` are best-effort coordinator observations, so use
@@ -98,13 +146,16 @@ finishes.
 
 ## Reliability rules
 
-Use an `Idempotency-Key` on every `POST /jobs`. Reuse the same key only when retrying
-the same logical submission after an uncertain response; a replay returns the existing
-job and does not enqueue another. `submitter.request_id` is diagnostic provenance only,
-not a deduplication key.
+Use an `Idempotency-Key` on every `POST /jobs`: printable ASCII, at most 255
+characters. Reuse the same key only when retrying the same logical submission after an
+uncertain response. A replay returns `200` (not `202`) with `Idempotency-Replayed: true`
+and the existing job's `id`, and enqueues nothing. A submit rejected with `400` or `422`
+does not consume its key, so the same key can be retried once the fleet can serve it.
+`submitter.request_id` is diagnostic provenance only, not a deduplication key.
 
 Handle `400` and `422` as invalid requests or unsatisfied routing requirements rather
-than retrying unchanged. Handle `401` as missing or invalid authentication. For async
+than retrying unchanged; the `detail` says which. Handle `401` as missing or invalid
+authentication, and `404` on `GET /jobs/{id}` as an unknown job id. For async
 work, retry transport failures with the same idempotency key, then poll the returned job.
 
 Never send prompts, completions, or credentials to Redis directly. Clients communicate

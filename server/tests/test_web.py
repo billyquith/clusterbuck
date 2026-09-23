@@ -600,3 +600,27 @@ def test_timeline_names_the_machine_not_its_node_id(client):
         venue="local", tokens_in=1, tokens_out=1, outcome="done", cost=0.0, day="2026-01-01")
     html = client.get("/ui/timeline").text
     assert ">node-x<" in html
+
+
+def test_asset_urls_change_when_the_file_does(client, tmp_path, monkeypatch):
+    """No Cache-Control is sent, so a browser can reuse a stale copy for days. After a
+    deploy that ran new HTML against the old CSS and JS: dead tabs, unstyled cards."""
+    import re
+
+    from clusterbuck import web
+
+    page = client.get("/models").text
+    for asset in ("dashboard.css", "dashboard.js", "htmx.min.js"):
+        assert re.search(rf'/static/{re.escape(asset)}\?v=[0-9a-f]{{12}}"', page), asset
+    assert client.get(re.search(r'/static/dashboard\.css\?v=\w+', page)[0]).status_code == 200
+
+    (tmp_path / "static").mkdir()
+    f = tmp_path / "static" / "x.css"
+    monkeypatch.setattr(web, "WEB_DIR", tmp_path)
+    web._asset_version.cache_clear()
+    f.write_text("a")
+    before = web.static_url("x.css")
+    web._asset_version.cache_clear()
+    f.write_text("b")
+    assert web.static_url("x.css") != before
+    web._asset_version.cache_clear()
