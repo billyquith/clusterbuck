@@ -153,13 +153,11 @@ def resolve(
             elif excluded != "urgency=waitable never uses cloud":
                 excluded_by_budget += 1
             continue
-            continue
         score = store.get_ability(spec.model, task_class, scale_version)
         if score is None:
             continue
         best_available = score if best_available is None else max(best_available, score)
         if score < min_ability:
-            continue
             continue
         candidates.append((
             spec.cloud, spec.price_in_per_1k + spec.price_out_per_1k, cap,
