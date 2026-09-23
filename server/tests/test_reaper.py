@@ -191,3 +191,75 @@ async def test_requeue_returns_the_job_to_queued_but_keeps_the_observed_start(
     assert row.status == "queued", "back of the line again"
     assert row.started_at == "2026-09-02T00:00:00Z"
     assert row.claimed_by == "dead-laptop"
+
+
+async def test_a_completion_landing_mid_dead_letter_is_not_overwritten(store, queue):
+    """The dead-letter must be FIRST-WRITER-WINS, like every other terminal write.
+
+    `reaper_scan` probes `read_result` before deciding to give up, but a check separated
+    from its write by an await is not an atomic operation: the very worker being given up
+    on can land its real `done` in the gap — that is precisely the scenario the reaper
+    exists for, a node that stalled long enough to be reclaimed and then woke up.
+
+    Writing unconditionally destroyed that completion and told the client `failed` about
+    a job that had SUCCEEDED. design.md §12 forbids the milder version of this ("told
+    `failed` and later finds `done`"); this was the inversion of it.
+
+    Simulated by pre-writing the blob, which is the same state the race produces and the
+    only way to hit it deterministically.
+    """
+    await _submit(queue, store, "job_late", max_attempts=1)
+    await _claim_and_die(queue)
+    await queue.write_result("res_job_late", {
+        "job_id": "job_late", "status": "done", "worker": "node-woke-up",
+        "completed_at": "2026-01-01T00:00:00Z", "completion": {"choices": []},
+    })
+
+    out = await reaper_scan(store, queue, group=GROUP, min_idle_ms=0, capabilities=[CAP])
+
+    # The pre-existing blob is caught by the probe, so this is the "already finished"
+    # path: acked away, never counted as a dead-letter.
+    assert out["dead_lettered"] == 0
+    result = await queue.read_result("res_job_late")
+    assert result["status"] == "done" and result["worker"] == "node-woke-up"
+    assert store.get("job_late").status != "failed", "the row must not contradict the blob"
+    assert await _pending(queue) == 0
+
+
+async def test_the_dead_letter_write_itself_refuses_to_clobber(store, queue):
+    """The half the test above cannot reach: the result lands AFTER the probe.
+
+    The probe is a real narrowing but it is not the guarantee — between it and the write
+    sits an await, and the worker can answer in there. So the write is `only_if_absent`
+    and the SQLite status is taken from whichever blob actually won.
+
+    The race window is forced by making the probe miss exactly once, which is what a
+    result arriving a microsecond later looks like from the reaper's side.
+    """
+    await _submit(queue, store, "job_squeeze", max_attempts=1)
+    await _claim_and_die(queue)
+    await queue.write_result("res_job_squeeze", {
+        "job_id": "job_squeeze", "status": "done", "worker": "node-woke-up",
+        "completed_at": "2026-01-01T00:00:00Z", "completion": {"choices": []},
+    })
+
+    real = queue.read_result
+    calls = {"n": 0}
+
+    async def probe_misses_once(key):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else await real(key)
+
+    queue.read_result = probe_misses_once
+    try:
+        out = await reaper_scan(store, queue, group=GROUP, min_idle_ms=0,
+                                capabilities=[CAP])
+    finally:
+        queue.read_result = real
+
+    assert calls["n"] >= 2, "the reaper must re-read after losing the NX write"
+    result = await queue.read_result("res_job_squeeze")
+    assert result["status"] == "done", "the worker's real completion survives"
+    assert result["worker"] == "node-woke-up"
+    assert store.get("job_squeeze").status == "done", "the row follows the blob"
+    assert out["dead_lettered"] == 0, "nothing was actually dead-lettered"

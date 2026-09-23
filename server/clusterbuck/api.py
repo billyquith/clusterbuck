@@ -54,7 +54,7 @@ from .models import (
     Urgency,
 )
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
-from .queue import Queue, stream_key, tier_for
+from .queue import Queue, stream_key, tier_for, tier_of
 from .reservations import admit, iso
 from .routing import NoCapableArtifact, resolve
 from .signing import build_manifest, load_private_pem
@@ -701,8 +701,15 @@ def create_app(
         """
         if row.status != "queued" or row.entry_id is None:
             return None
+        # On the tier the entry is ACTUALLY on. Omitting this counted an urgent job's
+        # position against the base stream: `undelivered` defaults to `tier=None`, so both
+        # its XINFO GROUPS and its XRANGE read `q:<cap>` while `entry_id` had been minted
+        # on `q:<cap>:urgent`. Stream ids are millisecond timestamps, so the comparison
+        # never raised — it silently reported unrelated base-tier entries as being ahead
+        # of the job that had just jumped that queue.
         ahead, _capped = await app.state.queue.undelivered(
             row.capability, settings.consumer_group, before_entry_id=row.entry_id,
+            tier=tier_of(row.stream),
         )
         return ahead
 

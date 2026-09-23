@@ -143,12 +143,20 @@ The client never learns which machine ran the job beyond an opaque id (diagnosti
 
 **When clusterbuck gives up: `expires_at`, and the honest `null`.** A `waitable` job
 submitted with neither `deadline` nor `escalate_after_min` has **no terminating mechanism
-at all** — it is excluded from escalation (no `escalate_at`), from the deadline sweep (no
-`deadline`), and it is invisible to the reaper, because `XAUTOCLAIM` walks the
-pending-entries list and a never-delivered entry never enters it. Its only exit is being
-trimmed away by `MAXLEN ~` once enough later traffic arrives on the same capability, with
-no result and no status change. `expires_at: null` reports exactly that, and is the reason
-to set `deadline` and/or `escalate_after_min` on anything a human is waiting for.
+of its own** — it is excluded from escalation (no `escalate_at`), from the deadline sweep
+(no `deadline`), and it is invisible to the reaper, because `XAUTOCLAIM` walks the
+pending-entries list and a never-delivered entry never enters it. `expires_at: null`
+reports exactly that, and is the reason to set `deadline` and/or `escalate_after_min` on
+anything a human is waiting for: such a job waits for a capable worker indefinitely, which
+on a fleet that sleeps for days is the correct behaviour rather than a fault.
+
+What it no longer does is **vanish**. Its entry can still be trimmed away by `MAXLEN ~`
+once enough later traffic arrives on the same capability, but that is now answered rather
+than silent: the orphan sweep looks for the entry a job's row names and, finding it gone
+with the job still queued, writes a terminal `failed` saying so. Previously such a job
+kept polling `queued` for a result that no longer had any way to arrive — it retained its
+`entry_id`, so the sweep's `entry_id IS NULL` filter skipped it, and it had never entered
+a pending list, so the reaper could not see it either.
 
 A `deadline` that is not an RFC 3339 timestamp is rejected with `422`. It used to be
 dropped silently to "no expiry", which handed back the opposite of what was asked for with

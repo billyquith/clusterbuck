@@ -200,27 +200,55 @@ class Store:
             s.commit()
 
     def orphaned_jobs(self, before_iso: str) -> list[Job]:
-        """Non-terminal jobs older than `before_iso` that were never enqueued.
+        """Non-terminal jobs older than `before_iso` that may have no stream entry.
 
-        `entry_id IS NULL` is the whole signal: the row was committed and the XADD never
-        happened, so no stream entry exists and nothing will ever deliver it. Compared as
-        text because `created_at` is ISO-8601 with a `Z`, whose lexical order is
-        chronological — the same assumption `recent_usage` already relies on.
+        Two populations, because there are two ways to end up undeliverable and only one
+        of them used to be selected here:
+
+        * `entry_id IS NULL` — the row was committed and the XADD never happened, so no
+          entry was ever created.
+        * `status == 'queued'` with an entry recorded — the entry may since have been
+          **trimmed away unserved**. `MAXLEN ~` trims by length regardless of ack state,
+          so a never-delivered entry can be discarded by later traffic on the same
+          capability. Such a job kept a non-null `entry_id`, so this sweep skipped it, and
+          it never entered a pending list, so the reaper could not see it either: it
+          polled `queued` forever with no result and no status change, and the only thing
+          that ever terminalised it was the opt-in `CBK_MAX_QUEUE_AGE_S`.
+
+        Selecting a row here is not a verdict — it only means "worth checking". The caller
+        looks for the entry before concluding anything, and adopts it if it turns up.
+        Compared as text because `created_at` is ISO-8601 with a `Z`, whose lexical order
+        is chronological — the same assumption `recent_usage` already relies on.
         """
         with self._session() as s:
             stmt = select(Job).where(
                 Job.status.not_in(TERMINAL_STATUSES),
-                Job.entry_id.is_(None),
+                or_(Job.entry_id.is_(None), Job.status == "queued"),
                 Job.created_at < before_iso,
             )
             return list(s.exec(stmt))
 
     def stale_queued_jobs(self, before_iso: str) -> list[Job]:
-        """Non-terminal jobs older than `before_iso`, enqueued or not — the opt-in
-        maximum-queue-age backstop's population."""
+        """Jobs still QUEUED and older than `before_iso` — the opt-in maximum-queue-age
+        backstop's population.
+
+        `status == "queued"` is load-bearing and was missing: the filter was
+        `status NOT IN TERMINAL_STATUSES`, which also selects `running`. The backstop
+        would then expire a job a worker was generating right then, XDEL its claimed
+        entry, and write `expired` over the answer that arrived moments later. Every
+        description of this sweep says otherwise — "a job nobody ever claimed"
+        (backstop.py), design.md, and `_limits_view`, which reports `expires_at` on the
+        strength of this selector and is documented as the one field that must never lie.
+
+        This narrows but does not close the window: a claim is only visible here once
+        `observe_tick` has copied it out of the pending list, and a job claimed between
+        two ticks still reads `queued`. That residue is caught in the backstop itself,
+        which refuses a `withdraw` that comes back `"claimed"`. Two cheap checks rather
+        than one expensive one — neither is sufficient alone.
+        """
         with self._session() as s:
             stmt = select(Job).where(
-                Job.status.not_in(TERMINAL_STATUSES),
+                Job.status == "queued",
                 Job.created_at < before_iso,
             )
             return list(s.exec(stmt))

@@ -20,8 +20,9 @@ class Settings:
     # coordinator died between the insert and the XADD) is invisible to everything —
     # no worker will see it, and the reaper only walks the pending list. Always on,
     # because that is a crash artifact rather than a policy choice. Must exceed
-    # reaper_min_idle_ms so the two recovery paths cannot race the same job.
-    orphan_grace_s: int = int(os.environ.get("CBK_ORPHAN_GRACE_S", "900"))
+    # reaper_min_idle_ms so the two recovery paths cannot race the same job — asserted by
+    # `validate()` below, having previously held at the defaults only by coincidence.
+    orphan_grace_s: int = int(os.environ.get("CBK_ORPHAN_GRACE_S", "3600"))
     # Backstop for a properly-enqueued job nobody ever claims. UNSET means disabled, and
     # that is deliberate: on a fleet whose nodes sleep for days a patient `waitable` job
     # outliving any fixed cutoff is correct, so clusterbuck must not impose one. When
@@ -61,8 +62,21 @@ class Settings:
     urgent_streams: str = os.environ.get("CBK_URGENT_STREAMS", "auto")
     # Reaper (ADR 20): a claimed entry idle longer than this is treated as abandoned and
     # requeued. MUST exceed the longest plausible inference, or a merely-busy worker's job
-    # would be stolen and re-run. Default 10 min.
-    reaper_min_idle_ms: int = int(os.environ.get("CBK_REAPER_MIN_IDLE_MS", "600000"))
+    # would be stolen and re-run.
+    #
+    # It used to default to 600_000 — exactly the worker's own inference timeout, which was
+    # itself hardcoded. "Must exceed" was therefore false at the defaults: a generation that
+    # ran the full ten minutes was reclaimed at the same instant the worker gave up on it,
+    # so the fleet paid twice for one answer and the two racing writers made the result a
+    # coin toss. The pair is now explicit at both ends:
+    #
+    #     worker CBK_INFERENCE_TIMEOUT_S  <  CBK_REAPER_MIN_IDLE_MS  <  CBK_ORPHAN_GRACE_S
+    #
+    # 30 min gives 3x headroom over the worker's 600 s default, which is room for a long
+    # generation on a slow node without leaving a genuinely dead worker's job sitting for
+    # an hour. Raise the worker's timeout and this must move with it — `validate()` below
+    # refuses the startup rather than letting the invariant quietly lapse again.
+    reaper_min_idle_ms: int = int(os.environ.get("CBK_REAPER_MIN_IDLE_MS", "1800000"))
     # Approximate cap on stream length, so the broker isn't a permanent log of every prompt.
     stream_maxlen: int = int(os.environ.get("CBK_STREAM_MAXLEN", "10000"))
     # Static registry seed for the sync plane (protocols.md §5).
@@ -124,6 +138,39 @@ class Settings:
     cloud_budget_reserve_fraction: float = float(
         os.environ.get("CBK_CLOUD_BUDGET_RESERVE_FRACTION", "0.2")
     )
+
+
+class ConfigError(ValueError):
+    """A setting combination that would silently corrupt job handling."""
+
+
+def validate(s: "Settings") -> None:
+    """Refuse to start on a recovery-timing combination that loses or duplicates work.
+
+    These three are a chain, and every link was previously stated in a comment and checked
+    by nobody. Both had already lapsed: `reaper_min_idle_ms` EQUALLED the worker's
+    inference timeout rather than exceeding it, and `orphan_grace_s > reaper_min_idle_ms`
+    held only because nobody had moved either number. A comment is not an assertion, so
+    these are assertions.
+
+    Deliberately a hard failure, not a warning. Both violations are silent in production —
+    they show up as jobs that ran twice or answers that flipped, hours later and nowhere
+    near the setting that caused them — which is exactly the class of thing that should
+    cost a restart now rather than a day of debugging later.
+    """
+    if s.orphan_grace_s * 1000 <= s.reaper_min_idle_ms:
+        raise ConfigError(
+            f"CBK_ORPHAN_GRACE_S ({s.orphan_grace_s}s) must exceed "
+            f"CBK_REAPER_MIN_IDLE_MS ({s.reaper_min_idle_ms}ms = "
+            f"{s.reaper_min_idle_ms / 1000:g}s), or the orphan sweep and the reaper race "
+            f"the same job: the sweep can terminalise work the reaper is about to requeue."
+        )
+    if s.max_queue_age_s is not None and s.max_queue_age_s * 1000 <= s.reaper_min_idle_ms:
+        raise ConfigError(
+            f"CBK_MAX_QUEUE_AGE_S ({s.max_queue_age_s}s) must exceed "
+            f"CBK_REAPER_MIN_IDLE_MS ({s.reaper_min_idle_ms / 1000:g}s), or a job is aged "
+            f"out while its first delivery is still within the reaper's patience."
+        )
 
 
 settings = Settings()

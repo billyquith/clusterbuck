@@ -67,8 +67,22 @@ async def reaper_scan(
             job_id = job.get("id", "<unknown>")
 
             if attempts >= max_attempts:
+                # FIRST WRITER WINS here too (`only_if_absent`), not just on the executor
+                # paths. The `read_result` probe above is a check, and a check separated
+                # from its write by an await is not an atomic operation: the worker we are
+                # about to give up on can land its real `done` in that gap. Writing
+                # unconditionally then overwrote a genuine completion with this
+                # dead-letter and destroyed the text — the exact inversion of "terminal
+                # means terminal" (design.md §12), and worse than the case that decision
+                # was written for, because the client is told `failed` about a job that
+                # SUCCEEDED.
+                #
+                # So the SQLite side has to follow the blob rather than assume it won:
+                # forcing `failed` after losing the race would leave the row and the
+                # answer disagreeing, which is the same lie one layer down.
+                status = "failed"
                 if result_key:
-                    await queue.write_result(result_key, {
+                    wrote = await queue.write_result(result_key, {
                         "job_id": job_id,
                         "status": "failed",
                         "worker": REAPER_CONSUMER,
@@ -77,13 +91,20 @@ async def reaper_scan(
                             f"abandoned by its worker and retried {attempts} times "
                             f"(max_attempts={max_attempts})"
                         ),
-                    })
-                store.set_status(job_id, "failed")
+                    }, only_if_absent=True)
+                    if not wrote:
+                        landed = await queue.read_result(result_key) or {}
+                        status = landed.get("status") or "done"
+                        _log.info(
+                            "%s [%s] answered by its worker while being dead-lettered — "
+                            "keeping that result (%s)", job_id, capability, status)
+                store.set_status(job_id, status)
                 store.set_attempts(job_id, attempts)
                 await queue.ack(capability, group, entry_id, tier=tier)
-                dead += 1
-                _log.warning("dead-letter %s [%s] after %d attempts",
-                             job_id, capability, attempts)
+                if status == "failed":
+                    dead += 1
+                    _log.warning("dead-letter %s [%s] after %d attempts",
+                                 job_id, capability, attempts)
                 continue
 
             # Requeue onto the SAME tier it was reclaimed from, deliberately: this keeps

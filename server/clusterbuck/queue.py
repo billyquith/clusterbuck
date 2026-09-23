@@ -39,6 +39,16 @@ def stream_key(capability: str, tier: str | None = None) -> str:
     return f"q:{capability}{_TIER_SUFFIX}" if tier == URGENT_TIER else f"q:{capability}"
 
 
+def tier_of(stream: str | None) -> str | None:
+    """Which tier a recorded stream name refers to — the inverse of `stream_key`.
+
+    A job's row records the stream its entry was actually written to, which is the only
+    trustworthy answer once the tiering rollout gate is in play: `tier_for(urgency)` says
+    where a job WOULD go today, not where this one went.
+    """
+    return URGENT_TIER if (stream or "").endswith(_TIER_SUFFIX) else None
+
+
 def tier_for(urgency: str | None) -> str | None:
     """Which tier a job belongs on, from its urgency alone.
 
@@ -119,8 +129,15 @@ class Queue:
     async def enqueue(self, job: dict[str, Any], *, tier: str | None = None) -> str:
         """Ensure the group exists, then XADD the job. Returns the stream entry id.
 
-        Trimmed with an approximate MAXLEN so the broker cannot grow without bound; the cap
-        is far above any sane in-flight depth, so it only ever discards long-acked history.
+        Trimmed with an approximate MAXLEN so the broker cannot grow without bound.
+
+        `MAXLEN` trims by LENGTH, with no regard for ack state — the cap being far above
+        any sane in-flight depth makes it usually discard long-acked history, which is not
+        the same as only. A never-delivered entry trimmed this way leaves a job that no
+        recovery path can see: its row still records an `entry_id`, so the orphan sweep
+        (which selects `entry_id IS NULL`) skips it, and it never entered a pending list,
+        so the reaper cannot either. `expires_at: null` is what reports that to a client
+        (protocols.md §1b); `CBK_MAX_QUEUE_AGE_S` is the only thing that terminalises it.
 
         `tier` defaults to None — the base stream — rather than being derived from the
         job's urgency here, because whether tiering is safe depends on the *fleet*: a
@@ -336,6 +353,38 @@ class Queue:
             except ValueError:
                 return None
         return None
+
+    # Delete a queued entry only if no consumer holds it — `withdraw`'s non-destructive
+    # sibling, and the same shape as _MOVE_IF_UNCLAIMED for the same reason.
+    #
+    # `withdraw` deletes FIRST and probes after, deliberately: for a cancellation,
+    # guaranteeing non-delivery is the whole point, so it is worth orphaning a claimed
+    # entry's pending row to get it. A *backstop* wants the opposite. It is giving up on a
+    # job it believes nobody is running, so if that belief is wrong the correct action is
+    # to do nothing at all — killing a generation already in flight throws away the GPU
+    # time and, because Redis 7 drops the pending row of a deleted entry, takes the
+    # reaper's recovery path with it.
+    #
+    # Probing first from Python cannot deliver that (a worker can claim the entry in the
+    # gap); probing first inside Lua can, because nothing else runs in between.
+    _DELETE_IF_UNCLAIMED = """
+    local held = redis.pcall('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
+    if type(held) == 'table' and held.err == nil and #held > 0 then return 'claimed' end
+    if redis.call('XDEL', KEYS[1], ARGV[2]) ~= 1 then return 'gone' end
+    return 'deleted'
+    """
+
+    async def withdraw_if_unclaimed(
+        self, stream: str, entry_id: str, *, group: str
+    ) -> str:
+        """`withdraw`, but a claimed entry is left completely alone — deletion included.
+
+        Same three verdicts: `"deleted"`, `"claimed"`, `"gone"`. Unlike `withdraw`,
+        `"claimed"` here means nothing was changed.
+        """
+        return await self._r.eval(
+            self._DELETE_IF_UNCLAIMED, 1, stream, group, entry_id,
+        )
 
     async def withdraw(self, stream: str, entry_id: str, *, group: str) -> str:
         """Try to take a queued entry back off a stream. Never lies about the outcome.

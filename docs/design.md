@@ -124,11 +124,29 @@ gets an answer instead of waiting forever. The idle threshold must exceed the lo
 plausible inference, or the reaper steals work from a healthy-but-busy node and runs it
 twice.
 
+**"Must exceed" is now checked, having been false at the defaults.** The threshold and the
+worker's own inference timeout were both ten minutes, so a generation that ran the full
+budget was reclaimed at the same instant the worker gave up on it. Three settings form a
+chain, and the coordinator refuses to start if it is broken:
+
+```
+worker CBK_INFERENCE_TIMEOUT_S  <  CBK_REAPER_MIN_IDLE_MS  <  CBK_ORPHAN_GRACE_S
+```
+
+The worker's timeout was also hardcoded, so the operator who needed to raise it had no
+way to. It is a setting now, and the coordinator's side has 3x headroom over its default.
+
 Two further backstops catch what the reaper structurally cannot see, because `XAUTOCLAIM`
 only walks entries a worker has *claimed*:
 
-- **Orphan sweep** (always on) — a job whose row was committed but whose `XADD` never
-  happened, because the coordinator died between the two. Nothing will ever deliver it.
+- **Orphan sweep** (always on) — a job for which no stream entry exists, by either
+  route: the row was committed but the `XADD` never happened (the coordinator died
+  between the two), or the entry was enqueued and then trimmed away by `MAXLEN ~` before
+  any worker claimed it. Nothing will ever deliver either one. The trimmed case used to
+  fall through every net at once, because it keeps its `entry_id` — so a sweep selecting
+  `entry_id IS NULL` skipped it — while never entering a pending list, so `XAUTOCLAIM`
+  could not see it either. The sweep now checks that the entry a row names is still
+  there, rather than trusting that a recorded id means a live entry.
 - **Maximum queue age** (`CBK_MAX_QUEUE_AGE_S`, off by default, deliberately) — a properly
   enqueued job nobody ever claimed. That one genuinely is policy: on a fleet whose machines
   sleep for days, a patient job outliving any fixed cutoff is *correct*, so the default is
@@ -804,10 +822,20 @@ Short list, because reversing one of these quietly breaks something.
   streams is one atomic step, and never deletes an entry it cannot prove is unclaimed.
   Split into delete-then-add, an interrupted move destroys the job *and* hides it from
   every recovery path at once.
-- **First writer wins on a result blob.** A job can legitimately be running twice — a
-  node that slept through its own inference still finishes when it wakes, long after the
-  reaper handed the work elsewhere. Terminal has to mean terminal, or a client is told
-  `failed` and later finds `done`.
+- **First writer wins on a result blob — including the coordinator's own writes.** A job
+  can legitimately be running twice: a node that slept through its own inference still
+  finishes when it wakes, long after the reaper handed the work elsewhere. Terminal has to
+  mean terminal, or a client is told `failed` and later finds `done`. The executors always
+  got this right; the coordinator's terminal paths did not, and a check before an
+  unconditional write is not the same thing — the reaper's dead-letter and the backstops
+  could overwrite a real completion with `failed`, which is the inversion of the rule and
+  worse than the case it was written for. Every terminal write is `SET … NX`, and the row
+  follows whichever blob won rather than assuming it was ours.
+- **A backstop that is giving up must prove nobody is running the job.** Its belief that
+  the work is dead is exactly what may be wrong, so it cannot use the cancellation
+  primitive, which deletes first and asks afterwards. Deleting a claimed entry throws away
+  a generation in flight and orphans the pending row Redis then drops, taking the reaper's
+  recovery path with it.
 - **Every wake is retried, and liveness is read from two signals.** Wake-on-LAN cannot be
   acknowledged, so a trigger that fires once is a job that waits forever; and a worker
   busy on a long inference is not polling, so consumer idle time alone reports the

@@ -70,9 +70,24 @@ def configure_logging(level: str | None = None) -> None:
 
 
 def main() -> None:
+    import sys
+
     import uvicorn
 
+    from .config import ConfigError, settings, validate
+
     configure_logging()
+
+    # Before the port is bound, not inside the app factory: a recovery-timing combination
+    # that loses or duplicates jobs should stop the deployment here, where the operator is
+    # still watching, rather than surface hours later as a job that ran twice. The app
+    # factory stays unvalidated so tests can construct deliberately odd settings.
+    try:
+        validate(settings)
+    except ConfigError as e:
+        logging.getLogger("clusterbuck").error("refusing to start: %s", e)
+        sys.exit(2)
+
     uvicorn.run(
         "clusterbuck.api:app",
         host=os.environ.get("CBK_HOST", "127.0.0.1"),

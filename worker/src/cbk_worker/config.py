@@ -47,6 +47,14 @@ class WorkerConfig:
     poll_s: float = 1.0
     result_ttl_s: int = 86400
     heartbeat_s: float = 10.0
+    # How long to wait on the model server for one completion.
+    #
+    # MUST stay below the coordinator's CBK_REAPER_MIN_IDLE_MS. A worker mid-generation is
+    # not reading from Redis, so the reaper judges it by stream idle time alone: if the two
+    # are equal, every generation that reaches the limit is reclaimed and re-run at the same
+    # moment this worker gives up on it — double the compute for one answer. The coordinator
+    # documents the other half of the pair at its own definition.
+    inference_timeout_s: float = 600.0
     # Which model-manager adapter handles the non-OpenAI bits (residency, digests,
     # installs, unloading): auto | ollama | lmstudio | none.
     #
@@ -74,6 +82,7 @@ class WorkerConfig:
             poll_s=_int_env("CBK_POLL_MS", 1000) / 1000.0,
             result_ttl_s=_int_env("CBK_RESULT_TTL_S", 86400),
             heartbeat_s=_int_env("CBK_HEARTBEAT_MS", 10000) / 1000.0,
+            inference_timeout_s=_float_env("CBK_INFERENCE_TIMEOUT_S", 600.0),
             model_manager=os.environ.get("CBK_MODEL_MANAGER") or "auto",
             ladder_hysteresis_s=_float_env("CBK_LADDER_HYSTERESIS_S", 120.0),
         )

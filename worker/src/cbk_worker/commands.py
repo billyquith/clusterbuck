@@ -292,7 +292,7 @@ async def run_work(args: argparse.Namespace) -> int:
 
     redis = broker.connect(cfg.redis_url)
     # Inference can be slow; the pull path slower still. Separate clients, separate patience.
-    async with httpx.AsyncClient(timeout=600.0) as infer_http, \
+    async with httpx.AsyncClient(timeout=cfg.inference_timeout_s) as infer_http, \
                httpx.AsyncClient(timeout=30.0) as beat_http, \
                httpx.AsyncClient(timeout=3600.0, follow_redirects=True) as mgr_http:
         loop = WorkLoop(redis, ModelClient(infer_http, cfg), cfg, log=Out.dim)

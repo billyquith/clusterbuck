@@ -370,3 +370,26 @@ def test_a_client_cannot_pin_its_way_past_the_ability_floor(client, redis_url):
     assert job["params"]["temperature"] == 0.1, "other params must still pass through"
 
 
+
+
+def test_queue_position_for_an_urgent_job_counts_its_own_tier(
+    client, redis_url, monkeypatch
+):
+    """An urgent job's position must be counted on the stream its entry is actually on.
+
+    `_queue_position` called `undelivered` without a `tier`, which defaults to the BASE
+    stream — so for a job whose entry had been minted on `q:<cap>:urgent` it compared an
+    urgent-stream id against the base stream's last-delivered-id and counted unrelated
+    base-tier entries as being ahead. Stream ids are millisecond timestamps, so the
+    comparison never raised; it just silently reported a backlog to the one job that had
+    jumped that queue. The row records the stream, so the tier was knowable all along.
+    """
+    monkeypatch.setattr("clusterbuck.api.tiering_ready", lambda *a, **k: True)
+
+    for _ in range(3):
+        _submit(client)  # base tier: patient work piling up
+    urgent = _submit(client, urgency="urgent").json()["id"]
+
+    row = client.get(f"/jobs/{urgent}").json()
+    assert row["queue_position"] == 0, (
+        "nothing is ahead of it on the urgent stream; the base-tier backlog is not")

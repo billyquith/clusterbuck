@@ -27,6 +27,21 @@ def _thresholds(*, max_queue_age_s: int | None = None) -> dict:
     return {"orphan_grace_s": 0, "max_queue_age_s": max_queue_age_s, "group": GROUP}
 
 
+async def _really_enqueue(store, queue, job_id: str) -> str:
+    """Put the job on the stream for real and record where it landed.
+
+    Tests used to fake this with `record_delivery(..., entry_id="1-1")`, which asserts a
+    delivery that does not exist. That was invisible while the orphan sweep selected on
+    `entry_id IS NULL` alone — a fabricated id was enough to be skipped. Now that the
+    sweep verifies the entry is actually on the stream, a fake id reads (correctly) as a
+    job whose entry has vanished, so these fixtures have to be real.
+    """
+    entry_id = await queue.enqueue({"id": job_id, "capability": CAP,
+                                    "result_key": f"res_{job_id}"})
+    store.record_delivery(job_id, stream=stream_key(CAP), entry_id=entry_id)
+    return entry_id
+
+
 @pytest.fixture()
 def store(tmp_path) -> Store:
     return Store(str(tmp_path / "backstop.db"))
@@ -79,11 +94,11 @@ async def test_a_recent_orphan_is_left_alone(store, queue):
 
 
 async def test_a_properly_enqueued_job_is_not_an_orphan(store, queue):
-    """`entry_id IS NULL` is the whole signal. A job with a recorded delivery is
-    somebody's to run, however old it is — that is the opt-in backstop's business."""
+    """A job whose entry is really on the stream is somebody's to run, however old it is
+    — that is the opt-in backstop's business, not the orphan sweep's."""
     store.insert(id="job_live", result_key="res_live", capability=CAP,
                  created_at=LONG_AGO)
-    store.record_delivery("job_live", stream=stream_key(CAP), entry_id="1-1")
+    await _really_enqueue(store, queue, "job_live")
 
     assert (await backstop_scan(store, queue, None, **_thresholds()))["orphaned"] == 0
     assert store.get("job_live").status == "queued"
@@ -110,7 +125,7 @@ async def test_max_queue_age_is_off_by_default(store, queue):
     assert live.max_queue_age_s is None, "the shipped default must stay off"
     store.insert(id="job_patient", result_key="res_patient", capability=CAP,
                  created_at=LONG_AGO)
-    store.record_delivery("job_patient", stream=stream_key(CAP), entry_id="1-1")
+    await _really_enqueue(store, queue, "job_patient")
 
     assert (await backstop_scan(store, queue, None, **_thresholds()))["expired"] == 0
     assert store.get("job_patient").status == "queued"
@@ -205,3 +220,81 @@ async def test_a_job_whose_entry_was_trimmed_away_is_still_failed(store, queue):
     assert store.get("job_lost").status == "failed"
     assert "no queue entry exists" in (await queue.read_result("res_lost"))["error"]
 
+
+
+async def test_a_trimmed_unserved_entry_is_no_longer_invisible(store, queue):
+    """The hole this closes: `MAXLEN ~` trims by LENGTH, not by ack state, so a
+    never-delivered entry can be discarded by later traffic on the same capability.
+
+    Such a job used to fall through every net at once. It keeps its `entry_id`, so the
+    orphan sweep's old `entry_id IS NULL` filter skipped it; it never entered a pending
+    list, so `XAUTOCLAIM` could not see it; and no result blob was ever written. It
+    polled `queued` forever, and the only thing that would ever answer it was the opt-in
+    `CBK_MAX_QUEUE_AGE_S`.
+    """
+    entry = await _really_enqueue(store, queue, "job_trimmed")
+    store.insert(id="job_trimmed", result_key="res_job_trimmed", capability=CAP,
+                 created_at=LONG_AGO)
+    store.record_delivery("job_trimmed", stream=stream_key(CAP), entry_id=entry)
+    # Exactly what a trim does, without having to write 10k entries to provoke one.
+    await queue.client.xdel(stream_key(CAP), entry)
+
+    counts = await backstop_scan(store, queue, None, **_thresholds())
+
+    assert counts["orphaned"] == 1
+    assert store.get("job_trimmed").status == "failed"
+    assert "trimmed away unserved" in (await queue.read_result("res_job_trimmed"))["error"]
+
+
+async def test_the_backstop_will_not_terminalise_a_job_a_worker_is_holding(store, queue):
+    """`withdraw` XDELs before it probes, so running it on a CLAIMED entry throws away a
+    generation in flight AND orphans the pending row that Redis then drops — taking the
+    reaper's recovery path with it. The verdict has to be honoured, not discarded.
+
+    Reachable because a claim is only visible in SQLite once `observe_tick` has copied it
+    out of the pending list, so a job claimed between two ticks still reads `queued`.
+    """
+    await queue.ensure_group(CAP)
+    entry = await queue.enqueue({
+        "id": "job_held", "created_at": LONG_AGO, "capability": CAP, "prompt": "x",
+        "params": {}, "urgency": "waitable", "privacy": "local_only",
+        "result_key": "res_held", "attempts": 0, "max_attempts": 3,
+    })
+    store.insert(id="job_held", result_key="res_held", capability=CAP,
+                 created_at=LONG_AGO)
+    store.record_delivery("job_held", stream=stream_key(CAP), entry_id=entry)
+    # A worker claims it; the row still says `queued` because no tick has observed it.
+    assert await queue.read_one(CAP, GROUP, "busy-worker") is not None
+
+    counts = await backstop_scan(store, queue, None,
+                                 **_thresholds(max_queue_age_s=60))
+
+    assert counts["expired"] == 0
+    assert store.get("job_held").status == "queued", "left alone, not terminalised"
+    assert await queue.read_result("res_held") is None, "no answer invented"
+    assert await queue.client.xlen(stream_key(CAP)) == 1, "the entry survives"
+
+
+async def test_a_completion_that_lands_first_is_not_overwritten(store, queue):
+    """First writer wins on the coordinator's paths too, not just the executors'.
+
+    The backstop used to write unconditionally, so a result that arrived between the scan
+    and this write was replaced by `expired` — the inversion of design.md's "terminal has
+    to mean terminal", and worse than the case that rule was written for: the client is
+    told a job failed that actually succeeded.
+    """
+    entry = await _really_enqueue(store, queue, "job_raced")
+    store.insert(id="job_raced", result_key="res_job_raced", capability=CAP,
+                 created_at=LONG_AGO)
+    store.record_delivery("job_raced", stream=stream_key(CAP), entry_id=entry)
+    await queue.write_result("res_job_raced", {
+        "job_id": "job_raced", "status": "done", "worker": "node-a",
+        "completed_at": LONG_AGO, "completion": {"choices": []},
+    })
+
+    await backstop_scan(store, queue, None, **_thresholds(max_queue_age_s=60))
+
+    landed = await queue.read_result("res_job_raced")
+    assert landed["status"] == "done", "the real completion stands"
+    assert landed["worker"] == "node-a"
+    assert store.get("job_raced").status == "done", "the row follows the blob"
