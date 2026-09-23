@@ -21,7 +21,8 @@ from .naming import artifact_aliases
 #   stream    — this path reads one JSON body; a streamed response fails to parse, so the
 #               job returns `failed` for a param the client meant as a preference.
 #   messages  — assembled above from the job's own messages/prompt.
-#   response_format — a hint only (protocols.md §3), deliberately not passed on.
+#   response_format — forwarded ONLY when the job carries `requires.json_schema`; see
+#               below. Dropped otherwise, as it always was.
 #   api_key, api_base — this node's OWN model server and its key (if any) are node-local
 #               config (CBK_MODEL_SERVER_URL / CBK_MODEL_SERVER_API_KEY), never a per-job
 #               value. Letting a job set either would let any client redirect this worker's
@@ -48,6 +49,28 @@ class ModelClient:
             "messages": messages,
             "stream": False,
         }
+
+        # Structured output, once routing has earned the right to ask for it.
+        #
+        # `response_format` was dropped unconditionally, and the reason was sound at the
+        # time: local servers do not reliably honour it, and a model that ignores the flag
+        # returns prose to a caller who asked for JSON — a silent wrong answer, which is
+        # worse than an explicit refusal. But dropping it left the `8b-extract` tier with
+        # no way to ask for the one thing it exists to produce, and the two planes
+        # disagreeing: `sync.py` forwarded the field while this path discarded it, so the
+        # same job against the same model behaved differently depending on which door it
+        # came in.
+        #
+        # `requires.json_schema` resolves that. It is a HARD requirement the coordinator
+        # filters on before comparing ability (ADR 37), so by the time a job reaches here
+        # carrying it, the artifact pinned on it is declared capable of honouring the
+        # flag. The original objection — asking a model that cannot do it — is exactly
+        # what that filter removes. Without the requirement the field stays a dropped
+        # hint, because nothing has checked.
+        if job.wants_structured_output:
+            request["response_format"] = (
+                (job.params or {}).get("response_format") or {"type": "json_object"}
+            )
 
         # Inference params pass straight through (temperature, max_tokens, …).
         #

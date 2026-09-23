@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clusterbuck.dev/contract/job.schema.json",
   "title": "Job",
-  "description": "An enqueued clusterbuck job record \u2014 the payload the coordinator writes onto a capability stream and a worker consumes. This is the cross-language seam (protocols.md \u00a72); addressing has already been resolved to a concrete `capability` before enqueue.",
+  "description": "An enqueued clusterbuck job record — the payload the coordinator writes onto a capability stream and a worker consumes. This is the cross-language seam (protocols.md §2); addressing has already been resolved to a concrete `capability` before enqueue.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -32,7 +32,7 @@
     "id": {
       "type": "string",
       "minLength": 1,
-      "description": "Opaque job id, e.g. \"job_01H\u2026\"."
+      "description": "Opaque job id, e.g. \"job_01H…\"."
     },
     "created_at": {
       "type": "string",
@@ -93,7 +93,7 @@
         },
         "response_format": {
           "type": "string",
-          "description": "Hint only; local model servers do not reliably honour structured-output flags (protocols.md \u00a73). JSON shape is requested in the prompt and validated by the client."
+          "description": "Hint only; local model servers do not reliably honour structured-output flags (protocols.md §3). JSON shape is requested in the prompt and validated by the client."
         }
       }
     },
@@ -123,7 +123,7 @@
     "deadline": {
       "type": "string",
       "format": "date-time",
-      "description": "Optional expiry. Enforced by a coordinator sweep that marks the job `expired`, NOT by removing the entry from the stream \u2014 so a job already claimed by a worker runs to completion, and a worker does not check this field. Absent means no expiry: a waitable job with neither this nor `escalate_after_min` has no terminating mechanism at all (protocols.md \u00a71b)."
+      "description": "Optional expiry. Enforced by a coordinator sweep that marks the job `expired`, NOT by removing the entry from the stream — so a job already claimed by a worker runs to completion, and a worker does not check this field. Absent means no expiry: a waitable job with neither this nor `escalate_after_min` has no terminating mechanism at all (protocols.md §1b)."
     },
     "result_key": {
       "type": "string",
@@ -143,7 +143,7 @@
     "submitter": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Optional caller provenance: which client submitted this job, from where, and under which logical request. IDENTIFICATION ONLY \u2014 the coordinator never dedupes, collapses, reorders or rejects on these fields. Absent on jobs from clients that predate it, so every consumer must treat it as optional.",
+      "description": "Optional caller provenance: which client submitted this job, from where, and under which logical request. IDENTIFICATION ONLY — the coordinator never dedupes, collapses, reorders or rejects on these fields. Absent on jobs from clients that predate it, so every consumer must treat it as optional.",
       "properties": {
         "app": {
           "type": "string",
@@ -153,17 +153,41 @@
         "instance": {
           "type": "string",
           "minLength": 1,
-          "description": "Hostname of the machine the call came from \u2014 distinguishes two copies of the same app running on different nodes."
+          "description": "Hostname of the machine the call came from — distinguishes two copies of the same app running on different nodes."
         },
         "request_id": {
           "type": "string",
           "minLength": 1,
-          "description": "Client-supplied UID identifying one LOGICAL call. This is the duplicate-vs-repeat discriminator: two jobs sharing a request_id are the same call retried (a duplicate \u2014 a client retry loop), whereas two jobs with identical content but different request_ids are genuinely repeated work. Never enforced as unique; a client that reuses one is describing a retry, not violating a constraint."
+          "description": "Client-supplied UID identifying one LOGICAL call. This is the duplicate-vs-repeat discriminator: two jobs sharing a request_id are the same call retried (a duplicate — a client retry loop), whereas two jobs with identical content but different request_ids are genuinely repeated work. Never enforced as unique; a client that reuses one is describing a retry, not violating a constraint."
         },
         "submitted_at": {
           "type": "string",
           "format": "date-time",
-          "description": "The client's own clock at submission. ADVISORY ONLY \u2014 useful as a clock-skew / queue-delay signal. `created_at` (server-stamped at receipt) remains authoritative for every ordering, escalation and metering decision, and nothing in the coordinator may read this instead."
+          "description": "The client's own clock at submission. ADVISORY ONLY — useful as a clock-skew / queue-delay signal. `created_at` (server-stamped at receipt) remains authoritative for every ordering, escalation and metering decision, and nothing in the coordinator may read this instead."
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "description": "Hard capability requirements (ADR 37): what the model must be able to DO, as opposed to how well it does it. Applied by the coordinator as a filter BEFORE ability is compared, because these are yes/no facts no 1-10 score can express — a 4k-context model and a 128k one can both honestly be 'a 6 at summarize', and routing a 60k-token document to the first silently truncates it. An artifact that does not DECLARE a required feature is excluded by name: undeclared reads as no, because an unchecked feature fails at the model server where it looks like a model bug rather than a routing one, or worse succeeds while quietly ignoring the request. Carried on the wire because the worker acts on `json_schema`.",
+      "additionalProperties": false,
+      "properties": {
+        "context_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Minimum context window, in tokens. Compared against the model's published window, not whatever a given server was started with."
+        },
+        "tools": {
+          "type": "boolean",
+          "description": "Requires tool/function calling."
+        },
+        "json_schema": {
+          "type": "boolean",
+          "description": "Requires schema-constrained output. This is also what licenses the worker to forward `params.response_format`: without the requirement, routing has not checked that the model can honour it, so it stays a dropped hint."
+        },
+        "vision": {
+          "type": "boolean",
+          "description": "Requires image input."
         }
       }
     }

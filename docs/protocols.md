@@ -31,6 +31,12 @@ POST /jobs
  "min_ability": 6, // …and the coordinator resolves an artifact
  // (see design.md for the 1-10 scale)
  "capability": "32b-reason", // OR name a supply-side tier explicitly (advanced)
+ "requires": {                      // optional hard requirements (ADR 37), applied as a
+   "context_tokens": 60000,         //   FILTER BEFORE ability is compared — see below
+   "tools": true,
+   "json_schema": true,
+   "vision": false
+ },
  "messages": [ {role, content}, … ],// OpenAI-style; or "prompt"
  "params": { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
  "urgency": "waitable", // urgent | necessary | waitable — a trajectory:
@@ -67,6 +73,54 @@ and "your fleet is not fast enough" call for completely different fixes, and a c
 only the first would go hunting for a better model it already has. A capability whose nodes
 have measured *nothing* is never excluded — unknown is not slow, and a fresh fleet has
 finished no jobs.
+
+**What a model CAN DO is a filter, not a score (`requires`).** Ability is a graded 1–10
+judgement of how *well* a model does a task class. These are not that shape: a context
+window is a number with a hard edge, tool calling is a boolean, and a 4k-context model and
+a 128k one can both honestly be "a 6 at summarize" — so the matrix cannot tell them apart,
+and a 60k-token document routed to the first is silently truncated. So `requires` is
+applied as a **hard filter before ability is compared at all**; otherwise a
+capable-but-unsuitable artifact wins on score and the requirement is decided by an
+unrelated number.
+
+It applies to **both** addressing forms. Naming a `capability` explicitly is the advanced
+form, not a bypass — the same reason privacy and budget are enforced there.
+
+**Undeclared reads as "no"**, and that is deliberately the opposite of the speed rule. An
+unmeasured *speed* is genuinely unknown and self-corrects, because the node checks again
+and refuses if it turns out too slow. An undeclared *feature* has no such backstop:
+serving a tool-calling job on a model nobody has checked either fails at the model server,
+where it reads as a model bug rather than a routing one, or succeeds while quietly
+ignoring the tools. A local artifact declares these in the **model catalog**; a provider
+account, which has no host node and never enters that catalog, declares them on its
+`fleet.yaml` capability.
+
+The refusal is a `422` **naming the artifact and the missing feature**, and is reported
+separately from an ability miss because the two call for different fixes: a missing
+declaration is usually one `POST /catalog` away, since the model can very often do the
+thing and simply has not been recorded as able to. A missing *ability* needs a better
+model.
+
+`context_tokens` is **declared by the client, not inferred from the prompt.** The
+coordinator does not estimate how many tokens a submission will occupy: a character-based
+guess would start refusing valid work on a heuristic, and a real tokenizer is per-model
+and not a dependency this project carries. A client that knows its document is large says
+so. Auto-deriving a floor is a reasonable future addition; guessing one silently is not.
+
+`requires: {"vision": false}` is not a requirement — it means "I do not need vision", and
+must not exclude a model that happens to have it. Only truthy values filter.
+
+**`response_format` is forwarded only when the job requires `json_schema`.** The field was
+dropped unconditionally, for a sound reason: local servers do not reliably honour it, and
+a model that ignores the flag hands prose to a caller who asked for JSON — a silent wrong
+answer, worse than an explicit refusal. But that left the extraction tiers unable to ask
+for the one thing they exist to produce, and the two planes disagreeing, since the sync
+plane forwarded it. `requires.json_schema` settles it: it is a hard requirement routing
+filters on, so by the time the job reaches a worker the pinned artifact is declared
+capable of honouring the flag — which is exactly the check whose absence justified
+dropping it. Without the requirement it remains a dropped hint. Set both: the requirement
+to gate routing, and `params.response_format` to say what shape you want (default
+`{"type": "json_object"}`).
 
 **The resolved artifact is pinned on the job** (`params.model`). A capability is only a queue
 name: the worker draining it answers with its own `CBK_MODEL`, for every capability it

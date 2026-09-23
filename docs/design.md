@@ -96,8 +96,17 @@ until some 70B-capable worker appears, with no dispatcher tracking who is alive.
 removing a machine changes only which queues have consumers, never a client.
 
 **Or a need** — `task_class` plus `min_ability` ("summarise this, with a model that scores
-at least 6"). The coordinator resolves that to a concrete artifact through the ability
-matrix (§6), cheapest first, and pins the artifact it chose onto the job. The pin matters:
+at least 6"), optionally with **`requires`**: the hard capabilities the job cannot do
+without — context window, tool calling, schema-constrained output, vision. Those are a
+**filter applied before ability is compared**, not part of the score, because they are not
+that shape: a 4k-context model and a 128k one can both honestly be "a 6 at summarize", so
+the matrix cannot tell them apart and a long document routed to the first is silently
+truncated. Filter on what a model *can* do, then compare how *well* it does it. An
+artifact that does not *declare* a required feature is excluded by name — undeclared reads
+as "no", since an unchecked feature fails at the model server where it looks like a model
+bug, or succeeds while quietly ignoring the request. The coordinator resolves the rest
+through the ability matrix (§6), cheapest first, and pins the artifact it chose onto the
+job. The pin matters:
 without it, `min_ability` was checked against a name in `fleet.yaml` that nothing
 reconciled with what the node actually loaded.
 
@@ -877,6 +886,13 @@ Short list, because reversing one of these quietly breaks something.
   privacy guarantee with an exception is not one.
 - **Ability is a matrix, per artifact and task class.** A single number routes jobs
   wrongly, because quality is jagged.
+- **What a model CAN DO is a filter, not a score.** Context window, tools, schema output
+  and vision are yes/no facts no 1–10 judgement can express, so they gate candidates
+  *before* ability is compared — the other order lets an unrelated number decide a hard
+  requirement. Undeclared reads as "no", which is the opposite of the speed rule and
+  deliberately so: an unmeasured speed self-corrects at the node, an unchecked feature
+  has no backstop. This was specified, migrated and rendered for a long time while
+  `routing.py` referenced none of it; the storage half of a feature is not the feature.
 - **Measure, never assume.** A fresh install or a changed digest inherits no score. Seeds
   are placeholders and are labelled as such.
 - **A human approves weights.** Multi-GB pulls and disk reclamation are not unattended

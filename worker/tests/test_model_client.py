@@ -82,16 +82,49 @@ async def test_config_model_is_used_when_the_job_pins_nothing():
     assert seen[0]["model"] == "llama3.2:3b"
 
 
-async def test_response_format_is_dropped_as_a_hint_only():
+async def test_response_format_is_dropped_when_the_job_only_hints_at_it():
+    """Unchanged for a job that merely sets the param: nothing has checked that the
+    pinned artifact can honour it, and a model that ignores the flag returns prose to a
+    caller who asked for JSON — a silent wrong answer, worse than an explicit refusal."""
     transport, seen = _capture()
     async with httpx.AsyncClient(transport=transport) as http:
         await ModelClient(http, WorkerConfig()).complete(
             _job(prompt="x", params={"response_format": {"type": "json_object"},
                                      "max_tokens": 64}))
-    # Not every model server understands it, and passing it through made compliant servers
-    # 400 (protocols.md §3). max_tokens still goes.
     assert "response_format" not in seen[0]
     assert seen[0]["max_tokens"] == 64
+
+
+async def test_response_format_is_forwarded_when_the_job_REQUIRES_json_schema():
+    """The other half, and what makes structured output work at all.
+
+    Dropping the field unconditionally left `8b-extract` — a tier that exists to produce
+    structured extraction — with no way to ask for it, and the two planes disagreeing:
+    `sync.py` forwarded `response_format` while this path discarded it, so the same job
+    against the same model behaved differently depending on which door it came in.
+
+    `requires.json_schema` is a HARD requirement the coordinator filters on before
+    comparing ability (ADR 37), so a job arriving here with it set has been routed to an
+    artifact declared capable of honouring the flag. That filter is precisely the check
+    whose absence justified dropping the field.
+    """
+    transport, seen = _capture()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ModelClient(http, WorkerConfig()).complete(_job(
+            prompt="x",
+            requires={"json_schema": True},
+            params={"response_format": {"type": "json_object"}},
+        ))
+    assert seen[0]["response_format"] == {"type": "json_object"}
+
+
+async def test_requiring_json_schema_without_naming_a_shape_asks_for_json_mode():
+    """A client can state the need and leave the shape to us."""
+    transport, seen = _capture()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ModelClient(http, WorkerConfig()).complete(
+            _job(prompt="x", requires={"json_schema": True}))
+    assert seen[0]["response_format"] == {"type": "json_object"}
 
 
 async def test_http_error_propagates_so_the_loop_can_record_a_failed_result():

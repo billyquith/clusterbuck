@@ -27,5 +27,9 @@
     "instance": "workstation-2",
     "request_id": "req_4f9c1e70a2",
     "submitted_at": "2026-07-24T18:29:59Z"
+  },
+  "requires": {
+    "context_tokens": 32768,
+    "json_schema": true
   }
 }

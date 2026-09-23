@@ -8,7 +8,8 @@ import pytest
 
 from clusterbuck.evaluation import SCALE_VERSION, seed_ability
 from clusterbuck.fleet import CapabilitySpec, Fleet, NodeSpec
-from clusterbuck.routing import NoCapableArtifact, resolve_capability
+from clusterbuck.routing import (MissingCapability, NoCapableArtifact,
+                                 resolve, resolve_capability)
 from clusterbuck.store import Store
 
 
@@ -297,3 +298,109 @@ def test_the_ceiling_itself_is_reachable(seeded):
     cap = resolve_capability(_fleet(), seeded, capability=None,
                              task_class="summarize", min_ability=int(TIER1_MAX_ABILITY))
     assert cap, "the ceiling value must be servable, not just legal"
+
+
+# --- ADR 37: what a model CAN DO is a filter, not a score ---------------------------
+#
+# The storage half of this shipped long ago — catalog columns, a dedicated migration
+# (0008), fleet.yaml fields, a dashboard column — and `catalog.py` asserted the fields
+# "ARE load-bearing at routing time". `routing.py` had never referenced one of them.
+
+
+def _catalogued(store, artifact, **features):
+    """Record what an artifact is declared able to do."""
+    store.upsert_catalog(artifact=artifact, family="f", params_b=8.0, quant="Q4_K_M",
+                         size_gb=5.0, min_ram_gb=12.0, source="ollama",
+                         registry_ref=artifact, expected_ability=None,
+                         added_at="t", **features)
+
+
+def test_an_artifact_that_does_not_declare_a_required_feature_is_excluded(seeded):
+    """The core of it. Both models clear the ability bar; only one declares tools, and
+    the requirement is applied BEFORE ability is compared — otherwise the better
+    summariser wins on score and the requirement is decided by an unrelated number."""
+    _catalogued(seeded, "llama3.2:3b", supports_tools=True)
+    _catalogued(seeded, "qwen2.5:32b", supports_tools=False)
+
+    sel = resolve(_fleet(), seeded, capability=None, task_class="extract", min_ability=3,
+                  requires={"tools": True})
+
+    assert sel.artifact == "llama3.2:3b"
+
+
+def test_undeclared_reads_as_no(seeded):
+    """Deliberately the opposite of the min_tps rule. An unmeasured SPEED is genuinely
+    unknown and self-corrects — the node checks again and refuses. An undeclared FEATURE
+    has no backstop: it fails at the model server, where it reads as a model bug rather
+    than a routing one, or succeeds while quietly ignoring the request."""
+    _catalogued(seeded, "llama3.2:3b")  # in the catalog, declares nothing
+
+    with pytest.raises(MissingCapability) as e:
+        resolve(_fleet(), seeded, capability=None, task_class="extract", min_ability=3,
+                requires={"tools": True})
+    assert "tools" in str(e.value)
+
+
+def test_a_context_window_is_compared_not_just_checked_for_presence(seeded):
+    """The case the ability matrix structurally cannot see: a 4k model and a 128k one can
+    both honestly be "a 6 at summarize", and routing a 60k document to the first
+    truncates it silently."""
+    _catalogued(seeded, "llama3.2:3b", context_tokens=8192)
+    _catalogued(seeded, "qwen2.5:32b", context_tokens=131072)
+
+    sel = resolve(_fleet(), seeded, capability=None, task_class="summarize",
+                  min_ability=3, requires={"context_tokens": 60000})
+    assert sel.artifact == "qwen2.5:32b"
+
+    with pytest.raises(MissingCapability):
+        resolve(_fleet(), seeded, capability=None, task_class="summarize",
+                min_ability=3, requires={"context_tokens": 200_000})
+
+
+def test_the_refusal_names_the_artifact_and_the_missing_feature(seeded):
+    """A missing DECLARATION and a missing ABILITY need completely different fixes: the
+    first is usually one POST /catalog away because the model can in fact do the thing,
+    the second needs a better model. Telling the operator "no artifact reaches ability 5"
+    when the real problem is an unrecorded feature sends them hunting for the wrong
+    thing."""
+    _catalogued(seeded, "llama3.2:3b", context_tokens=8192)
+
+    with pytest.raises(MissingCapability) as e:
+        resolve(_fleet(), seeded, capability=None, task_class="extract", min_ability=3,
+                requires={"context_tokens": 100_000})
+    msg = str(e.value)
+    assert "llama3.2:3b" in msg and "8192" in msg and "100000" in msg
+
+
+def test_explicit_capability_addressing_is_filtered_too(seeded):
+    """The advanced form is not a bypass — the same reason privacy and budget are checked
+    there. A caller naming a tier is told it cannot do what they asked for, rather than
+    finding out from a truncated answer."""
+    _catalogued(seeded, "qwen2.5:32b", supports_vision=False)
+
+    with pytest.raises(MissingCapability) as e:
+        resolve(_fleet(), seeded, capability="32b-reason", task_class=None,
+                min_ability=None, requires={"vision": True})
+    assert "32b-reason" in str(e.value) and "vision" in str(e.value)
+
+
+def test_a_job_requiring_nothing_is_untouched(seeded):
+    """The overwhelmingly common case, and it must not acquire ceremony — nor start
+    depending on the catalog being populated."""
+    assert resolve(_fleet(), seeded, capability=None, task_class="extract",
+                   min_ability=3).artifact
+    assert resolve(_fleet(), seeded, capability=None, task_class="extract",
+                   min_ability=3, requires={}).artifact
+
+
+def test_false_is_not_a_requirement(seeded):
+    """`vision: false` means "I don't need vision", not "exclude models that have it".
+    Only truthy values are requirements — `Requires.asked_for` drops the rest."""
+    from clusterbuck.models import Requires
+
+    assert Requires(vision=False, tools=True).asked_for() == {"tools": True}
+    assert Requires().asked_for() == {}
+
+    _catalogued(seeded, "llama3.2:3b", supports_vision=True)
+    assert resolve(_fleet(), seeded, capability=None, task_class="extract",
+                   min_ability=3, requires={"vision": False}).artifact

@@ -413,3 +413,27 @@ def test_too_many_messages_is_refused(client):
 
     r = _submit(client, messages=[{"role": "user", "content": "hi"}] * (MAX_MESSAGES + 1))
     assert r.status_code == 422
+
+
+def test_a_job_requiring_an_undeclared_capability_is_refused_at_submit(client):
+    """ADR 37 end to end. The fixture fleet's artifacts have no catalog entries, so
+    nothing DECLARES vision — and undeclared reads as no. Refusing here beats queuing a
+    job that will reach a model which cannot see the image, where the failure looks like
+    a model bug rather than a routing one."""
+    r = _submit(client, requires={"vision": True})
+    assert r.status_code == 422
+    assert "vision" in r.json()["detail"]
+
+
+def test_requires_rides_the_wire_so_the_worker_can_act_on_it(client, redis_url):
+    """`json_schema` is the one requirement the worker reads: it licenses forwarding
+    `params.response_format`, which is dropped otherwise. That only works if the field
+    survives onto the stream, so this asserts the enqueued payload, not just the 202."""
+    r = _submit(client, capability="8b-extract", requires={"json_schema": True})
+    assert r.status_code == 202, r.text
+
+    conn = redis.from_url(redis_url, decode_responses=True)
+    jobs = [json.loads(f["job"])
+            for _id, f in conn.xrange(stream_key("8b-extract"))]
+    mine = [j for j in jobs if j["id"] == r.json()["id"]]
+    assert mine and mine[0]["requires"] == {"json_schema": True}

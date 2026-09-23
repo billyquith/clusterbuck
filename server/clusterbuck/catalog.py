@@ -56,7 +56,10 @@ SEED_CATALOG = [
     #
     # The capability fields, by contrast, ARE load-bearing at routing time (ADR 37): they
     # are hard yes/no facts no ability score can express, and a job requiring one is
-    # refused rather than served by an artifact that does not declare it. `context_tokens`
+    # refused rather than served by an artifact that does not declare it. That sentence
+    # was aspirational for a long time — the columns, the migration and the dashboard
+    # shipped while `routing.py` referenced none of them — so if you are changing these,
+    # `routing._FEATURE_ATTR` is the consumer to keep them honest with. `context_tokens`
     # is the model's published window, not whatever a given server happens to be
     # configured with — a runtime that was started with a smaller one will error, which is
     # visible, whereas routing a long document to a model that cannot hold it is not.

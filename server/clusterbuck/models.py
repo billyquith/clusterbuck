@@ -85,6 +85,39 @@ class Submitter(BaseModel):
     submitted_at: str | None = None
 
 
+class Requires(BaseModel):
+    """Hard capability requirements (ADR 37) — what a model must be able to DO.
+
+    Deliberately not part of the ability score. Ability is a graded 1-10 judgement of how
+    *well* a model does a task class; these are not that shape. A context window is a
+    number with a hard edge, tool calling is a boolean, and a 4k-context model and a 128k
+    one can both honestly be "a 6 at summarize" — so the matrix cannot see the difference
+    between them, and routing a 60k-token document to the first silently truncates it.
+    Filter on what a model *can* do, then compare how *well* it does it.
+
+    Every field optional: a job that requires nothing is the overwhelmingly common case
+    and must stay free of ceremony.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    context_tokens: int | None = Field(default=None, ge=1)
+    tools: bool | None = None
+    json_schema: bool | None = None
+    vision: bool | None = None
+
+    def asked_for(self) -> dict[str, object]:
+        """Only the requirements actually stated. `False`/`None` are not requirements —
+        "I do not need vision" must not exclude a model that happens to have it."""
+        out: dict[str, object] = {}
+        if self.context_tokens:
+            out["context_tokens"] = self.context_tokens
+        for name in ("tools", "json_schema", "vision"):
+            if getattr(self, name):
+                out[name] = True
+        return out
+
+
 class JobSubmit(BaseModel):
     """Client request body for POST /jobs (protocols.md §1b).
 
@@ -98,6 +131,8 @@ class JobSubmit(BaseModel):
     task_class: str | None = None
     min_ability: int | None = Field(default=None, ge=1, le=10)
     capability: str | None = None
+    # Applied BEFORE ability is compared (ADR 37), for both addressing forms.
+    requires: Requires | None = None
 
     messages: list[Message] | None = Field(default=None, max_length=MAX_MESSAGES)
     prompt: str | None = Field(default=None, max_length=MAX_CONTENT_CHARS)
@@ -312,6 +347,10 @@ class JobRecord(BaseModel):
     escalate_after_min: int | None = None
     privacy: Privacy
     deadline: str | None = None
+    # Rides the wire because the worker acts on `json_schema`: it is what licenses
+    # forwarding `params.response_format` to the model server, now that routing has
+    # actually checked the chosen artifact can honour it (ADR 37).
+    requires: Requires | None = None
     # Carried to the worker so it can refuse rather than under-serve (contract §job).
     result_key: str
     attempts: int = 0

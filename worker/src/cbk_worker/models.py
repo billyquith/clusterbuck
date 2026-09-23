@@ -39,6 +39,15 @@ class Job:
     deadline: str | None = None
     attempts: int = 0
     max_attempts: int = 0
+    # ADR 37's hard requirements. The coordinator has already filtered on these — it owns
+    # the catalog and this worker does not — so the worker does not re-check them. It
+    # reads ONE of them: `json_schema` is what licenses forwarding `params.response_format`
+    # to the model server (see model_client.py).
+    requires: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def wants_structured_output(self) -> bool:
+        return bool(self.requires.get("json_schema"))
 
     @staticmethod
     def from_wire(d: dict[str, Any]) -> Job:
@@ -50,6 +59,7 @@ class Job:
             messages=d.get("messages"),
             prompt=d.get("prompt"),
             params=d.get("params") or {},
+            requires=d.get("requires") or {},
             urgency=d.get("urgency", ""),
             privacy=d.get("privacy", ""),
             escalate_after_min=d.get("escalate_after_min"),

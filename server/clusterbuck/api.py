@@ -57,7 +57,7 @@ from .models import (
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
 from .queue import Queue, stream_key, tier_for, tier_of
 from .reservations import admit, iso
-from .routing import NoCapableArtifact, resolve
+from .routing import MissingCapability, NoCapableArtifact, resolve
 from .signing import (build_manifest, load_private_pem, public_pem,
                       sign_bootstrap)
 from .store import Store
@@ -478,13 +478,18 @@ def create_app(
                 capability=body.capability,
                 task_class=body.task_class,
                 min_ability=body.min_ability,
+                requires=body.requires.asked_for() if body.requires else None,
                 privacy=body.privacy.value,
                 urgency=body.urgency.value,
                 cloud_budget_monthly=settings.cloud_budget_monthly,
                 cloud_budget_reserve_fraction=settings.cloud_budget_reserve_fraction,
             )
-        except NoCapableArtifact as e:
-            # Explicit failure beats silently serving below the requested ability floor.
+        except (MissingCapability, NoCapableArtifact) as e:
+            # Explicit failure beats silently serving below the requested ability floor,
+            # or on a model that cannot do the thing at all. Both are 422 — the request
+            # is well-formed and unservable — but they are raised separately so the
+            # message names the right fix: a missing DECLARATION is usually one
+            # `POST /catalog` away, whereas a missing ability needs a better model.
             raise HTTPException(status_code=422, detail=str(e)) from e
         capability = selection.capability
 
@@ -524,6 +529,11 @@ def create_app(
             escalate_after_min=body.escalate_after_min,
             privacy=body.privacy,
             deadline=body.deadline,
+            # Rides to the worker because `json_schema` is what licenses forwarding
+            # `params.response_format`: routing has now checked the pinned artifact can
+            # honour it, which is the check that was missing when the worker dropped the
+            # field unconditionally.
+            requires=body.requires,
             # Carried to the executor so it can refuse rather than under-serve: the
             # coordinator knows which nodes serve a capability, but only the node knows how
             # fast it is right now, with this model loaded and the owner's machine as busy

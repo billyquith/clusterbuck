@@ -12,7 +12,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # reported before the slower fleet-management scripts run.
 SHARED=(
   run queue-and-wait waiting abandon idempotency cancel sync escalation urgency
-  reservation usage enroll join ability pinning cloud discovery install eval perf auth
+  reservation usage enroll join ability requires pinning cloud discovery install eval perf auth
   version
 )
 
