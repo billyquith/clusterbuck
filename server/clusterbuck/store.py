@@ -688,6 +688,64 @@ class Store:
             ).fetchall()
             return {r["model"] for r in rows}
 
+    # The coordinator's own traffic. Eval jobs carry a client_key; load-test jobs did not
+    # until they were tagged too, so older ones are recognised by their perf sample. Both
+    # are measurement, not demand, and counted as demand they would make the harness's
+    # even spread across task classes look like what clients want.
+    # COALESCE is load-bearing: `NULL IN (...)` is NULL, and NOT NULL is NULL too, so
+    # without it every untagged client job — most of them — silently vanished from demand.
+    _HARNESS_JOB = ("(COALESCE(j.client_key, '') IN ('cbk:eval', 'cbk:perf') "
+                    "OR j.id IN (SELECT job_id FROM perf_samples WHERE job_id IS NOT NULL))")
+
+    def real_demand(self, since: str) -> dict:
+        """What clients actually asked for since `since` (ISO), harness traffic excluded.
+
+        One pass over jobs joined to usage: the models page and the proposals page both
+        poll, so this is kept to a single aggregate query rather than a query per node.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT j.capability AS capability, j.task_class AS task_class, "
+                "u.model AS model, COUNT(*) AS n, MAX(u.tokens_in) AS max_in "
+                "FROM jobs j LEFT JOIN usage u ON u.job_id = j.id "
+                f"WHERE j.created_at >= ? AND NOT {self._HARNESS_JOB} "
+                "GROUP BY j.capability, j.task_class, u.model",
+                (since,),
+            ).fetchall()
+        by_class: dict[str, int] = {}
+        by_capability: dict[str, int] = {}
+        by_model: dict[str, int] = {}
+        total, max_in = 0, 0
+        for r in rows:
+            total += r["n"]
+            if r["task_class"]:
+                by_class[r["task_class"]] = by_class.get(r["task_class"], 0) + r["n"]
+            by_capability[r["capability"]] = by_capability.get(r["capability"], 0) + r["n"]
+            if r["model"]:
+                by_model[r["model"]] = by_model.get(r["model"], 0) + r["n"]
+            max_in = max(max_in, r["max_in"] or 0)
+        return {"total": total, "by_class": by_class, "by_capability": by_capability,
+                "by_model": by_model, "max_tokens_in": max_in}
+
+    def model_throughput(self) -> dict[tuple[str, str], float]:
+        """Output tokens/sec per (node, model), from finished jobs of any origin.
+
+        Unlike demand, harness jobs are wanted here: throughput is a property of the
+        hardware and the artifact, and the eval harness is often the only thing that has
+        exercised a model on a node at all.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT u.node AS node, u.model AS model, SUM(u.tokens_out) AS out, "
+                "SUM((julianday(j.finished_at) - julianday(j.started_at)) * 86400) AS secs "
+                "FROM usage u JOIN jobs j ON j.id = u.job_id "
+                "WHERE u.outcome = 'done' AND u.node IS NOT NULL AND u.model IS NOT NULL "
+                "AND j.started_at IS NOT NULL AND j.finished_at IS NOT NULL "
+                "GROUP BY u.node, u.model",
+            ).fetchall()
+        return {(r["node"], r["model"]): r["out"] / r["secs"]
+                for r in rows if r["secs"] and r["secs"] > 0 and r["out"]}
+
     # --- eval runs (M7) ---
 
     def add_eval_run(self, *, job_id: str, artifact: str, task_class: str,

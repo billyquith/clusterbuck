@@ -1,0 +1,52 @@
+{# Recomputed from live demand, ability and hardware on every render; nothing here is
+   stored, so it cannot go stale the way a written-once proposal does. #}
+<section class="panel placement">
+  <h2>Recommended models per machine</h2>
+  <p class="mix">
+    <span class="status-k">demand</span>
+    {% for m in mix %}<span title="{{ m.jobs }} real job(s) in the last {{ advice.window_days }} days">{{ m.task_class }} <strong>{{ "%.0f"|format(m.share * 100) }}%</strong></span>{% if not loop.last %} &middot; {% endif %}{% endfor %}
+    <span class="muted">&mdash; {{ advice.demand.total }} real jobs in the last {{ advice.window_days }} days, blended with {{ advice.prior }} even pseudo-jobs per class so a quiet month cannot rule a class out. Eval and load-test jobs are excluded.</span>
+  </p>
+
+  <div class="placement-nodes">
+  {% for n in advice.nodes %}
+    <article class="placement-node">
+      <div class="prop-head">
+        <strong>{{ n.name }}</strong>
+        {% if n.profile %}<span class="pill">{{ n.profile }}</span>{% endif %}
+        {% if n.offline_s %}<span class="pill bad" title="silent for over a day — judged on what it last reported{% if n.last_known %}: {{ n.last_known|join(', ') }}{% endif %}">offline</span>{% endif %}
+        <span class="muted">{{ n.summary }}</span>
+      </div>
+      {% if n.slate %}
+      <table class="slate">
+        {% for p in n.slate %}
+        <tr>
+          <td class="role"><span class="pill{{ ' warn' if not p.candidate.tiers else '' }}" title="{% if p.role == 'primary' %}serves the demand mix{% elif p.role == 'coverage' %}fills a class the primary is weak at{% else %}small enough for the active rung of the presence ladder, while the owner uses the machine{% endif %}{% if not p.candidate.tiers %} — but no tier names it, so it serves no jobs yet{% endif %}">{{ p.role }}</span></td>
+          <td class="act">{% if p.action == "install" %}<span class="star" title="recommended: install">&#9733; install</span>
+            {%- if (n.node_id, p.candidate.artifact) not in proposed %}<br><span class="muted" style="font-size:.72rem" title="The planner raises an upgrade only for an ability gain, so a speed upgrade has nothing to approve yet — install it by hand, or re-scan once measured">no proposal yet</span>{% endif %}
+            {%- else %}<span class="pill ok">keep</span>{% endif %}</td>
+          <td><strong>{{ p.candidate.artifact }}</strong>
+            {% if p.candidate.evidence != "measured" %}<span class="pill warn" title="ranked on an estimate — it is measured after install">{{ "estimate" if p.candidate.evidence == "hint" else "seed" }}</span>{% endif %}
+            <br><span class="muted">{{ p.why }}</span></td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% set others = n.ranked | rejectattr("artifact", "in", n.slate | map(attribute="candidate.artifact") | list) | list %}
+      {% if others %}
+      <p class="also muted">also considered:
+        {% for c in others[:4] %}{{ c.artifact }} {{ "%.1f"|format(c.value) }}{% if c.evidence != "measured" %}<span title="{{ 'catalog estimate' if c.evidence == 'hint' else 'shipped placeholder' }}">*</span>{% endif %}{% if not loop.last %} &middot; {% endif %}{% endfor %}
+      </p>
+      {% endif %}
+      {% if n.unused %}<p class="also"><span class="pill">not kept</span> {{ n.unused|join(", ") }} &mdash; installed but outside the recommended set</p>{% endif %}
+      {% endif %}
+    </article>
+  {% endfor %}
+  </div>
+
+  <p class="empty" style="margin-top:.6rem">
+    values are demand-weighted ability &middot; a candidate must beat what is installed by
+    {{ "%g"|format(min_gain) }} to be recommended &mdash; inside that, the difference is below what the checker can measure
+    &middot; up to {{ slate_size }} models per machine, switched by the presence ladder &mdash; a model serves jobs only once a tier in fleet.yaml names it &middot; advice can only choose from the model catalog, so add newer models there as they are released
+    &middot; * = estimate, not measured
+  </p>
+</section>

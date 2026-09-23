@@ -140,6 +140,9 @@ async def _submit_and_poll(
     body: dict = {
         "task_class": gq.task_class, "min_ability": min_ability,
         "prompt": gq.prompt, "urgency": "waitable",
+        # Load, not demand: the tag keeps a load test out of the demand mix that model
+        # placement is advised from.
+        "client_key": "cbk:perf",
     }
     if pin_model:
         body["params"] = {"model": pin_model}

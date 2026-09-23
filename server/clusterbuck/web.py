@@ -293,7 +293,63 @@ def _proposal_view(store, row, node, catalog: dict, scale: str) -> dict:
     return view
 
 
-def _pending_proposals(request: Request) -> list[dict]:
+def _annotate(view: dict, row, node, advice) -> None:
+    """Say, per proposal, whether the placement advice would choose it — and why not.
+
+    Pending proposals are written once and never revisited, so the list mixes the one
+    worth approving with candidates already installed and ones that lose to what the node
+    has. Presented equally, they read as equally worth a download. The verdict is
+    recomputed from live data on every render; the proposal itself is not touched,
+    because approval is single-shot and a display must not decide it.
+    """
+    import json as _json
+
+    view["rec"], view["rec_why"], view["rec_rank"] = None, None, None
+    view["mix_value"], view["mix_incumbent"] = None, None
+    if advice is None:
+        return
+    installed = set(_json.loads(node.installed or "[]")) if node else set()
+    in_slate = {p.candidate.artifact: p for p in advice.slate}
+    if advice.incumbent:
+        view["mix_incumbent"] = (advice.incumbent.artifact, advice.incumbent.value)
+
+    if row.kind == "upgrade":
+        ranked = [c.artifact for c in advice.ranked]
+        cand = next((c for c in advice.ranked if c.artifact == row.artifact), None)
+        if cand is not None:
+            view["mix_value"], view["mix_evidence"] = cand.value, cand.evidence
+        if row.artifact in installed:
+            view["rec"] = "superseded"
+            view["rec_why"] = f"already installed on {advice.name}"
+        elif row.artifact in in_slate:
+            pick = in_slate[row.artifact]
+            view["rec"], view["rec_role"], view["rec_why"] = "star", pick.role, pick.why
+        elif cand is None:
+            view["rec"] = "not"
+            view["rec_why"] = ("no ability score or estimate to judge it on, or it no "
+                               "longer fits this machine")
+        else:
+            primary = advice.slate[0].candidate
+            view["rec"], view["rec_rank"] = "not", ranked.index(row.artifact) + 1
+            view["rec_why"] = (
+                f"#{view['rec_rank']} of {len(ranked)} for this machine; "
+                f"{primary.artifact} {'stays' if primary.installed else 'is'} the pick "
+                f"({primary.value:.1f} for the demand mix vs {cand.value:.1f})")
+    elif row.kind == "reclaim":
+        if row.artifact in in_slate:
+            view["rec"] = "keep"
+            view["rec_why"] = (f"the placement advice keeps it here as the "
+                               f"{in_slate[row.artifact].role} model")
+        elif row.artifact in advice.unused:
+            view["rec"] = "agree"
+            view["rec_why"] = "the placement advice does not keep it either"
+
+
+# Recommended first, superseded last: the order is the advice.
+_REC_ORDER = {"star": 0, None: 1, "keep": 1, "agree": 1, "not": 2, "superseded": 3}
+
+
+def _pending_proposals(request: Request, advice: dict | None = None) -> list[dict]:
     from .evaluation import SCALE_VERSION
 
     store = request.app.state.store
@@ -301,8 +357,69 @@ def _pending_proposals(request: Request) -> list[dict]:
     # but on the LAN people know machines by hostname — the view shows that instead.
     nodes = {n.node_id: n for n in store.list_nodes()}
     catalog = {c.artifact: c for c in store.list_catalog()}
-    return [_proposal_view(store, r, nodes.get(r.node_id), catalog, SCALE_VERSION)
-            for r in store.list_proposals("pending")]
+    advice = advice or _advise(request)
+    by_node = {a.node_id: a for a in advice["nodes"]}
+    views = []
+    for r in store.list_proposals("pending"):
+        v = _proposal_view(store, r, nodes.get(r.node_id), catalog, SCALE_VERSION)
+        _annotate(v, r, nodes.get(r.node_id), by_node.get(r.node_id))
+        views.append(v)
+    views.sort(key=lambda v: (_REC_ORDER.get(v["rec"], 1), v["node"],
+                              v["rec_rank"] or 0))
+    return views
+
+
+def _advise(request: Request) -> dict:
+    """Placement advice, told which tiers serve which model — without that it cannot say
+    that a recommended model no tier names would serve nothing."""
+    from .evaluation import SCALE_VERSION
+    from .placement import advise
+
+    fleet = request.app.state.fleet
+    tier_models: dict[str, list[str]] = {}
+    for name, spec in (fleet.capabilities.items() if fleet else []):
+        tier_models.setdefault(spec.model, []).append(name)
+    return advise(request.app.state.store, scale_version=SCALE_VERSION,
+                  tier_models=tier_models)
+
+
+def _mix_view(advice: dict) -> list[dict]:
+    """The demand mix as shown: share, and the real count behind it."""
+    from .evaluation import TASK_CLASSES
+
+    by_class = advice["demand"]["by_class"]
+    return [{"task_class": tc, "share": advice["weights"][tc],
+             "jobs": by_class.get(tc, 0)} for tc in TASK_CLASSES]
+
+
+@web_routes.get("/ui/placement", response_class=HTMLResponse)
+async def ui_placement(request: Request) -> HTMLResponse:
+    from .placement import MIN_GAIN, SLATE_SIZE
+
+    advice = _advise(request)
+    # A ★ is only actionable if there is a proposal to approve. The planner raises one
+    # only for an ability gain, so an upgrade recommended for speed has none yet.
+    proposed = {(r.node_id, r.artifact)
+                for r in request.app.state.store.list_proposals("pending")
+                if r.kind == "upgrade"}
+    return templates.TemplateResponse(
+        request, "partials/placement.html",
+        {"advice": advice, "mix": _mix_view(advice), "min_gain": MIN_GAIN,
+         "slate_size": SLATE_SIZE, "proposed": proposed})
+
+
+@web_routes.get("/ui/advice", response_class=HTMLResponse)
+async def ui_advice(request: Request) -> HTMLResponse:
+    from .evaluation import SCALE_VERSION
+    from .placement import gaps
+
+    store = request.app.state.store
+    advice = _advise(request)
+    found = gaps(store, request.app.state.fleet, advice=advice,
+                 scale_version=SCALE_VERSION)
+    return templates.TemplateResponse(
+        request, "partials/advice.html",
+        {"gaps": found, "advice": advice, "mix": _mix_view(advice)})
 
 
 @web_routes.get("/ui/proposals", response_class=HTMLResponse)

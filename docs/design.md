@@ -568,6 +568,32 @@ An approved action is executed by the worker through a per-server model-manager 
 presence-gated so a large pull never lands under an active owner. A fresh install or a
 changed digest **never inherits** an ability score.
 
+**Placement advice sits above the proposals and is never stored.** A proposal is written
+once, against the facts of that moment, and the list soon mixes the one worth approving
+with upgrades to models the node already has and candidates keyed to a task class that
+no longer exists. `placement.py` recomputes, on every read, which models each node
+should hold — up to three: a *primary* for the demand mix, a *coverage* model for a class
+the primary is weak at, and on a shared machine a *light* one that serves while its owner
+is busy — and the proposals page stars, ranks or marks each proposal against that.
+It changes no proposal's status; approval stays single-shot.
+
+Three choices in it are easy to reverse by accident:
+
+- **Demand is real client jobs over 30 days, blended with an even prior.** Eval and
+  load-test jobs are excluded — the harness spreads evenly across classes by design, and
+  counted as demand it would look like what clients want. The prior (25 pseudo-jobs per
+  class) keeps a thin, skewed early month from ruling a class out; it fades as real
+  volume grows. The mix is meant to be reviewed weekly, not settled.
+- **A hint is clamped to the instrument ceiling before it meets a measurement.** Tier-1
+  scoring cannot record above 7, so an unclamped catalog estimate of 8 would win by a
+  margin nothing can verify.
+- **At equal ability, speed is a reason to upgrade.** With measured models at the
+  ceiling and new ones known only by estimate, ability alone could never replace an old
+  model with a newer one. A challenger displaces the incumbent if it is 0.5 better for the
+  mix, or as capable and running on the accelerator where the incumbent spills, or as
+  capable and ≥1.5× faster (measured, or by active parameters). Inside that, the
+  incumbent stays: a download is not free and the difference is not measurable.
+
 ## 8. The cloud tier
 
 Three distinct uses, not one: **unavailability** (the local fleet cannot serve in time),

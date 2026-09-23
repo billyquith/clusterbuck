@@ -1,0 +1,22 @@
+{# Rules over live data. Each item names the evidence that raised it, because every one of
+   these looks healthy from every other panel on this page. #}
+<section class="panel advice">
+  <h2>What the fleet is missing</h2>
+  {% if gaps %}
+  <ul class="gaps">
+    {% for g in gaps %}
+    <li class="gap {{ g.severity }}" data-gap="{{ g.key }}">
+      <span class="pill {{ 'warn' if g.severity == 'warn' else '' }}">{{ "look at" if g.severity == "warn" else "note" }}</span>
+      <strong>{{ g.title }}</strong>
+      <div class="muted">{{ g.detail }}</div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty">nothing stands out</p>
+  {% endif %}
+  <p class="empty" style="margin-top:.6rem">
+    re-checked on every visit from the last {{ advice.window_days }} days of real jobs ({{ advice.demand.total }}) &middot;
+    which model belongs on which machine is on the Proposals tab
+  </p>
+</section>

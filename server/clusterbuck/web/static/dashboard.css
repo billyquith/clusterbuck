@@ -229,3 +229,20 @@ details.legend h3 { font-size: .85rem; margin: 1.1rem 0 .4rem; }
 details.legend p { margin: 0 0 .6rem; color: var(--ink); max-width: 72ch; }
 details.legend dl.facts { max-width: 80ch; row-gap: .45rem; }
 details.legend code { font-size: .8rem; color: var(--muted); }
+/* Placement advice and fleet gaps. The star is the one mark on the proposals tab that says
+   "this one" — it is coloured, everything around it stays neutral so it can be found. */
+.star { color: var(--warn); font-weight: 650; font-size: .8rem; white-space: nowrap; }
+.placement .mix { margin: 0 0 .8rem; font-size: .85rem; }
+.placement .mix .muted { font-size: .78rem; }
+.placement-nodes { display: grid; gap: .8rem; }
+.placement-node { border-top: 1px solid var(--line); padding-top: .6rem; }
+table.slate { width: 100%; border-collapse: collapse; margin-top: .4rem; font-size: .84rem; }
+table.slate td { padding: .25rem .5rem .25rem 0; vertical-align: top; }
+table.slate td.role, table.slate td.act { width: 1%; white-space: nowrap; }
+table.slate .muted { font-size: .78rem; }
+.placement .also { margin: .3rem 0 0; font-size: .78rem; }
+.prop-rec { margin: .3rem 0; font-size: .8rem; color: var(--muted); }
+.prop-rec.star-why { color: var(--ink); }
+ul.gaps { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; }
+ul.gaps li { font-size: .85rem; }
+ul.gaps li .muted { font-size: .8rem; margin-top: .15rem; max-width: 90ch; }

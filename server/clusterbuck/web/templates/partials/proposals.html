@@ -7,6 +7,11 @@
       {# catalog.py puts "WILL RUN SLOWLY" first in the rationale so the approver sees it
          before any number; the structured layout keeps it first and loud. #}
       {% if p.verdict == "degraded" %}<span class="pill bad" title="{{ p.fit_reason }}">will run slowly</span>{% endif %}
+      {% if p.rec == "star" %}<span class="star" title="{{ p.rec_why }}">&#9733; recommended{% if p.rec_role and p.rec_role != 'primary' %} ({{ p.rec_role }}){% endif %}</span>
+      {% elif p.rec == "superseded" %}<span class="pill" title="{{ p.rec_why }}">superseded</span>
+      {% elif p.rec == "not" %}<span class="pill" title="{{ p.rec_why }}">not recommended{% if p.rec_rank %} &middot; #{{ p.rec_rank }}{% endif %}</span>
+      {% elif p.rec == "keep" %}<span class="pill warn" title="{{ p.rec_why }}">advice says keep</span>
+      {% elif p.rec == "agree" %}<span class="pill ok" title="{{ p.rec_why }}">advice agrees</span>{% endif %}
       {% if p.kind == "upgrade" %}<span class="pill ok">upgrade</span>
       {% elif p.kind == "reeval" %}<span class="pill warn">re-eval</span>
       {% else %}<span class="pill">reclaim</span>{% endif %}
@@ -22,7 +27,23 @@
       </span>
     </div>
 
-    {% if p.kind == "upgrade" and p.expected is not none %}
+    {% if p.rec_why %}<p class="prop-rec{{ ' star-why' if p.rec == 'star' else '' }}">{{ p.rec_why }}</p>{% endif %}
+    {# For your demand mix, not the single class the proposal was raised for: that class
+       was chosen once, when the proposal was written, and may no longer exist. Falls back
+       to the per-class line when the installed model is measured in only some classes —
+       too partial to weigh against a mix, but still real evidence. #}
+    {% if p.rec == "superseded" %}
+    {% elif p.kind == "upgrade" and p.mix_value is not none and (p.mix_incumbent or p.incumbent is none) %}
+    <div class="prop-why">
+      <span class="status-k">for the demand mix</span>
+      <span class="score-to">
+        <span title="best installed model on {{ p.node }}, demand-weighted">{% if p.mix_incumbent %}{{ "%.1f"|format(p.mix_incumbent[1]) }} <span class="muted">({{ p.mix_incumbent[0] }})</span>{% else %}nothing measured{% endif %}</span>
+        &rarr;
+        <strong title="{{ 'measured' if p.mix_evidence == 'measured' else 'estimate — re-measured after install' }}">{{ "%.1f"|format(p.mix_value) }}</strong>{% if p.mix_evidence != "measured" %}<span class="muted">*</span>{% endif %}
+        {% if p.mix_incumbent %}{% set d = p.mix_value - p.mix_incumbent[1] %}<span class="pill {{ 'ok' if d >= 0.5 else '' }}">{{ "%+.1f"|format(d) }}</span>{% endif %}
+      </span>
+    </div>
+    {% elif p.kind == "upgrade" and p.expected is not none %}
     <div class="prop-why">
       <span class="status-k">why</span>
       <span>{{ p.task_class }}</span>

@@ -602,6 +602,68 @@ def test_timeline_names_the_machine_not_its_node_id(client):
     assert ">node-x<" in html
 
 
+# --- placement advice on the proposals tab, gaps on the models tab ----------------------
+
+def _seed_placement(client) -> str:
+    """A 32 GB / 12 GB-VRAM shared node holding a measured model, offered one clear
+    upgrade (an equally capable model that fits the card where the incumbent spills), one
+    candidate it already has, and one that loses — so all three verdicts render."""
+    from clusterbuck.evaluation import SCALE_VERSION, TASK_CLASSES
+
+    store = client.app.state.store
+    node_id = _enroll(client, "node-p")
+    store.record_heartbeat(
+        node_id=node_id, mode="active", installed='["have:dense"]', loaded="[]",
+        queues="[]", jobs_done=0, tps=None, last_heartbeat="2026-01-01T00:00:00Z")
+    for artifact, size, ram, score in (("have:dense", 16.0, 24.0, 7.0),
+                                       ("fits:card", 8.0, 16.0, 7.0),
+                                       ("weak:1b", 1.0, 2.0, 2.0)):
+        store.upsert_catalog(artifact=artifact, family="x", params_b=8.0, quant="q4",
+                             size_gb=size, min_ram_gb=ram, source="ollama",
+                             registry_ref=artifact, expected_ability=score, added_at="t")
+        if artifact != "fits:card":
+            for tc in TASK_CLASSES:
+                store.set_ability(artifact=artifact, task_class=tc, score=score,
+                                  scale_version=SCALE_VERSION, updated_at="t",
+                                  n_items=10, n_passed=10)
+    for pid, artifact in (("p-weak", "weak:1b"), ("p-have", "have:dense"),
+                          ("p-fits", "fits:card")):
+        store.insert_proposal(id=pid, kind="upgrade", node_id=node_id, artifact=artifact,
+                              incumbent=None, task_class="embed", status="pending",
+                              created_at="t", rationale="...")
+    return node_id
+
+
+def test_placement_recommends_per_machine(client):
+    _seed_placement(client)
+    html = client.get("/ui/placement").text
+    assert "node-p" in html
+    assert "&#9733; install" in html or "★ install" in html
+    assert "fits:card" in html
+    assert "runs on the accelerator" in html
+
+
+def test_proposals_are_ranked_starred_and_superseded(client):
+    """They used to be presented equally, oldest-written first — including an upgrade to
+    a model the node already has, and one keyed to a task class that no longer exists."""
+    _seed_placement(client)
+    html = client.get("/ui/proposals").text
+    star, have, weak = (html.index(f"/ui/proposals/{p}/approve")
+                        for p in ("p-fits", "p-have", "p-weak"))
+    assert star < weak < have, "recommended first, superseded last"
+    assert "recommended" in html and "superseded" in html and "not recommended" in html
+    assert "embed" not in html, "a stale task class must not be shown as the reason"
+
+
+def test_the_models_tab_names_what_the_fleet_is_missing(client):
+    _seed_placement(client)
+    html = client.get("/ui/advice").text
+    assert "What the fleet is missing" in html
+    assert 'data-gap="offline-node"' in html  # its last heartbeat is months old
+    # The example fleet this client loads registers cloud tiers, so that gap is closed.
+    assert 'data-gap="no-cloud"' not in html
+
+
 def test_asset_urls_change_when_the_file_does(client, tmp_path, monkeypatch):
     """No Cache-Control is sent, so a browser can reuse a stale copy for days. After a
     deploy that ran new HTML against the old CSS and JS: dead tabs, unstyled cards."""
