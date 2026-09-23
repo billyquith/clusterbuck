@@ -42,6 +42,7 @@ def _args(**over):
         "model": "qwen2.5:7b",
         "model_server": "http://127.0.0.1:11434/v1",
         "model_manager": "auto",
+        "profile": "dedicated",
         "artifact": Path("/tmp/cbk.pyz"),
         "token": "tok-123",
     }
@@ -64,8 +65,8 @@ def test_windows_gets_powershell_parameter_names(join):
     cmd = join.installer_command(REPO, system="Windows", **_args())
     assert cmd[0] == "powershell"
     assert cmd[cmd.index("-File") + 1].endswith("install.ps1")
-    for expected in ("-CoordinatorUrl", "-RedisUrl", "-Model",
-                     "-ModelServerUrl", "-ModelManager", "-Artifact", "-Token"):
+    for expected in ("-CoordinatorUrl", "-RedisUrl", "-Model", "-ModelServerUrl",
+                     "-ModelManager", "-Profile", "-Artifact", "-Token"):
         assert expected in cmd, f"{expected} missing from the Windows invocation"
     assert not any(a.startswith("--") for a in cmd), \
         "no GNU-style flag may reach install.ps1"
@@ -77,8 +78,8 @@ def test_every_value_survives_into_both_flavours(join):
     for system in ("Linux", "Windows"):
         cmd = join.installer_command(REPO, system=system, **args)
         for value in (args["coordinator"], args["redis_url"], args["model"],
-                      args["model_server"], args["model_manager"], args["token"],
-                      str(args["artifact"])):
+                      args["model_server"], args["model_manager"], args["profile"],
+                      args["token"], str(args["artifact"])):
             assert value in cmd, f"{value!r} missing on {system}"
 
 
@@ -152,3 +153,13 @@ def test_worker_env_is_written_without_a_bom():
     assert "UTF8Encoding($false)" in text, "worker.env must be written BOM-less"
     assert "Set-Content -Path $EnvFile -Encoding UTF8" not in text, \
         "worker.env is still written with the BOM-emitting encoder"
+
+
+def test_the_profile_reaches_both_installers(join):
+    """Without it a dedicated box joins as `shared`, and `cbk pause` then evicts its
+    running job and drops its models — giving back a machine nobody wanted back. The
+    profile is settable only at enrolment, so getting it wrong here means re-enrolling."""
+    for system, flag in (("Linux", "--profile"), ("Windows", "-Profile")):
+        cmd = join.installer_command(REPO, system=system, **_args(profile="dedicated"))
+        assert flag in cmd, f"{flag} missing on {system}"
+        assert cmd[cmd.index(flag) + 1] == "dedicated"

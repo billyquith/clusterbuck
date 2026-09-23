@@ -156,7 +156,7 @@ def fetch_artifact(coordinator: str, password: str, dest: Path) -> Path:
 
 def installer_command(
     repo_root: Path, *, coordinator: str, redis_url: str, model: str,
-    model_server: str, model_manager: str, artifact: Path, token: str,
+    model_server: str, model_manager: str, profile: str, artifact: Path, token: str,
     system: str | None = None,
 ) -> list[str]:
     """Full argv for the platform installer.
@@ -183,6 +183,7 @@ def installer_command(
             "-Model", model,
             "-ModelServerUrl", model_server,
             "-ModelManager", model_manager,
+            "-Profile", profile,
             "-Artifact", str(artifact),
             "-Token", token,
         ]
@@ -193,6 +194,7 @@ def installer_command(
         "--model", model,
         "--model-server", model_server,
         "--model-manager", model_manager,
+        "--profile", profile,
         "--artifact", str(artifact),
         "--token", token,
     ]
@@ -277,6 +279,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="local model server (default: Ollama; LM Studio is :1234)")
     ap.add_argument("--model-manager", default="auto",
                     choices=["auto", "ollama", "lmstudio", "none"])
+    # Only settable at enrolment, and it decides whether `cbk pause` drains this node or
+    # evicts its running job and its resident models — so a dedicated box joined without
+    # it gets the shared default and gives back a machine nobody wanted back.
+    ap.add_argument("--profile", default="shared",
+                    choices=["dedicated", "shared", "background"],
+                    help="who this machine is for (default: shared)")
     ap.add_argument("--node-state",
                     help="path the installer persists node identity to "
                          "(default: the platform location; override for testing)")
@@ -315,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         model=args.model,
         model_server=args.model_server,
         model_manager=args.model_manager,
+        profile=args.profile,
         artifact=staging,
         token=cfg["join_token"],
     )

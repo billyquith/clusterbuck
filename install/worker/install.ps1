@@ -29,6 +29,12 @@
 .PARAMETER ModelManager
     Model manager adapter: auto | ollama | lmstudio | none.  Default: auto
 
+.PARAMETER Profile
+    Who this machine is for: dedicated | shared | background.  Default: shared.
+    `dedicated` means it exists to serve, so `cbk pause` drains it and leaves the models
+    warm; the others belong to a person, so pausing stops the running job and frees the
+    RAM.  Only settable at enrolment.
+
 .PARAMETER ModelServerUrl
     Local model server URL.  Default: http://127.0.0.1:11434/v1
 
@@ -50,6 +56,8 @@ param(
     [string]$Artifact       = '',
     [string]$Token          = '',
     [string]$ModelManager   = 'auto',
+    [ValidateSet('dedicated','shared','background')]
+    [string]$Profile        = 'shared',
     [string]$ModelServerUrl = 'http://127.0.0.1:11434/v1',
     [string]$DeployDir      = 'C:\clusterbuck'
 )
@@ -265,7 +273,7 @@ if ($Token) {
     } else {
         $env:CBK_SERVER_URL  = $CoordinatorUrl
         $env:CBK_NODE_STATE  = $NodeState
-        & python $CbkBin enroll --token $Token
+        & python $CbkBin enroll --token $Token --profile $Profile
         Remove-Item Env:CBK_SERVER_URL, Env:CBK_NODE_STATE -ErrorAction SilentlyContinue
         Write-Ok "Enrolled -> $NodeState"
     }
