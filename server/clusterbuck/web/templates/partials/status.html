@@ -1,0 +1,33 @@
+{# One line, not three panels. Each item is here only when it says something: a queue with
+   nothing waiting is not news, and neither is an empty reservations list. #}
+<div class="status-item">
+  <span class="status-k">avoided spend</span>
+  <span class="status-v accent">${{ "%.2f"|format(u.headline.avoided_cloud_spend) }}</span>
+  <span class="muted">{{ u.totals.jobs }} jobs &middot; {{ u.totals.tokens_in + u.totals.tokens_out }} tokens</span>
+</div>
+{% if u.budget.monthly_cap is not none %}
+<div class="status-item">
+  <span class="status-k">cloud this month</span>
+  <span class="status-v">${{ "%.2f"|format(u.budget.cloud_spent_this_month) }}</span>
+  <span class="muted">/ ${{ "%.2f"|format(u.budget.monthly_cap) }}</span>
+  {% if u.budget.over %}<span class="pill warn">over cap</span>{% endif %}
+</div>
+{% endif %}
+<div class="status-item">
+  <span class="status-k">queues</span>
+  {% if not has_queues %}<span class="muted">none configured</span>
+  {% elif not attention %}<span class="pill ok">clear</span>
+  {% else %}
+    {% for q in attention %}
+    {% if q.state == "stuck" %}<span class="pill bad" title="work is queued and nothing is running to take it">{{ q.capability }} &middot; {{ q.backlog }} stuck</span>
+    {% elif q.state == "unknown" %}<span class="pill muted" title="Redis could not compute an exact backlog (entries were deleted or trimmed mid-stream)">{{ q.capability }} &middot; backlog unknown</span>
+    {% else %}<span class="pill {{ 'warn' if q.backlog < 5 else 'bad' }}" title="queued and never handed to any worker">{{ q.capability }} &middot; {{ q.backlog }} waiting</span>{% endif %}
+    {% endfor %}
+  {% endif %}
+</div>
+{% if reservations %}
+<div class="status-item">
+  <span class="status-k">reservations</span>
+  {% for r in reservations %}<span class="pill ok" title="{{ r.id }}">{{ r.state }}{% if r.node %} &middot; {{ r.node }}{% endif %}</span>{% endfor %}
+</div>
+{% endif %}

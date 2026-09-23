@@ -953,6 +953,18 @@ class Store:
                 (cutoff,),
             ).fetchall()
 
+    def usage_daily_by_node(self, days: int = 30) -> list[sqlite3.Row]:
+        """Jobs per (day, node) over the trailing `days` — the usage chart's per-worker
+        view. `node` is a worker's node_id or `cloud:<provider>` (cloud_executor.py), so a
+        cloud account comes out as its own series rather than vanishing."""
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._conn() as c:
+            return c.execute(
+                "SELECT day, node, COUNT(*) AS jobs "
+                "FROM usage WHERE day >= ? GROUP BY day, node ORDER BY day",
+                (cutoff,),
+            ).fetchall()
+
     def cloud_spend_in_month(self, month_prefix: str) -> float:
         """Actual cloud spend for a 'YYYY-MM' prefix (budget burn)."""
         with self._conn() as c:

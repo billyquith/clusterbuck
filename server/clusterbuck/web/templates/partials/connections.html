@@ -1,17 +1,29 @@
 <h2>Coordinator connections</h2>
 <div class="hub-diagram">
-  <div class="hub">coordinator</div>
+  <div class="hub" title="this coordinator">cbk</div>
   <div class="spokes">
     <div class="branch workers">
       <div class="branch-label">local workers</div>
       {% if workers %}
         {% for w in workers %}
-        <div class="spoke{{ ' idle' if w.jobs == 0 else '' }}">
+        <div class="spoke{{ ' idle' if w.jobs == 0 else '' }}{{ ' silent' if w.silent else '' }}">
           <span class="spoke-line"></span>
-          <span class="spoke-name">{{ w.name }}</span>
-          {% if w.silent %}<span class="pill bad" title="no heartbeat for {{ w.age or "an unreadable length of time" }} — last declared mode was {{ w.mode }}">silent &middot; {{ w.age or "age unknown" }}</span>
-          {% else %}<span class="pill">{{ w.mode }}</span>{% endif %}
-          <span class="spoke-jobs">{{ w.jobs }} job{{ 's' if w.jobs != 1 else '' }}</span>
+          <div class="spoke-body">
+            <div class="spoke-head">
+              <span class="spoke-name">{{ w.name }}</span>
+              {% if w.silent %}<span class="pill bad" title="no heartbeat for {{ w.age or "an unreadable length of time" }} — last declared mode was {{ w.mode }}">silent &middot; {{ w.age or "age unknown" }}</span>
+              {% else %}<span class="pill">{{ w.mode }}</span>{% endif %}
+              <span class="spoke-jobs">{{ w.jobs }} job{{ 's' if w.jobs != 1 else '' }}</span>
+            </div>
+            {# The models are why anyone looks at this panel: warm answers now, the rest
+               after a cold load. Tiers are what the router actually sends here. #}
+            <div class="spoke-models">
+              {% for m in w.warm %}<span class="pill ok" title="loaded — answers without a cold start">{{ m }}</span>{% endfor %}
+              {% for m in w.cold %}<span class="pill" title="installed, not loaded">{{ m }}</span>{% endfor %}
+              {% if not w.warm and not w.cold %}<span class="muted">no models installed</span>{% endif %}
+            </div>
+            {% if w.tiers %}<div class="spoke-tiers">serves {{ w.tiers|join(", ") }}</div>{% endif %}
+          </div>
         </div>
         {% endfor %}
       {% else %}
@@ -24,8 +36,13 @@
         {% for c in cloud %}
         <div class="spoke{{ ' idle' if c.jobs == 0 else '' }}">
           <span class="spoke-line"></span>
-          <span class="spoke-name">{{ c.provider }}</span>
-          <span class="spoke-jobs">{{ c.jobs }} job{{ 's' if c.jobs != 1 else '' }}</span>
+          <div class="spoke-body">
+            <div class="spoke-head">
+              <span class="spoke-name">{{ c.provider }}</span>
+              <span class="spoke-jobs">{{ c.jobs }} job{{ 's' if c.jobs != 1 else '' }}</span>
+            </div>
+            {% if c.tiers %}<div class="spoke-tiers">serves {{ c.tiers|join(", ") }}</div>{% endif %}
+          </div>
         </div>
         {% endfor %}
       {% else %}

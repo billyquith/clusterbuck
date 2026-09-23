@@ -1,56 +1,45 @@
-<h2>Enrolled nodes</h2>
 {% if nodes %}
-<div class="table-scroll">
-<table>
-  <tr><th>node / hardware</th><th>version</th><th>mode / last seen</th><th>models (installed / warm)</th><th>capabilities</th></tr>
+<div class="node-cards">
   {% for n in nodes %}
-  <tr>
-    <td>
-      {{ n.host or n.id }}<br>
-      <span style="color:var(--muted);font-size:.75rem">
-        {{ n.id }} &middot; {{ n.os_arch }}
-        {% if n.ram_gb %}<br>{{ "%g"|format(n.ram_gb) }} GB RAM &middot; {{ n.accelerator }}{% if n.vram_gb %} ({{ "%g"|format(n.vram_gb) }} GB VRAM){% endif %}
-          {% if n.disk_free_gb %}&middot; {{ "%g"|format(n.disk_free_gb) }} GB free{% endif %}
-          {% if n.profile %}&middot; {{ n.profile }}{% endif %}
-        {% endif %}
-        {# Measured from real jobs, so it is the one figure here the node did not simply
-           assert about itself. Shown only once observed — a node that has served nothing
-           has no speed, which is different from being slow. #}
-        {% if n.tps %}<br><span title="median output tokens/sec over recent jobs, measured on this machine">{{ "%g"|format(n.tps) }} tok/s measured</span>{% endif %}
-        {% if n.load_s %}<span title="median seconds to bring a model up from cold on this machine — what the reservation pre-warm lead is computed from"> &middot; {{ "%g"|format(n.load_s) }}s cold load</span>{% endif %}
-      </span>
-    </td>
-    <td>
-      {{ n.version }}
-      {% if n.fitness == "quarantine" %}<br><span class="pill warn" title="{{ n.fitness_reason }}">quarantined</span>
-      {% elif n.fitness == "stale" %}<br><span class="pill" title="{{ n.fitness_reason }}">stale</span>
-      {% endif %}
-    </td>
-    <td>
-      {# `mode` is what the node last DECLARED about itself; the stale pill below is
-         whether that declaration is still worth anything. Both are shown, because a node
-         that went away and then went off is a different story from one that crashed. #}
+  <article class="panel node-card{{ ' silent' if n.silent else '' }}">
+    <div class="node-head">
+      <strong>{{ n.host or n.id }}</strong>
+      {# `mode` is what the node last DECLARED about itself; the silent pill is whether
+         that declaration is still worth anything. Both are shown, because a node that
+         went away and then went off is a different story from one that crashed. #}
       {% if n.mode == "active" %}<span class="pill">active</span>
       {% elif n.mode == "away" %}<span class="pill ok">away</span>
       {% else %}<span class="pill warn">{{ n.mode }}</span>{% endif %}
-      {% if n.silent %}<br>
-      {% if n.age %}<span class="pill bad" title="no heartbeat for {{ n.age }} — the mode above is the last thing this node said, not what it is doing now. (Distinct from the version column's `stale`, which is agent drift on a node that is still talking.)">silent &middot; {{ n.age }}</span>
+      {% if n.silent %}
+      {% if n.age %}<span class="pill bad" title="no heartbeat for {{ n.age }} — the mode is the last thing this node said, not what it is doing now. (Distinct from the version's `stale`, which is agent drift on a node that is still talking.)">silent &middot; {{ n.age }}</span>
       {% else %}<span class="pill bad" title="neither the heartbeat nor the enrollment stamp could be read, so there is no telling when this node last spoke">silent &middot; age unknown</span>{% endif %}
       {% endif %}
-      <br><span style="color:var(--muted);font-size:.72rem">
-        {% if n.seen %}<span class="ts" data-utc="{{ n.seen }}">{{ n.seen[:16] | replace("T", " ") }}</span>
-        {% else %}<span title="enrolled, but has never heartbeated">never seen</span>{% endif %}
+      <span class="node-ver">
+        v{{ n.version }}
+        {% if n.fitness == "quarantine" %}<span class="pill warn" title="{{ n.fitness_reason }}">quarantined</span>
+        {% elif n.fitness == "stale" %}<span class="pill" title="{{ n.fitness_reason }}">stale</span>{% endif %}
       </span>
-    </td>
-    <td>
-      {{ n.installed or "—" }}
-      {% if n.loaded %}<br><span class="pill ok">warm: {{ n.loaded }}</span>{% endif %}
-    </td>
-    <td>{{ n.caps }}</td>
-  </tr>
+    </div>
+    <div class="node-hw">
+      {% if n.ram_gb %}{{ "%g"|format(n.ram_gb) }} GB RAM &middot; {{ n.accelerator }}{% if n.vram_gb %} ({{ "%g"|format(n.vram_gb) }} GB VRAM){% endif %}{% else %}{{ n.os_arch }}{% endif %}
+      {% if n.disk_free_gb %}&middot; {{ "%g"|format(n.disk_free_gb) }} GB free{% endif %}
+      {% if n.profile %}&middot; {{ n.profile }}{% endif %}
+      {% if n.wake %}&middot; <span title="fleet.yaml wake policy">wake {{ n.wake }}</span>{% endif %}
+    </div>
+    <div class="node-meta muted">
+      {# Measured from real jobs, so it is the one figure here the node did not simply
+         assert about itself. Shown only once observed — a node that has served nothing
+         has no speed, which is different from being slow. #}
+      {% if n.tps %}<span title="median output tokens/sec over recent jobs, measured on this machine">{{ "%g"|format(n.tps) }} tok/s</span> &middot; {% endif %}
+      {% if n.load_s %}<span title="median seconds to bring a model up from cold on this machine — what the reservation pre-warm lead is computed from">{{ "%g"|format(n.load_s) }}s cold load</span> &middot; {% endif %}
+      {% if n.seen %}seen <span class="ts" data-utc="{{ n.seen }}">{{ n.seen[:16] | replace("T", " ") }}</span>
+      {% else %}<span title="enrolled, but has never heartbeated">never seen</span>{% endif %}
+      &middot; <span title="{{ n.os_arch }}">{{ n.id }}</span>
+    </div>
+    {% if n.caps %}<div class="node-meta">serves {{ n.caps }}</div>{% endif %}
+  </article>
   {% endfor %}
-</table>
 </div>
 {% else %}
-<p class="empty">no enrolled nodes yet — the fleet.yaml seed still applies</p>
+<section class="panel"><p class="empty">no enrolled nodes yet — the fleet.yaml seed still applies</p></section>
 {% endif %}

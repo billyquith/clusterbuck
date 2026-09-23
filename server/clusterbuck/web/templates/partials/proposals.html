@@ -1,33 +1,79 @@
-<h2>Planner proposals</h2>
+<span id="proposal-count" class="count{{ ' pending' if props else '' }}" hx-swap-oob="true">{{ props|length }}</span>
 {% if props %}
-<table>
-  <tr><th>node</th><th>reasoning</th><th>action</th><th></th></tr>
+<div class="prop-list">
   {% for p in props %}
-  <tr>
-    <td>{{ p.node }}</td>
-    <td>
+  <article class="panel prop">
+    <div class="prop-head">
+      {# catalog.py puts "WILL RUN SLOWLY" first in the rationale so the approver sees it
+         before any number; the structured layout keeps it first and loud. #}
+      {% if p.verdict == "degraded" %}<span class="pill bad" title="{{ p.fit_reason }}">will run slowly</span>{% endif %}
       {% if p.kind == "upgrade" %}<span class="pill ok">upgrade</span>
       {% elif p.kind == "reeval" %}<span class="pill warn">re-eval</span>
       {% else %}<span class="pill">reclaim</span>{% endif %}
       <strong>{{ p.artifact }}</strong>
-      <br><span style="color:var(--muted);font-size:.78rem">{{ p.rationale }}</span>
-    </td>
-    <td style="color:var(--muted);font-size:.85rem">
-      {% if p.kind == "upgrade" %}accept: install {{ p.artifact }} on {{ p.node }} (next time it's away)<br>deny: leave {{ p.node }}'s models unchanged
-      {% elif p.kind == "reeval" %}accept: run the eval harness against {{ p.artifact }} to (re-)measure its ability<br>deny: leave {{ p.artifact }}'s ability score as is
-      {% else %}accept: remove {{ p.artifact }} from {{ p.node }}, freeing its disk<br>deny: keep {{ p.artifact }} installed{% endif %}
-    </td>
-    <td style="white-space:nowrap">
-      <button hx-post="/ui/proposals/{{ p.id }}/approve" hx-target="closest section"
-              hx-swap="innerHTML">approve</button>
-      <button hx-post="/ui/proposals/{{ p.id }}/deny" hx-target="closest section"
-              hx-swap="innerHTML">deny</button>
-    </td>
-  </tr>
+      <span class="muted">on {{ p.node }}</span>
+      <span class="prop-actions">
+        <button class="approve" title="approve: {{ p.accept_hint }}"
+                hx-post="/ui/proposals/{{ p.id }}/approve" hx-target="#proposals-panel"
+                hx-swap="innerHTML">approve</button>
+        <button title="deny: {{ p.deny_hint }}"
+                hx-post="/ui/proposals/{{ p.id }}/deny" hx-target="#proposals-panel"
+                hx-swap="innerHTML">deny</button>
+      </span>
+    </div>
+
+    {% if p.kind == "upgrade" and p.expected is not none %}
+    <div class="prop-why">
+      <span class="status-k">why</span>
+      <span>{{ p.task_class }}</span>
+      <span class="score-to">
+        <span title="best measured score among models already on {{ p.node }}">{{ "%g"|format(p.incumbent_score) if p.incumbent_score is not none else "none" }}{% if p.incumbent %} <span class="muted">({{ p.incumbent }})</span>{% endif %}</span>
+        &rarr;
+        <strong title="catalog's expected ability — re-measured after install">{{ "%g"|format(p.expected) }}</strong>
+        {% if p.incumbent_score is not none %}<span class="pill ok">+{{ "%g"|format(p.expected - p.incumbent_score) }}</span>{% endif %}
+      </span>
+    </div>
+    {% elif p.kind != "upgrade" %}
+    <p class="prop-rationale">{{ p.rationale }}{% if p.kind == "reclaim" and p.cand %} <span class="pill">frees {{ "%g"|format(p.cand.size_gb) }} GB</span>{% endif %}</p>
+    {% endif %}
+
+    {# The side-by-side is the reasoning for an upgrade. A re-eval or reclaim decision
+       does not turn on the node's hardware, so it would only be noise there. #}
+    {% if p.kind == "upgrade" and (p.cand or p.hw) %}
+    <div class="prop-grid">
+      <div>
+        <div class="status-k">model</div>
+        {% if p.cand %}{% set c = p.cand %}
+        <dl class="facts">
+          {% if c.params_b %}<dt>params</dt><dd>{{ "%g"|format(c.params_b) }}B{% if c.active_params_b and c.active_params_b < c.params_b %} <span class="muted">({{ "%g"|format(c.active_params_b) }}B active)</span>{% endif %}{% if c.quant %} &middot; {{ c.quant }}{% endif %}</dd>{% endif %}
+          <dt>context</dt><dd>{{ "{:,}".format(c.context_tokens) if c.context_tokens else "—" }}</dd>
+          <dt>can do</dt><dd>
+            {% for label, val in [("tools", c.tools), ("json", c.json_schema), ("vision", c.vision)] %}{% if val %}<span class="pill ok">{{ label }}</span> {% endif %}{% endfor %}
+            {% if not (c.tools or c.json_schema or c.vision) %}<span class="muted">—</span>{% endif %}
+          </dd>
+        </dl>
+        {% else %}<p class="empty">not in the catalog</p>{% endif %}
+      </div>
+      <div>
+        <div class="status-k">needs vs {{ p.node }} has</div>
+        <dl class="facts">
+          {% if p.cand %}
+          <dt>disk</dt><dd>{{ "%g"|format(p.cand.size_gb) }} GB{% if p.hw %} <span class="muted">/ {{ "%g"|format(p.hw.quota_gb) }} GB quota{% if p.hw.disk_free_gb %}, {{ "%g"|format(p.hw.disk_free_gb) }} GB free{% endif %}</span>{% endif %}</dd>
+          <dt>RAM</dt><dd>{{ "%g"|format(p.cand.min_ram_gb) }} GB{% if p.hw and p.hw.ram_gb %} <span class="muted">/ {{ "%g"|format(p.hw.ram_gb) }} GB</span>{% endif %}</dd>
+          {% endif %}
+          {% if p.hw %}
+          <dt>accel</dt><dd>{{ p.hw.accelerator or "none" }}{% if p.hw.vram_gb %} <span class="muted">{{ "%g"|format(p.hw.vram_gb) }} GB VRAM</span>{% endif %}</dd>
+          {% endif %}
+        </dl>
+        {% if p.fit_reason %}<div class="fit {{ p.verdict }}">{{ p.fit_reason }}</div>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </article>
   {% endfor %}
-</table>
+</div>
 <p class="empty" style="margin-top:.6rem">weights are never fetched without a decision here
-(unless a node opts into auto-approve)</p>
+(unless a node opts into auto-approve) &middot; hover approve / deny for what each does</p>
 {% else %}
-<p class="empty">no pending proposals</p>
+<section class="panel"><p class="empty">no pending proposals</p></section>
 {% endif %}

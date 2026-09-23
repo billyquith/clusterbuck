@@ -62,45 +62,42 @@ def test_vendored_dashboard_js_served(client):
         assert "/static/dashboard.js" in client.get(page).text
 
 
-def test_headline_fragment(client):
-    r = client.get("/ui/headline")
+def test_status_strip_replaces_the_headline(client):
+    r = client.get("/ui/status")
     assert r.status_code == 200
-    assert "avoided cloud spend" in r.text
+    assert "avoided spend" in r.text
 
 
-def test_queues_fragment(client):
-    assert client.get("/ui/queues").status_code == 200
+def test_status_strip_is_quiet_when_every_queue_is_clear(fleet_client):
+    html = fleet_client.get("/ui/status").text
+    assert "queues" in html and "clear" in html
+    assert "8b-extract" not in html, "a healthy queue is not news"
+    assert "reservations" not in html, "an empty reservations list is not shown at all"
 
 
-def test_queues_fragment_leads_with_backlog_not_in_flight_work(fleet_client):
-    """A 200-only assertion is why the wrong number shipped in the first place.
+def test_status_strip_flags_a_queue_nobody_is_serving(fleet_client):
+    """Work queued with no live worker is the state that must never render as healthy.
 
-    The panel used to lead with the pending count and label it "the real backlog", but
-    pending counts work a worker has ALREADY claimed. Never-delivered work appears in
-    neither pending nor (usefully) depth, so the panel showed a healthy green zero for
-    exactly the queue it was meant to raise the alarm on.
+    The strip leads with backlog — never-delivered work — not `pending`, which counts
+    work a worker has already claimed and so reads a healthy zero on exactly this queue.
     """
-    r = fleet_client.get("/ui/queues")
-    assert r.status_code == 200
-    assert "backlog" in r.text
-    assert "in flight" in r.text, "pending is labelled for what it is"
-    # The specific wrong pairing, not merely the phrase: "the real backlog" is now
-    # attached to the backlog column, which is correct. What must never come back is it
-    # describing the pending count.
-    assert 'not yet acked — the real backlog"' not in r.text
-    backlog_col = r.text.partition(">backlog<")[0]
-    assert "the real backlog" in backlog_col, "the phrase belongs to the backlog column"
-
-
-def test_queues_fragment_flags_a_queue_nobody_is_serving(fleet_client):
-    """Work queued with no live worker is the state that must never render as healthy."""
     for _ in range(3):
         fleet_client.post("/jobs", json={
             "capability": "8b-extract",
             "messages": [{"role": "user", "content": "hello"}],
         })
-    r = fleet_client.get("/ui/queues")
-    assert "stuck" in r.text, "backlog with nothing serving is called out explicitly"
+    html = fleet_client.get("/ui/status").text
+    assert "8b-extract" in html and "3 stuck" in html
+    assert "clear" not in html
+
+
+def test_the_panels_the_strip_replaced_are_gone(client):
+    """A deletion the suite cannot see is one that did not happen."""
+    for route in ("/ui/headline", "/ui/queues", "/ui/reservations", "/ui/fleet"):
+        assert client.get(route).status_code == 404, route
+    page = client.get("/").text
+    assert "/ui/status" in page and "/ui/queues" not in page
+    assert "/ui/fleet" not in client.get("/models").text
 
 
 def test_connections_fragment_empty(client):
@@ -120,6 +117,20 @@ def test_connections_fragment_shows_enrolled_worker(client):
     assert r.status_code == 200
     assert "node-x" in r.text  # the hostname people actually know it by on the LAN
     assert "0 jobs" in r.text
+
+
+def test_connections_shows_which_models_each_worker_has_warm(client):
+    """The question this panel is looked at for: what can each machine answer with now."""
+    node_id = _enroll(client, "node-x")
+    client.app.state.store.record_heartbeat(
+        node_id=node_id, mode="active", installed='["hot:8b", "cold:3b"]',
+        loaded='["hot:8b"]', queues="[]", jobs_done=0, tps=None,
+        last_heartbeat="2026-01-01T00:00:00Z")
+    html = client.get("/ui/connections").text
+    warm = html.partition("hot:8b")[0].rpartition("<span")[2]
+    cold = html.partition("cold:3b")[0].rpartition("<span")[2]
+    assert "ok" in warm, "a loaded model is marked warm"
+    assert "ok" not in cold, "an installed-only model is not"
 
 
 def test_connections_fragment_lists_cloud_providers(client):
@@ -160,26 +171,34 @@ def test_activity_series_endpoint_is_zero_filled_json(client):
     assert sum(data["local_jobs"]) == 0  # no usage recorded in this test's fresh db
 
 
+def test_activity_series_by_node_is_one_zero_filled_series_per_worker(client):
+    from datetime import datetime
+
+    node_id = _enroll(client, "node-x")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    store = client.app.state.store
+    for i, (node, venue) in enumerate(
+            [(node_id, "local"), (node_id, "local"), ("cloud:openai", "cloud")]):
+        store.record_usage(
+            job_id=f"j{i}", ts=f"{today}T00:00:0{i}Z", capability="c", model="m",
+            node=node, venue=venue, tokens_in=1, tokens_out=1, outcome="done",
+            cost=0.0, day=today)
+
+    data = client.get("/ui/activity-series?by=node").json()
+    assert len(data["days"]) == 30
+    labels = [s["label"] for s in data["series"]]
+    assert labels == ["node-x", "cloud:openai"], "hostname, not node_id; cloud last"
+    local, cloud = data["series"]
+    assert len(local["jobs"]) == 30 and local["jobs"][-1] == 2 and sum(local["jobs"]) == 2
+    assert cloud["cloud"] is True and local["cloud"] is False
+
+
 def test_dashboard_page_vendors_the_chart_library(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "/static/uPlot.iife.min.js" in r.text  # vendored, not a CDN URL
     assert "activity-chart" in r.text
     assert client.get("/static/uPlot.iife.min.js").status_code == 200
-
-
-def test_fleet_fragment_renders_capabilities(client):
-    # The conftest client runs from server/, so it loads the seed fleet.yaml.
-    r = client.get("/ui/fleet")
-    assert r.status_code == 200
-    assert "8b-extract" in r.text
-    assert "node-a" in r.text and "node-b" in r.text  # capability -> serving node(s)
-
-
-def test_reservations_fragment(client):
-    r = client.get("/ui/reservations")
-    assert r.status_code == 200
-    assert "Reservations" in r.text
 
 
 def test_nodes_fragment(client):
@@ -405,3 +424,121 @@ def test_an_unreadable_stamp_is_silent_not_healthy(client):
     html = client.get("/ui/nodes").text
     assert "node-corrupt" in html
     assert "age unknown" in html
+
+
+# --- proposals: the reasoning laid out, not compressed into one sentence ---------------
+
+def _seed_upgrade(client) -> str:
+    """A node that already holds a 5.0-at-extract model, offered a candidate expected to
+    score 8 that overflows its 12 GB card — so every column of the card has a value and
+    the fit is `degraded`."""
+    from clusterbuck.evaluation import SCALE_VERSION
+
+    store = client.app.state.store
+    node_id = _enroll(client, "node-x")  # 32 GB RAM, 12 GB VRAM, shared profile
+    store.record_heartbeat(
+        node_id=node_id, mode="active", installed='["small:3b"]', loaded="[]",
+        queues="[]", jobs_done=0, tps=None, last_heartbeat="2026-01-01T00:00:00Z")
+    store.set_ability(artifact="small:3b", task_class="extract", score=5.0,
+                      scale_version=SCALE_VERSION, updated_at="t", n_items=10, n_passed=5)
+    store.upsert_catalog(artifact="big:14b", family="x", params_b=14.0, quant="q4",
+                         size_gb=20.0, min_ram_gb=24.0, source="ollama",
+                         registry_ref="big:14b", expected_ability=8.0, added_at="t",
+                         context_tokens=32768, supports_tools=True)
+    store.insert_proposal(
+        id="prop_up", kind="upgrade", node_id=node_id, artifact="big:14b",
+        incumbent=None, task_class="extract", status="pending", created_at="t",
+        rationale="WILL RUN SLOWLY: big:14b ...")
+    return node_id
+
+
+def test_proposal_shows_candidate_against_incumbent(client):
+    _seed_upgrade(client)
+    html = client.get("/ui/proposals").text
+    assert "small:3b" in html, "the incumbent is recomputed; scan_node stores None"
+    assert "5" in html and "8" in html and "+3" in html
+
+
+def test_proposal_sets_requirements_against_hardware(client):
+    _seed_upgrade(client)
+    html = client.get("/ui/proposals").text
+    assert "20 GB" in html and "50 GB quota" in html, "disk need vs the owner's quota"
+    assert "24 GB" in html and "32 GB" in html, "RAM need vs RAM present"
+    assert "12 GB VRAM" in html
+    assert "32,768" in html and "tools" in html, "what the candidate can do"
+
+
+def test_a_degraded_upgrade_leads_with_the_warning(client):
+    """catalog.py puts the warning first in the rationale on purpose; the card must too."""
+    _seed_upgrade(client)
+    html = client.get("/ui/proposals").text
+    assert "will run slowly" in html
+    assert html.index("will run slowly") < html.index(">upgrade<")
+
+
+def test_proposal_actions_are_tooltips_not_a_column(client):
+    _seed_upgrade(client)
+    html = client.get("/ui/proposals").text
+    assert 'title="approve: install big:14b on node-x' in html
+    assert 'title="deny: leave node-x' in html
+    assert "accept:" not in html, "the old verbose action column is gone"
+
+
+def test_reeval_and_reclaim_keep_their_rationale(client):
+    """Their facts (a digest change, days unused) live only in the text."""
+    node_id = _enroll(client, "node-x")
+    client.app.state.store.insert_proposal(
+        id="prop_re", kind="reclaim", node_id=node_id, artifact="old:7b", incumbent=None,
+        task_class=None, status="pending", created_at="t",
+        rationale="old:7b has served no jobs in 30 days")
+    assert "served no jobs in 30 days" in client.get("/ui/proposals").text
+
+
+def test_proposals_tab_carries_the_pending_count(client):
+    page = client.get("/models").text
+    assert 'data-tab="models"' in page and 'data-tab="proposals"' in page
+    assert 'id="proposal-count"' in page
+    _seed_upgrade(client)
+    html = client.get("/ui/proposals").text
+    assert 'id="proposal-count"' in html and 'hx-swap-oob="true">1<' in html
+
+
+def test_deciding_a_proposal_drops_it_and_the_count(client):
+    _seed_upgrade(client)
+    html = client.post("/ui/proposals/prop_up/approve").text
+    assert 'hx-swap-oob="true">0<' in html
+    assert "no pending proposals" in html
+
+
+def test_per_worker_series_follow_enrollment_so_colours_do_not_shift(client):
+    """The chart colours a series by position. An idle worker must keep its slot, and a
+    newcomer whose hostname sorts first must not push everyone else along."""
+    first = _enroll(client, "zz-first")
+    _enroll(client, "aa-second")
+    today = __import__("datetime").datetime.now(UTC).strftime("%Y-%m-%d")
+    client.app.state.store.record_usage(
+        job_id="j1", ts=f"{today}T00:00:00Z", capability="c", model="m", node=first,
+        venue="local", tokens_in=1, tokens_out=1, outcome="done", cost=0.0, day=today)
+    series = client.get("/ui/activity-series?by=node").json()["series"]
+    assert [s["label"] for s in series] == ["zz-first", "aa-second"]
+    assert sum(series[1]["jobs"]) == 0, "an idle worker still has its (empty) series"
+
+
+def test_a_cloud_tier_is_not_nowhere_installed(client):
+    """Its model lives at the provider; no node was ever going to have it."""
+    node_id = _enroll(client, "node-x")
+    client.app.state.store.record_heartbeat(
+        node_id=node_id, mode="active", installed='["other:1b"]', loaded="[]", queues="[]",
+        jobs_done=0, tps=None, last_heartbeat="2026-01-01T00:00:00Z")
+    orphans = client.get("/ui/models").text.partition("nowhere installed")[2]
+    assert orphans, "a local tier with no node holding its model is still reported"
+    assert "gpt-4o-mini" not in orphans
+
+
+def test_timeline_names_the_machine_not_its_node_id(client):
+    node_id = _enroll(client, "node-x")
+    client.app.state.store.record_usage(
+        job_id="j1", ts="2026-01-01T00:00:00Z", capability="c", model="m", node=node_id,
+        venue="local", tokens_in=1, tokens_out=1, outcome="done", cost=0.0, day="2026-01-01")
+    html = client.get("/ui/timeline").text
+    assert ">node-x<" in html

@@ -23,19 +23,20 @@
     </nav>
   </header>
   <main>
+    <section class="status-strip" hx-get="/ui/status" hx-trigger="load, every 4s">…</section>
     <section class="panel chart-panel">
-      <h2>Activity over time</h2>
+      <div class="panel-head">
+        <h2>Activity over time</h2>
+        <div class="seg" role="group" aria-label="chart view">
+          <button type="button" data-view="venue">By venue</button>
+          <button type="button" data-view="node">By worker</button>
+        </div>
+      </div>
       <div id="activity-chart"></div>
     </section>
-    <div class="grid">
-      <section class="panel" hx-get="/ui/connections" hx-trigger="load, every 2s">…</section>
-      <section class="panel" hx-get="/ui/timeline" hx-trigger="load, every 2s">…</section>
-    </div>
-    <div class="grid">
-      <section class="panel" hx-get="/ui/queues" hx-trigger="load, every 3s">…</section>
-      <section class="panel" hx-get="/ui/reservations" hx-trigger="load, every 5s">…</section>
-    </div>
-    <div id="headline" hx-get="/ui/headline" hx-trigger="load, every 4s">…</div>
+    <section class="panel" style="margin-bottom:1rem"
+             hx-get="/ui/connections" hx-trigger="load, every 3s">…</section>
+    <section class="panel" hx-get="/ui/timeline" hx-trigger="load, every 3s">…</section>
   </main>
 </body>
 </html>

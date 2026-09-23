@@ -1,9 +1,17 @@
 """The web dashboard (ADR 21): server-rendered, htmx over the existing data, vendored
-assets (no CDN, LAN-only). Two pages — `/` (live usage: headline, queues, reservations)
-and `/models` (model configuration: proposals, ability, fleet capabilities, enrolled
-nodes) — each loads once and its panels self-refresh with `hx-get` on a short interval.
+assets (no CDN, LAN-only). Three pages, each loaded once with panels that self-refresh via
+`hx-get`:
+
+  * `/` — a glance at the fleet: a one-line status strip (spend, only the queues that need
+    attention, reservations if any), activity over time by venue or by worker, the
+    coordinator's connections with what each worker has warm, and recent jobs.
+  * `/models` — two tabs. Models: the joined (artifact, node) table and a card per enrolled
+    node. Proposals: the planner's pending decisions, each laid out as candidate against
+    incumbent and requirement against hardware.
+  * `/performance` — load-test runs.
+
 Panels read app.state directly (same data the JSON APIs serve) rather than self-calling
-over HTTP.
+over HTTP. The dashboard is for looking at; every figure it drops is still on the JSON API.
 """
 
 from __future__ import annotations
@@ -65,10 +73,40 @@ async def performance_page(request: Request) -> HTMLResponse:
     )
 
 
-@web_routes.get("/ui/headline", response_class=HTMLResponse)
-async def ui_headline(request: Request) -> HTMLResponse:
-    u = build_usage_summary(request.app.state.store, settings.cloud_budget_monthly)
-    return templates.TemplateResponse(request, "partials/headline.html", {"u": u})
+@web_routes.get("/ui/status", response_class=HTMLResponse)
+async def ui_status(request: Request) -> HTMLResponse:
+    """One line for the usage page: what used to be three panels (headline, queues,
+    reservations) that were mostly zeros. A healthy queue is not news, so only the ones
+    that need a look get a pill; everything else collapses to "queues clear".
+
+    The stuck test is the one the full queues table used: work waiting with neither a live
+    consumer nor a cloud executor to take it. `pending` is deliberately not the signal —
+    it counts work a worker has ALREADY claimed, which is progress, not backlog.
+    """
+    store = request.app.state.store
+    fleet = request.app.state.fleet
+    queue = request.app.state.queue
+    u = build_usage_summary(store, settings.cloud_budget_monthly)
+
+    attention = []
+    for cap in (fleet.capabilities if fleet else {}):
+        stats = await queue.depth(cap, settings.consumer_group)
+        backlog = stats.get("backlog")
+        nobody_home = (stats.get("consumers") or 0) + (stats.get("executors") or 0) == 0
+        if backlog is None:
+            attention.append({"capability": cap, "state": "unknown", "backlog": None})
+        elif backlog and nobody_home:
+            attention.append({"capability": cap, "state": "stuck", "backlog": backlog})
+        elif backlog:
+            attention.append({"capability": cap, "state": "backlog", "backlog": backlog})
+
+    # Live ones only: list_reservations is history, and a strip that counted it would never
+    # go quiet once a single reservation had ever been made.
+    live = store.active_reservations()
+    return templates.TemplateResponse(
+        request, "partials/status.html",
+        {"u": u, "attention": attention, "has_queues": bool(fleet and fleet.capabilities),
+         "reservations": live})
 
 
 @web_routes.get("/ui/connections", response_class=HTMLResponse)
@@ -76,6 +114,8 @@ async def ui_connections(request: Request) -> HTMLResponse:
     """Coordinator <-> worker/cloud topology: every enrolled node and every registered
     cloud provider account, each with how many jobs it has actually served (usage_rollup's
     "node" column carries a worker's node_id, or "cloud:<provider>" — cloud_executor.py)."""
+    import json as _json
+
     from .cloud_executor import cloud_capabilities, provider_of
 
     store = request.app.state.store
@@ -88,15 +128,26 @@ async def ui_connections(request: Request) -> HTMLResponse:
         # Same correction as the nodes table: a spoke drawn from `mode` alone claims a
         # connection to a machine that may have been off for months.
         age = heartbeat_age_s(n, now=now)
+        loaded = _json.loads(n.loaded or "[]")
+        installed = _json.loads(n.installed or "[]")
         workers.append({
             "name": n.hostname or n.node_id, "mode": n.mode or "unknown",
             "silent": age is None or age > settings.node_silent_s,
             "age": humanize_age(age) if age is not None else None,
             "jobs": jobs_by_key.get(n.node_id, 0),
+            # What this machine can answer with right now (warm) versus after a cold load.
+            # "Which models are available" is the question this panel is looked at for.
+            "warm": sorted(loaded),
+            "cold": sorted(m for m in installed if m not in set(loaded)),
+            "tiers": sorted(_json.loads(n.capabilities or "[]")),
         })
-    providers = sorted({provider_of(fleet.capabilities[cap].model)
-                        for cap in cloud_capabilities(fleet)}) if fleet else []
-    cloud = [{"provider": p, "jobs": jobs_by_key.get(f"cloud:{p}", 0)} for p in providers]
+    cloud_caps = cloud_capabilities(fleet) if fleet else []
+    tiers_by_provider: dict[str, list[str]] = {}
+    for cap in cloud_caps:
+        tiers_by_provider.setdefault(provider_of(fleet.capabilities[cap].model), []).append(cap)
+    cloud = [{"provider": p, "jobs": jobs_by_key.get(f"cloud:{p}", 0),
+              "tiers": sorted(tiers_by_provider[p])}
+             for p in sorted(tiers_by_provider)]
 
     return templates.TemplateResponse(
         request, "partials/connections.html", {"workers": workers, "cloud": cloud}
@@ -104,71 +155,125 @@ async def ui_connections(request: Request) -> HTMLResponse:
 
 
 @web_routes.get("/ui/activity-series")
-async def ui_activity_series(request: Request) -> dict:
+async def ui_activity_series(request: Request, by: str = "venue") -> dict:
     """JSON (not HTML — the chart fetches and redraws itself; see dashboard.js) feeding the
-    usage page's full-width activity-over-time chart: trailing 30 days, local vs cloud."""
-    from .usage import build_activity_series
+    usage page's full-width activity-over-time chart: trailing 30 days, either local vs
+    cloud (`by=venue`, the default) or one jobs series per worker (`by=node`)."""
+    from .usage import build_activity_series, build_activity_series_by_node
 
     days = 30
-    rows = request.app.state.store.usage_daily_by_venue(days=days)
-    return build_activity_series(rows, days=days)
+    store = request.app.state.store
+    if by == "node":
+        # Every enrolled node, in enrollment order, so a worker's colour slot is fixed for
+        # as long as it is enrolled: a quiet month or a newcomer never repaints it.
+        enrolled = sorted(store.list_nodes(), key=lambda n: (n.enrolled_at or "", n.node_id))
+        return build_activity_series_by_node(
+            store.usage_daily_by_node(days=days), days=days,
+            names={n.node_id: n.hostname or n.node_id for n in enrolled},
+            order=[n.node_id for n in enrolled])
+    return build_activity_series(store.usage_daily_by_venue(days=days), days=days)
 
 
 @web_routes.get("/ui/timeline", response_class=HTMLResponse)
 async def ui_timeline(request: Request) -> HTMLResponse:
     """Most recent metered jobs, newest first (Store.recent_usage) — the raw events behind
     the by_day rollup, fine-grained enough to matter at fleet-sized job volumes."""
-    rows = request.app.state.store.recent_usage(limit=30)
-    return templates.TemplateResponse(request, "partials/timeline.html", {"rows": rows})
-
-
-@web_routes.get("/ui/queues", response_class=HTMLResponse)
-async def ui_queues(request: Request) -> HTMLResponse:
-    fleet = request.app.state.fleet
-    queue = request.app.state.queue
-    rows = []
-    for cap in (fleet.capabilities if fleet else {}):
-        stats = await queue.depth(cap, settings.consumer_group)
-        rows.append({"capability": cap, **stats})
-    return templates.TemplateResponse(request, "partials/queues.html", {"rows": rows})
-
-
-@web_routes.get("/ui/fleet", response_class=HTMLResponse)
-async def ui_fleet(request: Request) -> HTMLResponse:
-    fleet = request.app.state.fleet
-    caps = (
-        [{"name": n, "queue": fleet.stream_for(n), "model": s.model,
-          "nodes": ", ".join(nd.id for nd in fleet.nodes_for(n)) or "—"}
-         for n, s in fleet.capabilities.items()]
-        if fleet else []
-    )
-    nodes = (
-        [{"id": n.id, "wake": n.wake, "capabilities": ", ".join(n.capabilities)}
-         for n in fleet.nodes]
-        if fleet else []
-    )
+    store = request.app.state.store
+    rows = store.recent_usage(limit=30)
+    # Usage rows carry node_id; people know the machine by its hostname.
+    names = {n.node_id: n.hostname for n in store.list_nodes() if n.hostname}
     return templates.TemplateResponse(
-        request, "partials/fleet.html", {"caps": caps, "nodes": nodes}
-    )
+        request, "partials/timeline.html", {"rows": rows, "names": names})
 
 
-@web_routes.get("/ui/reservations", response_class=HTMLResponse)
-async def ui_reservations(request: Request) -> HTMLResponse:
-    rows = request.app.state.store.list_reservations(limit=20)
-    return templates.TemplateResponse(request, "partials/reservations.html", {"rows": rows})
+# What approving or denying each kind of proposal actually does. It used to be a whole
+# table column restating itself on every row; it is a tooltip on the buttons now, which is
+# the moment someone wants to know.
+_DECISION_HINTS = {
+    "upgrade": ("install {artifact} on {node} (next time it's away)",
+                "leave {node}'s models unchanged"),
+    "reeval": ("run the eval harness against {artifact} to (re-)measure its ability",
+               "leave {artifact}'s ability score as is"),
+    "reclaim": ("remove {artifact} from {node}, freeing its disk",
+                "keep {artifact} installed"),
+}
+
+
+def _proposal_view(store, row, node, catalog: dict, scale: str) -> dict:
+    """A proposal laid out from the structured facts behind it, not parsed from its
+    rationale string.
+
+    The rationale is one sentence compressing four comparisons — candidate ability against
+    the best installed, model size against disk quota, RAM needed against RAM present,
+    model against accelerator memory — and reading it meant unpacking all four in your
+    head. Each is recomputed here from the same sources `scan_node` used, so it can be
+    shown as two columns side by side.
+
+    The incumbent has to be recomputed: `scan_node` knows it but stores `incumbent=None`.
+    """
+    import json as _json
+
+    from .catalog import fits, quota_for
+
+    name = (node.hostname if node else None) or row.node_id
+    accept, deny = _DECISION_HINTS.get(row.kind, ("apply this proposal", "leave it"))
+    view = {
+        "id": row.id, "kind": row.kind, "artifact": row.artifact, "node": name,
+        "rationale": row.rationale,
+        "accept_hint": accept.format(artifact=row.artifact, node=name),
+        "deny_hint": deny.format(artifact=row.artifact, node=name),
+        "cand": None, "hw": None, "verdict": None, "fit_reason": None,
+        "task_class": row.task_class, "expected": None, "incumbent": None,
+        "incumbent_score": None,
+    }
+    if node is not None:
+        view["hw"] = {
+            "ram_gb": node.ram_gb, "vram_gb": node.vram_gb,
+            "accelerator": node.accelerator, "disk_free_gb": node.disk_free_gb,
+            "quota_gb": quota_for(node.profile, node.disk_quota_gb),
+            "profile": node.profile, "tps": node.tps,
+        }
+    cand = catalog.get(row.artifact)
+    if cand is not None:
+        view["cand"] = {
+            "size_gb": cand.size_gb, "min_ram_gb": cand.min_ram_gb,
+            "params_b": cand.params_b, "active_params_b": cand.active_params_b,
+            "quant": cand.quant, "context_tokens": cand.context_tokens,
+            "tools": cand.supports_tools, "json_schema": cand.supports_json_schema,
+            "vision": cand.supports_vision, "family": cand.family,
+        }
+        view["expected"] = cand.expected_ability
+        if node is not None:
+            view["verdict"], view["fit_reason"] = fits(
+                cand, node, view["hw"]["quota_gb"])
+
+    if row.kind == "upgrade" and row.task_class and node is not None:
+        best = None
+        for have in _json.loads(node.installed or "[]"):
+            score = store.get_ability(have, row.task_class, scale)
+            if score is not None and (best is None or score > best[1]):
+                best = (have, score)
+        if best:
+            view["incumbent"], view["incumbent_score"] = best
+    return view
+
+
+def _pending_proposals(request: Request) -> list[dict]:
+    from .evaluation import SCALE_VERSION
+
+    store = request.app.state.store
+    # Proposals are keyed by node_id (the stable identity proposals/actions reference),
+    # but on the LAN people know machines by hostname — the view shows that instead.
+    nodes = {n.node_id: n for n in store.list_nodes()}
+    catalog = {c.artifact: c for c in store.list_catalog()}
+    return [_proposal_view(store, r, nodes.get(r.node_id), catalog, SCALE_VERSION)
+            for r in store.list_proposals("pending")]
 
 
 @web_routes.get("/ui/proposals", response_class=HTMLResponse)
 async def ui_proposals(request: Request) -> HTMLResponse:
-    store = request.app.state.store
-    rows = store.list_proposals("pending")
-    # Proposals are keyed by node_id (the stable identity proposals/actions reference),
-    # but on the LAN people know machines by hostname — show that instead where known.
-    hostnames = {n.node_id: n.hostname for n in store.list_nodes()}
-    props = [{"id": r.id, "kind": r.kind, "artifact": r.artifact,
-              "node": hostnames.get(r.node_id) or r.node_id, "rationale": r.rationale}
-             for r in rows]
-    return templates.TemplateResponse(request, "partials/proposals.html", {"props": props})
+    return templates.TemplateResponse(
+        request, "partials/proposals.html", {"props": _pending_proposals(request)})
 
 
 @web_routes.post("/ui/proposals/{proposal_id}/{decision}", response_class=HTMLResponse)
@@ -267,9 +372,14 @@ async def ui_models(request: Request) -> HTMLResponse:
 
     # Artifacts the fleet knows about but no node has installed — otherwise a tier whose
     # model is nowhere simply vanishes from a page about models.
+    # A cloud tier's model lives at the provider, never on a node, so it is not an orphan.
+    from .cloud_executor import cloud_capabilities
+
+    cloud_models = ({fleet.capabilities[c].model for c in cloud_capabilities(fleet)}
+                    if fleet else set())
     on_a_node = {r["artifact"] for r in rows}
     orphan_tiers = sorted(
-        {m for m in tiers_for if m not in on_a_node}
+        {m for m in tiers_for if m not in on_a_node and m not in cloud_models}
     )
 
     measuring = sorted(
@@ -288,12 +398,19 @@ async def ui_models(request: Request) -> HTMLResponse:
 async def ui_nodes(request: Request) -> HTMLResponse:
     import json as _json
 
+    fleet = request.app.state.fleet
+    # fleet.yaml's per-node `wake` policy was the one thing the old Fleet panel showed that
+    # no other panel did. A seeded node is named by its fleet id, which an enrolled node
+    # matches by id or by hostname.
+    wake = {nd.id: nd.wake for nd in fleet.nodes} if fleet else {}
+
     now = datetime.now(UTC)
     nodes = []
     for n in request.app.state.store.list_nodes():
         installed = _json.loads(n.installed or "[]")
         age = heartbeat_age_s(n, now=now)
         nodes.append({
+            "wake": wake.get(n.node_id) or wake.get(n.hostname or ""),
             "id": n.node_id, "host": n.hostname, "mode": n.mode,
             "caps": ", ".join(_json.loads(n.capabilities or "[]")),
             "loaded": ", ".join(_json.loads(n.loaded or "[]")),

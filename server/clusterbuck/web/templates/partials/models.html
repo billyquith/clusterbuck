@@ -5,7 +5,7 @@
   <tr>
     <th>artifact</th><th>node</th><th>serves</th>
     {% for tc in task_classes %}<th class="n">{{ tc }}</th>{% endfor %}
-    <th class="n">tok/s</th><th>size</th><th class="n">context</th>
+    <th class="n">tok/s</th><th>footprint</th>
     <th>can do</th><th>state</th>
   </tr>
   {% for r in rows %}
@@ -13,7 +13,7 @@
     <td><strong>{{ r.artifact }}</strong>
       {% if not r.in_catalog %}<br><span class="pill warn" title="No catalog entry, so its size and capabilities are unknown and the planner cannot propose it">uncurated</span>{% endif %}
     </td>
-    <td>{{ r.node }}<br><span style="color:var(--muted);font-size:.75rem">{{ r.mode }}</span></td>
+    <td>{{ r.node }}</td>
     <td>{{ r.tiers }}
       {% if r.warnings %}<br><span class="pill warn" title="This node advertises {{ r.warnings|join(', ') }} but does not have the model that tier is registered to serve">advertises {{ r.warnings|length }} it lacks</span>{% endif %}
     </td>
@@ -34,8 +34,14 @@
     {% endfor %}
 
     <td class="n">{% if r.tps %}<span title="Median output tokens/sec measured on this node from real jobs">{{ "%g"|format(r.tps) }}</span>{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
-    <td>{% if r.size_gb %}{{ "%g"|format(r.size_gb) }} GB{% if r.params_b %}<br><span style="color:var(--muted);font-size:.75rem">{{ "%g"|format(r.params_b) }}B{% if r.quant %} {{ r.quant }}{% endif %}</span>{% endif %}{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
-    <td class="n">{% if r.context_tokens %}{{ "{:,}".format(r.context_tokens) }}{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+    {# Size, parameters and context in one cell: three columns of mostly-dashes was a
+       large share of the old table's noise. #}
+    <td>{% if r.size_gb %}{{ "%g"|format(r.size_gb) }} GB{% else %}<span class="muted">—</span>{% endif %}
+      {%- if r.params_b or r.context_tokens %}<br><span class="muted" style="font-size:.75rem">
+        {%- if r.params_b %}{{ "%g"|format(r.params_b) }}B{% if r.quant %} {{ r.quant }}{% endif %}{% endif %}
+        {%- if r.params_b and r.context_tokens %} &middot; {% endif %}
+        {%- if r.context_tokens %}<span title="context window, tokens">{{ "{:,}".format(r.context_tokens) }} ctx</span>{% endif %}</span>{% endif %}
+    </td>
 
     {# Yes/no facts, deliberately not scored — no 1-10 number can express them. #}
     <td style="white-space:nowrap">

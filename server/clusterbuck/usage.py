@@ -131,14 +131,18 @@ def build_usage_summary(
     }
 
 
+def _trailing_days(days: int, now: float | None) -> list[str]:
+    now = time.time() if now is None else now
+    today = datetime.fromtimestamp(now, tz=UTC).date()
+    return [(today - timedelta(days=days - 1 - i)).isoformat() for i in range(days)]
+
+
 def build_activity_series(rows, *, days: int, now: float | None = None) -> dict:
     """Zero-filled daily series, local vs cloud, for the usage page's activity-over-time
     chart — `rows` is Store.usage_daily_by_venue's (day, venue, jobs, tokens_in, tokens_out,
     cost) output. Zero-filling (rather than only emitting days with rows) keeps the x-axis a
     continuous trailing window regardless of which days actually saw traffic."""
-    now = time.time() if now is None else now
-    today = datetime.fromtimestamp(now, tz=UTC).date()
-    day_list = [(today - timedelta(days=days - 1 - i)).isoformat() for i in range(days)]
+    day_list = _trailing_days(days, now)
     idx = {d: i for i, d in enumerate(day_list)}
 
     local_jobs = [0] * days
@@ -165,4 +169,38 @@ def build_activity_series(rows, *, days: int, now: float | None = None) -> dict:
         "cloud_jobs": cloud_jobs,
         "avoided_spend": [round(x, 6) for x in avoided_spend],
         "cloud_spend": [round(x, 6) for x in cloud_spend],
+    }
+
+
+def build_activity_series_by_node(rows, *, days: int, names: dict[str, str],
+                                  order: list[str] = (), now: float | None = None) -> dict:
+    """The same trailing window as build_activity_series, one jobs series per node —
+    `rows` is Store.usage_daily_by_node's (day, node, jobs). `names` maps node_id to the
+    hostname people know the machine by; a `cloud:<provider>` key keeps its own series,
+    since it is exactly the work the local fleet did not absorb.
+
+    The chart colours a series by its position, so position must follow the entity, not
+    its volume or its name. `order` (the enrolled nodes, oldest first) always gets a
+    series, zero-filled if idle — otherwise a worker that went quiet would drop out and
+    shift every colour after it. Keys with usage but no longer enrolled come next, and
+    cloud last.
+    """
+    day_list = _trailing_days(days, now)
+    idx = {d: i for i, d in enumerate(day_list)}
+    per_node: dict[str, list[int]] = {k: [0] * days for k in order}
+    for r in rows:
+        i = idx.get(r["day"])
+        if i is None:
+            continue
+        key = r["node"] or "unknown"
+        per_node.setdefault(key, [0] * days)[i] += r["jobs"]
+
+    # Local workers first, cloud after: the question the view answers is "who did the
+    # work", and cloud is the fallback, not a peer.
+    rank = {k: i for i, k in enumerate(order)}
+    keys = sorted(per_node, key=lambda k: (k.startswith("cloud:"), rank.get(k, len(rank)), k))
+    return {
+        "days": day_list,
+        "series": [{"key": k, "label": names.get(k, k), "cloud": k.startswith("cloud:"),
+                    "jobs": per_node[k]} for k in keys],
     }

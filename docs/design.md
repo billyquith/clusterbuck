@@ -341,8 +341,8 @@ So the dashboard ages the heartbeat stamp: a node silent for longer than
 `CBK_NODE_SILENT_S` (default 60s — six missed heartbeats at the worker's 10s interval,
 and the worker heartbeats from its own task so a long inference never delays one) is shown
 as **silent**, next to the time it was last heard from. Deliberately not called *stale*,
-which already means agent-version drift on a node that is still talking; the table renders
-both pills one column apart.
+which already means agent-version drift on a node that is still talking; a node's card
+renders both pills side by side.
 
 This is presentation only. A silent node is still in the registry and still counts
 wherever the coordinator reads enrolled nodes — urgency tiering, for one. The queue
