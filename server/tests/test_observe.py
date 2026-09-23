@@ -10,7 +10,6 @@ and, just as importantly, pin the case where it legitimately cannot be.
 from __future__ import annotations
 
 import pytest
-
 from clusterbuck.observe import observe_tick
 from clusterbuck.queue import REAPER_CONSUMER, Queue, stream_key
 from clusterbuck.store import Store

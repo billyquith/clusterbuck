@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .backstop import backstop_scan
 from .catalog import scan_all
@@ -48,7 +48,7 @@ _log = logging.getLogger("clusterbuck.coordinator")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 @contextmanager
@@ -129,5 +129,5 @@ async def coordinator_loop(
 
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_s)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from clusterbuck.fleet import (
     CapabilitySpec,
     Fleet,
@@ -36,7 +35,10 @@ def test_nodes_for_capability():
 def test_rejects_unknown_field(tmp_path):
     bad = tmp_path / "fleet.yaml"
     bad.write_text("nodes: []\ncapabilities: {}\nbogus: 1\n")
-    with pytest.raises(Exception):
+    # The specific type, not a blind `Exception`: a bare raises() passes on ANY error,
+    # including an unrelated bug in the loader, so it would keep reporting green after
+    # the validation it exists to check had stopped working.
+    with pytest.raises(ValueError, match="bogus"):
         load_fleet(bad)
 
 

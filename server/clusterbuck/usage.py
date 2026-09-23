@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .fleet import Fleet
 from .queue import Queue
@@ -50,7 +50,7 @@ async def usage_scan(
 ) -> int:
     """Capture usage for jobs whose terminal result newly appeared. Returns count captured."""
     now = time.time() if now is None else now
-    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    dt = datetime.fromtimestamp(now, tz=UTC)
     ts = dt.isoformat().replace("+00:00", "Z")
     day = dt.strftime("%Y-%m-%d")
 
@@ -102,7 +102,7 @@ def build_usage_summary(
     now = time.time() if now is None else now
     h = store.usage_headline()
     local_cost, cloud_cost = float(h["local_cost"]), float(h["cloud_cost"])
-    month = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m")
+    month = datetime.fromtimestamp(now, tz=UTC).strftime("%Y-%m")
     cloud_month = store.cloud_spend_in_month(month)
 
     return {
@@ -137,7 +137,7 @@ def build_activity_series(rows, *, days: int, now: float | None = None) -> dict:
     cost) output. Zero-filling (rather than only emitting days with rows) keeps the x-axis a
     continuous trailing window regardless of which days actually saw traffic."""
     now = time.time() if now is None else now
-    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+    today = datetime.fromtimestamp(now, tz=UTC).date()
     day_list = [(today - timedelta(days=days - 1 - i)).isoformat() for i in range(days)]
     idx = {d: i for i, d in enumerate(day_list)}
 

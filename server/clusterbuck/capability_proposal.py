@@ -9,7 +9,6 @@ to edit the wrong one.
 
 from __future__ import annotations
 
-
 # A node with no accelerator runs a large model from system RAM at a fraction of the
 # speed. It is not incapable — but proposing a tier it can only serve unusably slowly
 # sets an expectation the node cannot keep, and an over-advertised tier is the failure

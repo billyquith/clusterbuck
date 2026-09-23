@@ -15,12 +15,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .auth import install_auth, key_matches
 from .background import coordinator_loop
+from .capability_proposal import propose_capabilities
 from .catalog import (
     apply_action_result,
     next_action,
@@ -31,7 +32,6 @@ from .catalog import (
 )
 from .cloud_executor import CloudExecutor, cloud_capabilities
 from .config import JOIN_PASSWORD_MIN_LEN, settings
-from .capability_proposal import propose_capabilities
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import (
     SCALE_VERSION,
@@ -58,8 +58,7 @@ from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, sta
 from .queue import Queue, stream_key, tier_for, tier_of
 from .reservations import admit, iso
 from .routing import MissingCapability, NoCapableArtifact, resolve
-from .signing import (build_manifest, load_private_pem, public_pem,
-                      sign_bootstrap)
+from .signing import build_manifest, load_private_pem, public_pem, sign_bootstrap
 from .store import Store
 from .sync import build_router, sync_routes
 from .tiering import tiering_ready
@@ -195,7 +194,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.queue = Queue.from_url(redis_url)
-        app.state.store = Store(db_path or settings.db_path)
+        resolved_db = db_path or settings.db_path
+        app.state.store = Store(resolved_db)
+        # ABSOLUTE, always. The default is relative and resolves against the working
+        # directory, so a unit file with a different WorkingDirectory silently opens a
+        # different database — the coordinator then starts healthy with an empty schema,
+        # which looks like the fleet forgot everything rather than like the wrong path.
+        # One line at startup is what turns that into a two-second diagnosis.
+        _log.info("database: %s", Path(resolved_db).resolve())
         app.state.perf_tasks = {}  # run_id -> asyncio.Task, for cancellation
 
         # A row left 'running' belongs to a process that's gone (crash/SIGKILL — graceful
@@ -203,7 +209,8 @@ def create_app(
         # isn't a no-op forever.
         n_stale = app.state.store.cancel_stale_perf_runs(_now_iso())
         if n_stale:
-            _log.warning("reconciled %d perf run(s) stuck 'running' from a prior process", n_stale)
+            _log.warning(
+                "reconciled %d perf run(s) stuck 'running' from a prior process", n_stale)
 
         # Sync plane: load the fleet registry and build the LiteLLM router if present.
         # Absent fleet.yaml ⇒ sync endpoints return 503; the async plane still works.
@@ -217,6 +224,22 @@ def create_app(
                 "sync plane up: %d capabilities from %s",
                 len(app.state.fleet.capabilities), path.resolve(),
             )
+            # An unpriced capability contributes $0.00 to the avoided-cloud-spend
+            # headline, silently. That headline is the number this project exists to
+            # produce, so a tier added without prices does not merely go unmeasured —
+            # it drags the total down and looks like the fleet earned less. Cheap to
+            # forget (prices are the one field with a harmless-looking default) and
+            # invisible afterwards, so say it once at startup.
+            unpriced = sorted(
+                name for name, c in app.state.fleet.capabilities.items()
+                if not (c.price_in_per_1k or c.price_out_per_1k)
+            )
+            if unpriced:
+                _log.warning(
+                    "no price set for %s — these contribute $0 to avoided cloud spend "
+                    "(set price_in_per_1k / price_out_per_1k in %s)",
+                    ", ".join(unpriced), path.name,
+                )
         else:
             app.state.fleet = None
             app.state.sync_router = None
@@ -312,8 +335,43 @@ def create_app(
         return RedirectResponse("/static/favicon.ico", status_code=301)
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz(response: Response) -> dict:
+        """Liveness AND readiness: can this coordinator actually do its job right now?
+
+        It used to return a hardcoded `{"status": "ok"}`, checking nothing. That is the
+        one answer this endpoint must never give wrongly: it is unauthenticated (so it
+        is what a probe or a script can reach), the README tells an operator to check it
+        when diagnosing the two reachability rules, and the systemd unit uses it. A
+        coordinator whose Redis is unreachable cannot enqueue a job, cannot return a
+        result and cannot run the reaper — and it answered `ok`.
+
+        Redis is checked with a PING and SQLite with a trivial query, because those are
+        the two things whose absence stops everything. Degraded ⇒ 503, so a caller that
+        reads only the status code still learns the truth.
+
+        Deliberately says WHICH dependency is down, and deliberately says no more than
+        that: no URLs, no credentials, no version. The name of a failing dependency is
+        what makes the check actionable; anything else would be handing detail to an
+        unauthenticated caller for no operational gain.
+        """
+        checks: dict[str, str] = {}
+        try:
+            await app.state.queue.client.ping()
+            checks["redis"] = "ok"
+        except Exception as e:
+            checks["redis"] = "unavailable"
+            _log.warning("healthz: redis unreachable: %s", e)
+        try:
+            app.state.store.ping()
+            checks["db"] = "ok"
+        except Exception as e:
+            checks["db"] = "unavailable"
+            _log.warning("healthz: database unreachable: %s", e)
+
+        healthy = all(v == "ok" for v in checks.values())
+        if not healthy:
+            response.status_code = 503
+        return {"status": "ok" if healthy else "degraded", "checks": checks}
 
     @app.get("/fleet")
     async def get_fleet() -> dict:

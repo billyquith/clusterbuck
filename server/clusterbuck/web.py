@@ -8,7 +8,7 @@ over HTTP.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -82,7 +82,7 @@ async def ui_connections(request: Request) -> HTMLResponse:
     fleet = request.app.state.fleet
     jobs_by_key = {r["key"]: r["jobs"] for r in store.usage_rollup("node")}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     workers = []
     for n in store.list_nodes():
         # Same correction as the nodes table: a spoke drawn from `mode` alone claims a
@@ -143,7 +143,8 @@ async def ui_fleet(request: Request) -> HTMLResponse:
         if fleet else []
     )
     nodes = (
-        [{"id": n.id, "wake": n.wake, "capabilities": ", ".join(n.capabilities)} for n in fleet.nodes]
+        [{"id": n.id, "wake": n.wake, "capabilities": ", ".join(n.capabilities)}
+         for n in fleet.nodes]
         if fleet else []
     )
     return templates.TemplateResponse(
@@ -178,7 +179,7 @@ async def ui_decide(request: Request, proposal_id: str, decision: str) -> HTMLRe
         status = "approved" if decision == "approve" else "denied"
         store.decide_proposal(
             proposal_id, status,
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+            datetime.now(UTC).isoformat().replace("+00:00", "Z"))
     return await ui_proposals(request)
 
 
@@ -287,7 +288,7 @@ async def ui_models(request: Request) -> HTMLResponse:
 async def ui_nodes(request: Request) -> HTMLResponse:
     import json as _json
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     nodes = []
     for n in request.app.state.store.list_nodes():
         installed = _json.loads(n.installed or "[]")

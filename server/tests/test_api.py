@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 
 import redis
-
 from clusterbuck.queue import stream_key
 
 
@@ -24,8 +23,47 @@ def _submit(client, **overrides):
     return client.post("/jobs", json=body)
 
 
-def test_healthz(client):
-    assert client.get("/healthz").json() == {"status": "ok"}
+def test_healthz_reports_its_dependencies(client):
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "checks": {"redis": "ok", "db": "ok"}}
+
+
+def test_healthz_is_degraded_and_503_when_redis_is_unreachable(client, monkeypatch):
+    """The answer this endpoint must never get wrong.
+
+    It used to be a hardcoded `{"status": "ok"}` that checked nothing — and it is the
+    UNAUTHENTICATED endpoint the README tells an operator to check when diagnosing the
+    two reachability rules, and the one the systemd unit probes. A coordinator whose
+    Redis is unreachable cannot enqueue a job, cannot return a result and cannot run the
+    reaper, and it answered `ok` to every one of them.
+    """
+    async def dead_ping():
+        raise ConnectionError("no route to host")
+
+    monkeypatch.setattr(client.app.state.queue.client, "ping", dead_ping)
+
+    r = client.get("/healthz")
+    assert r.status_code == 503, "a caller reading only the status code must learn this"
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert body["checks"] == {"redis": "unavailable", "db": "ok"}
+
+
+def test_healthz_names_the_failing_dependency_and_nothing_else(client, monkeypatch):
+    """Naming which dependency is down is what makes the check actionable. Saying more
+    than that would hand detail to an unauthenticated caller for no operational gain, so
+    no URLs, no credentials, no versions."""
+    def dead_db():
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(client.app.state.store, "ping", dead_db)
+
+    body = client.get("/healthz").json()
+    assert body["checks"]["db"] == "unavailable"
+    flat = json.dumps(body)
+    for leak in ("redis://", "sqlite", "/", "password", "locked"):
+        assert leak not in flat.replace('"/healthz"', ""), f"{leak!r} leaked"
 
 
 def test_submit_returns_202_and_enqueues(client, redis_url):
@@ -300,7 +338,6 @@ def test_worker_is_reported_before_the_job_finishes(client, redis_url):
     on a cross-loop future. The store is plain SQLite, so it is shared directly.
     """
     import anyio
-
     from clusterbuck.observe import observe_tick
     from clusterbuck.queue import Queue, stream_key
 

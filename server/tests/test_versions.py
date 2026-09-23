@@ -8,12 +8,18 @@ because bugs are not monotonic.
 
 from __future__ import annotations
 
+import json as _json
+from pathlib import Path as _Path
+
+import pytest as _pytest
+from clusterbuck.api import create_app as _create_app
 from clusterbuck.versions import (
     PROTOCOL_VERSION,
     VersionPolicy,
     assess,
     parse_version,
 )
+from fastapi.testclient import TestClient
 
 OK = "ok"
 STALE = "stale"
@@ -187,15 +193,6 @@ def test_quarantined_worker_is_told_to_stop_and_gets_no_install(client, monkeypa
 
 
 # --- serving the signed artifact (ADR 38) ----------------------------------------------
-
-import json as _json
-from pathlib import Path as _Path
-
-import pytest as _pytest
-
-from fastapi.testclient import TestClient
-
-from clusterbuck.api import create_app as _create_app
 
 
 @_pytest.fixture()

@@ -107,7 +107,7 @@ class Queue:
         self._r = client
 
     @classmethod
-    def from_url(cls, url: str | None = None) -> "Queue":
+    def from_url(cls, url: str | None = None) -> Queue:
         return cls(redis.from_url(url or settings.redis_url, decode_responses=True))
 
     @property

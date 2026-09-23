@@ -23,7 +23,7 @@ runs it twice. Real heartbeats (ADR 9) narrow this, but the idle threshold is th
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .queue import REAPER_CONSUMER, TIER_ORDER, Queue, stream_key
 from .store import Store
@@ -33,7 +33,7 @@ _log = logging.getLogger("clusterbuck.reaper")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 async def reaper_scan(

@@ -47,7 +47,8 @@ def test_mint_enroll_heartbeat_list(client):
 def test_capability_proposal_scales_with_ram(client):
     def caps(ram):
         tok = client.post("/nodes/tokens").json()["join_token"]
-        return client.post("/nodes/enroll", json=_enroll_body(tok, ram)).json()["proposed"]["capabilities"]
+        body = client.post("/nodes/enroll", json=_enroll_body(tok, ram)).json()
+        return body["proposed"]["capabilities"]
 
     assert caps(16) == ["8b-extract"]
     assert caps(32) == ["8b-extract", "32b-reason"]

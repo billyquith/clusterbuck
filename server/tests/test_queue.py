@@ -9,7 +9,6 @@ alone. `backlog` is that missing number, and `queue_position` is a client's own 
 from __future__ import annotations
 
 import pytest
-
 from clusterbuck.queue import (
     CLOUD_EXECUTOR_CONSUMER,
     REAPER_CONSUMER,

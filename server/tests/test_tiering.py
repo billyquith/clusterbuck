@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from clusterbuck.queue import (
     TIER_ORDER,
     URGENT_TIER,
@@ -394,3 +393,30 @@ def test_a_capability_whose_nodes_are_all_silent_stays_untiered(store):
                            queues=json.dumps([]), jobs_done=0, tps=None,
                            last_heartbeat="t")
     assert tiering_ready(store, None, CAP) is False
+
+
+async def test_a_promotion_reaches_the_payload_not_just_the_stream(store, queue):
+    """`mark_escalated` rewrites SQLite only, and the move used to copy the entry
+    byte-identical — so a job promoted from `waitable` to `necessary` still said
+    `waitable` on the wire for the rest of its life.
+
+    That is survivable today only because nothing reads the field: the worker keys off
+    the stream it drains. It is the exact shape of latent disagreement this repo keeps
+    finding (a record that names part of the truth and is never reconciled), and it bites
+    the moment anything starts trusting the payload — the cloud executor already parses
+    the whole record back with `JobRecord.from_wire`.
+    """
+    entry = await queue.enqueue({
+        "id": "job_promo", "created_at": "t", "capability": CAP, "prompt": "x",
+        "params": {}, "urgency": "waitable", "privacy": "local_only",
+        "result_key": "res_promo", "attempts": 0, "max_attempts": 3,
+    })
+    store.insert(id="job_promo", result_key="res_promo", capability=CAP, created_at="t")
+    store.record_delivery("job_promo", stream=stream_key(CAP), entry_id=entry)
+
+    assert await move_to_urgent_tier(
+        store, queue, store.get("job_promo"), group=GROUP) is True
+
+    moved = store.get("job_promo")
+    payload = await queue.read_entry(moved.stream, moved.entry_id)
+    assert payload["urgency"] == "necessary", "the wire must agree with the row"

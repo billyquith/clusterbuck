@@ -87,7 +87,7 @@ class Fleet(BaseModel):
         return stream_key(capability)
 
     @model_validator(mode="after")
-    def _declared_queues_match_the_contract(self) -> "Fleet":
+    def _declared_queues_match_the_contract(self) -> Fleet:
         """A declared `queue:` that disagrees with `q:<capability>` is a silent trap.
 
         The server would keep publishing to the derived stream while the file claims
@@ -107,7 +107,7 @@ class Fleet(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _no_host_cloud_capabilities_have_no_node(self) -> "Fleet":
+    def _no_host_cloud_capabilities_have_no_node(self) -> Fleet:
         """A registered provider account (ADR 30) has no host node — the coordinator calls
         it in-process, never a worker. Assigning one to a node would enroll a worker that
         can never actually serve it, so fail fast at load rather than silently."""
@@ -152,7 +152,7 @@ def _artifact_aliases(name: str) -> set[str]:
 
 
 def unservable_capabilities(
-    fleet: "Fleet | None", advertised: list[str], installed: list[str],
+    fleet: Fleet | None, advertised: list[str], installed: list[str],
 ) -> list[str]:
     """Capabilities this node serves whose model it does not actually have installed.
 

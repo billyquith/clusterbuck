@@ -9,7 +9,6 @@ only exit was `MAXLEN ~` trimming it away with no result and no status change.
 from __future__ import annotations
 
 import pytest
-
 from clusterbuck.backstop import COORDINATOR, backstop_scan
 from clusterbuck.queue import Queue, stream_key
 from clusterbuck.store import Store

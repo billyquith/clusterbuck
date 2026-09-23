@@ -80,7 +80,8 @@ def build_router(fleet: Fleet, cloud_fallback_model: str | None = None) -> Route
     if cloud_fallback_model:
         model_list.append({
             "model_name": "cloud-fallback",
-            # Provider + key come from the standard env (e.g. OPENAI_API_KEY); LiteLLM owns that.
+            # Provider + key come from the standard env (e.g. OPENAI_API_KEY);
+            # LiteLLM owns that.
             "litellm_params": {"model": cloud_fallback_model},
         })
         fallbacks = [{name: ["cloud-fallback"]} for name in fleet.capabilities]

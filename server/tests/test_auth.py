@@ -8,9 +8,8 @@ install) must be blocked at its first unauthenticated step.
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
 from clusterbuck.api import create_app
+from fastapi.testclient import TestClient
 
 KEY = "s3cret-operator-key"
 

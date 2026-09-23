@@ -14,10 +14,9 @@ from __future__ import annotations
 import json
 
 import pytest
-from fastapi.testclient import TestClient
-
 from clusterbuck.api import create_app
 from clusterbuck.config import JOIN_PASSWORD_MIN_LEN
+from fastapi.testclient import TestClient
 
 GOOD_PASSWORD = "a-sufficiently-long-join-password"
 HEADER = "X-CBK-Join-Password"
@@ -348,8 +347,7 @@ def test_bootstrap_signs_the_artifact_and_hands_over_the_verifying_key(
     refuses every update: correct, but it left the patch channel permanently inert on
     every node built the documented way.
     """
-    from clusterbuck.signing import (generate_keypair, private_pem, public_pem,
-                                     verify_bootstrap)
+    from clusterbuck.signing import generate_keypair, private_pem, public_pem, verify_bootstrap
 
     key = generate_keypair()
     key_file = tmp_path / "signing.pem"

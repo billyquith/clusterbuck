@@ -64,9 +64,8 @@ def redis_url() -> str:
 
 @pytest.fixture()
 def client(redis_url, tmp_path):
-    from fastapi.testclient import TestClient
-
     from clusterbuck.api import create_app
+    from fastapi.testclient import TestClient
 
     app = create_app(
         redis_url=redis_url, db_path=str(tmp_path / "test.db"), start_scheduler=False

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from clusterbuck.wol import magic_packet, parse_mac
 
 

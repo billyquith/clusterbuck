@@ -108,6 +108,17 @@ async def move_to_urgent_tier(store: Store, queue, row, *, group: str) -> bool:
     if payload is None:
         return False  # trimmed away, or unparseable — nothing safe to move
 
+    # The promotion has to reach the PAYLOAD, not just the stream it sits on.
+    #
+    # `mark_escalated` rewrites `urgency` in SQLite only, and the entry was previously
+    # moved byte-identical — so a job promoted from `waitable` to `necessary` still said
+    # `waitable` on the wire for the rest of its life. Only the tier placement carried
+    # the promotion, which happens to be enough for the worker TODAY (it reads the stream
+    # it drains, not the field) and is exactly the kind of latent disagreement that bites
+    # whenever something new starts reading the wire value. The reaper's requeue keeps
+    # whatever it reclaimed, so this is the one place that can correct it.
+    payload = {**payload, "urgency": "necessary"}
+
     dst = stream_key(row.capability, URGENT_TIER)
     store.clear_delivery(row.id)
     outcome = await queue.move_if_unclaimed(

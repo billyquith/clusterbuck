@@ -17,7 +17,6 @@ import json
 
 import pytest
 import redis
-
 from clusterbuck.queue import Queue, stream_key
 from clusterbuck.store import Store
 from clusterbuck.usage import usage_scan

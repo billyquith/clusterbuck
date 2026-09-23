@@ -12,7 +12,6 @@ import asyncio
 import logging
 
 import pytest
-
 from clusterbuck import background
 
 

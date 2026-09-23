@@ -15,11 +15,10 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
-
 from clusterbuck.api import create_app
 from clusterbuck.fleet import CapabilitySpec, Fleet
 from clusterbuck.sync import build_router
+from fastapi.testclient import TestClient
 
 FAKE_SERVER = Path(__file__).resolve().parents[1] / "tools" / "fake_model_server.py"
 

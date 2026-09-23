@@ -8,11 +8,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
-from fastapi.testclient import TestClient
-
 from clusterbuck import signing
 from clusterbuck.api import create_app
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+from fastapi.testclient import TestClient
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contract"
 
@@ -34,7 +33,8 @@ def test_sign_verify_roundtrip():
 
 
 def test_committed_fixture_verifies():
-    m = json.loads((CONTRACT / "examples" / "update-manifest.valid.json").read_text(encoding="utf-8"))
+    m = json.loads((CONTRACT / "examples" / "update-manifest.valid.json")
+                   .read_text(encoding="utf-8"))
     pub = load_pem_public_key((CONTRACT / "examples" / "update-signing.pub.pem").read_bytes())
     assert signing.verify_manifest(pub, m)
 
@@ -126,7 +126,9 @@ def _flavour_heartbeat(tmp_path, redis_url, monkeypatch, flavour, artifacts):
         return hb.json()
 
 
-def test_a_worker_is_never_offered_an_artifact_it_cannot_execute(tmp_path, redis_url, monkeypatch):
+def test_a_worker_is_never_offered_an_artifact_it_cannot_execute(
+    tmp_path, redis_url, monkeypatch
+):
     """The hazard this field exists to close.
 
     A Python worker on darwin/arm64 used to be handed the osx-arm64 single-file binary,

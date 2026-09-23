@@ -51,7 +51,9 @@ class Job(SQLModel, table=True):
     client_key: str | None = None  # opaque client label (the eval harness tags with it)
     task_class: str | None = None  # need-shaped task class, as submitted
     promoted_by: str | None = None  # null | 'age' — escalation provenance
-    attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})  # delivery attempts, incremented by the reaper
+    # Delivery attempts, incremented by the reaper when it concludes a worker abandoned
+    # the job. NOT a "has anything picked this up" signal — a healthy job reads 0 for life.
+    attempts: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
 
     # --- caller provenance (protocols.md §1b) ---------------------------------------
     # Flattened from JobRecord's nested `submitter`: this table is scanned by the

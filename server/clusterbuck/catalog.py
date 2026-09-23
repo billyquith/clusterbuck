@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .evaluation import SCALE_VERSION, TASK_CLASSES
 from .store import Store
@@ -290,7 +290,7 @@ def scan_node(store: Store, node, *, now: str, scale_version: str = SCALE_VERSIO
         created.append(pid)
 
     # --- reclaim: installed models that haven't earned their disk lately ---
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=RECLAIM_UNUSED_DAYS)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now(UTC) - timedelta(days=RECLAIM_UNUSED_DAYS)).strftime("%Y-%m-%d")
     used = store.models_used_since(cutoff)
     for artifact in sorted(installed):
         if artifact in used:

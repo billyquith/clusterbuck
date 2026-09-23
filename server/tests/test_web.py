@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 
 
@@ -13,9 +15,8 @@ def fleet_client(redis_url, tmp_path):
     so without one the panel renders its empty state and asserts nothing about the
     numbers.
     """
-    from fastapi.testclient import TestClient
-
     from clusterbuck.api import create_app
+    from fastapi.testclient import TestClient
 
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(
@@ -213,12 +214,11 @@ def models_client(redis_url, tmp_path):
     of the joined row to be exercised at once."""
     import json
 
-    from fastapi.testclient import TestClient
-
     from clusterbuck.api import create_app
     from clusterbuck.evaluation import SCALE_VERSION
     from clusterbuck.orm.node import Node
     from clusterbuck.store import Store
+    from fastapi.testclient import TestClient
 
     fleet = tmp_path / "fleet.yaml"
     fleet.write_text(
@@ -241,7 +241,7 @@ def models_client(redis_url, tmp_path):
                      size_gb=4.5, min_ram_gb=11.0, source="ollama",
                      registry_ref="good:8b", expected_ability=None, added_at="t",
                      context_tokens=128000, supports_tools=True, supports_vision=False)
-    with s._session() as sess:  # noqa: SLF001 — fixture seeding, no enroll round-trip
+    with s._session() as sess:
         sess.add(Node(node_id="node-1", node_key="k", hostname="box", os="linux",
                       arch="x64", mode="active", enrolled_at="t", tps=42.0,
                       capabilities=json.dumps(["8b-extract"]),
@@ -321,12 +321,12 @@ def _heartbeat_at(client, node_id: str, when: str) -> None:
 def test_heartbeat_age_falls_back_to_enrollment():
     """A node that enrolled and never heartbeated has been silent since it enrolled —
     reading that as "no information" would exempt exactly the nodes that never came up."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from types import SimpleNamespace
 
     from clusterbuck.web import heartbeat_age_s
 
-    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 2, tzinfo=UTC)
     never = SimpleNamespace(last_heartbeat=None, enrolled_at="2026-01-01T00:00:00Z")
     assert heartbeat_age_s(never, now=now) == 86400
 
@@ -395,7 +395,7 @@ def test_an_unreadable_stamp_is_silent_not_healthy(client):
     from."""
     node_id = _enroll(client, "node-corrupt")
     _heartbeat_at(client, node_id, "not-a-date")
-    with client.app.state.store._session() as s:  # noqa: SLF001 - no setter for a bad stamp
+    with client.app.state.store._session() as s:
         from clusterbuck.orm.node import Node
         node = s.get(Node, node_id)
         node.enrolled_at = "also-not-a-date"

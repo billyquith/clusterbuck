@@ -50,6 +50,7 @@ and HTTP — never in shared code.
 docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine
 
 cd server && uv venv && uv pip install -e ".[dev]" && uv run pytest
+uv run ruff check clusterbuck tests
 CBK_API_KEY=… uv run cbk-server      # API + sync plane + dashboard on :8018
 
 cd worker && uv venv && uv pip install -e ".[dev]" && uv run pytest

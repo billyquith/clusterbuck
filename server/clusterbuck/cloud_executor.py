@@ -137,7 +137,7 @@ class CloudExecutor:
                 continue
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._poll_s)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def _process(self, capability: str, entry_id: str, raw: dict, *,

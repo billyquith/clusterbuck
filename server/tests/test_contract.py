@@ -12,8 +12,6 @@ import json
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator
-
 from clusterbuck.models import (
     EnrollRequest,
     HeartbeatRequest,
@@ -24,6 +22,7 @@ from clusterbuck.models import (
     Submitter,
     Urgency,
 )
+from jsonschema import Draft202012Validator
 
 
 def load_json(path: Path) -> dict:

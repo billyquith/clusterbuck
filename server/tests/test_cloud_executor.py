@@ -4,10 +4,7 @@ worker, so cloud-backed jobs are drained and executed here instead of over the w
 
 from __future__ import annotations
 
-import json
-
 import pytest
-
 from clusterbuck.cloud_executor import (
     CONSUMER_ID,
     CloudExecutor,
@@ -147,7 +144,9 @@ async def test_job_params_cannot_override_the_api_key_or_base(fleet, queue, monk
     assert captured["temperature"] == 0.2  # ordinary inference params still pass through
 
 
-async def test_missing_api_key_fails_the_job_without_calling_the_provider(fleet, queue, monkeypatch):
+async def test_missing_api_key_fails_the_job_without_calling_the_provider(
+    fleet, queue, monkeypatch
+):
     monkeypatch.delenv("CBK_TEST_PROVIDER_KEY", raising=False)
     record = _enqueue(queue)
     await queue.enqueue(record.to_wire())

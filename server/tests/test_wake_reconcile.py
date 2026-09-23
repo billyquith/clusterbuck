@@ -18,7 +18,6 @@ import logging
 import time
 
 import pytest
-
 from clusterbuck.fleet import Fleet, NodeSpec
 from clusterbuck.queue import Queue
 from clusterbuck.store import Store

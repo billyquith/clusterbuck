@@ -11,13 +11,12 @@ from __future__ import annotations
 import time
 
 import pytest
-from fastapi.testclient import TestClient
-
 from clusterbuck.api import create_app
-from clusterbuck.fleet import Fleet, NodeSpec, CapabilitySpec
-from clusterbuck.reservations import admit, reservation_tick, window_start_epoch
 from clusterbuck.evaluation import SCALE_VERSION
+from clusterbuck.fleet import CapabilitySpec, Fleet, NodeSpec
+from clusterbuck.reservations import admit, reservation_tick, window_start_epoch
 from clusterbuck.store import Store
+from fastapi.testclient import TestClient
 
 CAP = "8b-extract"
 

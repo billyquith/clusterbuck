@@ -10,6 +10,15 @@ from dataclasses import dataclass
 class Settings:
     redis_url: str = os.environ.get("CBK_REDIS_URL", "redis://localhost:6379/0")
     # SQLite is the durable system of record (ADR: Redis stays purely the broker).
+    #
+    # The default is RELATIVE, so it resolves against the working directory — the same
+    # footgun `fleet_path` is already warned about at its own use site, and a worse one
+    # here. A unit file with a different `WorkingDirectory`, or a `cd` before a manual
+    # start, silently opens a DIFFERENT database: the coordinator comes up healthy with
+    # an empty schema, no enrolled nodes and no ability matrix, which reads as "the
+    # fleet forgot everything" rather than "you are looking at the wrong file". The
+    # startup log states the resolved absolute path for that reason — set CBK_DB_PATH to
+    # an absolute path on any real deployment.
     db_path: str = os.environ.get("CBK_DB_PATH", "cbk.db")
     # Result blobs live in Redis under result_key with a TTL (protocols.md §2).
     result_ttl_s: int = int(os.environ.get("CBK_RESULT_TTL_S", "86400"))
@@ -144,7 +153,7 @@ class ConfigError(ValueError):
     """A setting combination that would silently corrupt job handling."""
 
 
-def validate(s: "Settings") -> None:
+def validate(s: Settings) -> None:
     """Refuse to start on a recovery-timing combination that loses or duplicates work.
 
     These three are a chain, and every link was previously stated in a comment and checked

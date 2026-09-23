@@ -269,7 +269,8 @@ def resolve(
 
     detail = (
         f"no artifact reaches ability {min_ability} for task_class {task_class!r}"
-        f" (best available: {best_available if best_available is not None else 'none measured'})"
+        f" (best available: "
+        f"{best_available if best_available is not None else 'none measured'})"
     )
     if unmet:
         detail += (
@@ -279,7 +280,8 @@ def resolve(
     if excluded_by_privacy:
         detail += f"; {excluded_by_privacy} cloud artifact(s) excluded by privacy=local_only"
     if excluded_by_budget:
-        detail += f"; {excluded_by_budget} cloud artifact(s) excluded by budget ({budget.reason})"
+        detail += (f"; {excluded_by_budget} cloud artifact(s) excluded by budget "
+                   f"({budget.reason})")
     if min_ability > TIER1_MAX_ABILITY:
         # Without this the caller is told "no artifact reaches ability 9" and goes looking
         # for a better model — but no model, local or cloud, can hold a 9 today. The

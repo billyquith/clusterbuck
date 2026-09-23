@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from clusterbuck.evaluation import SCALE_VERSION, seed_ability
 from clusterbuck.fleet import CapabilitySpec, Fleet, NodeSpec
-from clusterbuck.routing import (MissingCapability, NoCapableArtifact,
-                                 resolve, resolve_capability)
+from clusterbuck.routing import (
+    MissingCapability,
+    NoCapableArtifact,
+    resolve,
+    resolve_capability,
+)
 from clusterbuck.store import Store
 
 

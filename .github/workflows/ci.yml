@@ -30,6 +30,12 @@ jobs:
       - name: Install
         working-directory: server
         run: uv venv && uv pip install -e ".[dev]"
+      - name: Lint
+        working-directory: server
+        # The coordinator is the largest body of Python here and was the only part with
+        # no lint gate: the worker job below has run ruff from the start, and 575 lines
+        # of PowerShell have a dedicated job, while ~5k lines of server code had nothing.
+        run: uv run ruff check clusterbuck tests
       - name: Test
         working-directory: server
         env:

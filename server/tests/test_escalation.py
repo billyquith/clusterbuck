@@ -6,7 +6,6 @@ import json
 import time
 
 import pytest
-
 from clusterbuck.escalation import escalation_scan
 from clusterbuck.fleet import Fleet, NodeSpec
 from clusterbuck.queue import Queue

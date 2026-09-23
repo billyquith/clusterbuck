@@ -27,26 +27,31 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-import pytest
 from alembic import command
-from sqlmodel import SQLModel
-
 from clusterbuck import migrate
 from clusterbuck.db import make_engine
-from clusterbuck.orm.ability import Ability
-from clusterbuck.orm.catalog_entry import CatalogEntry
-from clusterbuck.orm.eval_generation import EvalGeneration
-from clusterbuck.orm.eval_run import EvalRun
-from clusterbuck.orm.job import Job
-from clusterbuck.orm.join_token import JoinToken
-from clusterbuck.orm.node import Node
-from clusterbuck.orm.node_model import NodeModel
-from clusterbuck.orm.perf_run import PerfRun
-from clusterbuck.orm.perf_sample import PerfSample
-from clusterbuck.orm.proposal import Proposal
-from clusterbuck.orm.reservation import Reservation
-from clusterbuck.orm.usage import Usage
+
+# Imported for their SIDE EFFECT: each declares a SQLModel table, and importing it is what
+# registers that table on `SQLModel.metadata`. The schema-parity test below builds one
+# database from that metadata and one from the migrations and demands they match, so a
+# model that is not imported here is simply absent from the comparison — the test would
+# still pass, while checking a subset of the schema. Hence the noqa rather than a deletion:
+# a linter cannot see that these are used, and neither can a green suite.
+from clusterbuck.orm.ability import Ability  # noqa: F401
+from clusterbuck.orm.catalog_entry import CatalogEntry  # noqa: F401
+from clusterbuck.orm.eval_generation import EvalGeneration  # noqa: F401
+from clusterbuck.orm.eval_run import EvalRun  # noqa: F401
+from clusterbuck.orm.job import Job  # noqa: F401
+from clusterbuck.orm.join_token import JoinToken  # noqa: F401
+from clusterbuck.orm.node import Node  # noqa: F401
+from clusterbuck.orm.node_model import NodeModel  # noqa: F401
+from clusterbuck.orm.perf_run import PerfRun  # noqa: F401
+from clusterbuck.orm.perf_sample import PerfSample  # noqa: F401
+from clusterbuck.orm.proposal import Proposal  # noqa: F401
+from clusterbuck.orm.reservation import Reservation  # noqa: F401
+from clusterbuck.orm.usage import Usage  # noqa: F401
 from clusterbuck.store import Store
+from sqlmodel import SQLModel
 
 # The current Alembic head. Pinned deliberately rather than derived from the migration
 # scripts: deriving it from the machinery under test would let a migration that was

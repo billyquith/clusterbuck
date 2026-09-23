@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from clusterbuck.budget import check_cloud_budget
 from clusterbuck.store import Store
 

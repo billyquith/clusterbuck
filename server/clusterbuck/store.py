@@ -532,14 +532,14 @@ class Store:
                        supports_tools: bool | None = None,
                        supports_json_schema: bool | None = None,
                        supports_vision: bool | None = None) -> None:
-        fields = dict(
-            family=family, params_b=params_b, active_params_b=active_params_b,
-            quant=quant, size_gb=size_gb,
-            min_ram_gb=min_ram_gb, source=source, registry_ref=registry_ref,
-            expected_ability=expected_ability, context_tokens=context_tokens,
-            supports_tools=supports_tools, supports_json_schema=supports_json_schema,
-            supports_vision=supports_vision,
-        )
+        fields = {
+            "family": family, "params_b": params_b, "active_params_b": active_params_b,
+            "quant": quant, "size_gb": size_gb,
+            "min_ram_gb": min_ram_gb, "source": source, "registry_ref": registry_ref,
+            "expected_ability": expected_ability, "context_tokens": context_tokens,
+            "supports_tools": supports_tools, "supports_json_schema": supports_json_schema,
+            "supports_vision": supports_vision,
+        }
         with self._session() as s:
             row = s.get(CatalogEntry, artifact)
             if row is None:
@@ -554,6 +554,18 @@ class Store:
         with self._session() as s:
             stmt = select(CatalogEntry).order_by(CatalogEntry.min_ram_gb, CatalogEntry.artifact)
             return list(s.exec(stmt))
+
+    def ping(self) -> None:
+        """Cheapest possible proof the database is openable and answering.
+
+        `SELECT 1` rather than a COUNT over a table: this runs on every `/healthz`,
+        including from a probe on a short interval, and a readiness check that gets
+        slower as the fleet accumulates history is a readiness check that will one day
+        be the reason the probe times out. It opens a connection, which is the part that
+        actually fails when the file is missing, locked or on a full disk.
+        """
+        with self._conn() as c:
+            c.execute("SELECT 1").fetchone()
 
     def catalog_count(self) -> int:
         with self._conn() as c:
@@ -920,7 +932,8 @@ class Store:
 
     def recent_usage(self, limit: int = 40) -> list[Usage]:
         """Most recent usage rows, newest first — drives the dashboard timeline. `ts` is
-        ISO-8601 with a 'Z' suffix (usage_scan), so ordering it as text sorts chronologically."""
+        ISO-8601 with a 'Z' suffix (usage_scan), so ordering it as text sorts
+        chronologically."""
         with self._session() as s:
             stmt = select(Usage).order_by(Usage.ts.desc()).limit(limit)
             return list(s.exec(stmt))

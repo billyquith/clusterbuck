@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import redis.asyncio as aioredis
-
 from clusterbuck.fleet import Fleet, NodeSpec
 from clusterbuck.queue import (
     CLOUD_EXECUTOR_CONSUMER,

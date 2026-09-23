@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 
 import pytest
-
 from clusterbuck.__main__ import (
     _HANDLER_MARK,
     DEFAULT_LOG_LEVEL,

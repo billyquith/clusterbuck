@@ -464,6 +464,17 @@ successful detection is remembered; a failed one is not, so a model server start
 the worker is still found on a later beat. Detection lives in one place and the manager
 follows it, so the two halves cannot disagree about what the node is running.
 
+**"Both products" is exact: there are two adapters, Ollama and LM Studio, and no others.**
+llama.cpp and vLLM are first-class for *inference* — they speak `/v1/chat/completions`,
+so a node runs jobs on them perfectly — but they fall through to `none`, and that is a
+permanent consequence rather than a gap waiting on a probe. Such a node reports nothing
+warm and no digests, so: `stats.load_s` is never measurable there (coldness cannot be
+proven), its reservation pre-warm lead falls back to a constant, a digest change is never
+noticed so a model updated in place keeps its stale ability score, and an approved
+install has to be done by hand. All of that is the LM-Studio-on-`auto` failure described
+above, except that it is not a misconfiguration and cannot be fixed by detecting harder.
+Worth knowing before choosing a model server for a node you intend to reserve against.
+
 A node that slept through its own inference is the awkward case, because it is not dead:
 the reaper hands the work on, and hours later the sleeper wakes and finishes the
 generation it was suspended in. Both answers are valid, so the **first** one to land is
@@ -568,11 +579,26 @@ Two governors apply to all of it:
 - **Privacy.** Every job carries `privacy: local_only | cloud_ok`, defaulting to
   `local_only`. A `local_only` job **never** leaves the LAN — not at `urgent`, not under
   overflow pressure, not to hit a deadline. It waits, or fails explicitly.
-- **Budget.** A monthly cap, and it is *enforced*, not merely displayed. `necessary` may
-  spend the **paced pool** — the cap minus a reserve, scaled by how much of the month has
-  elapsed, so week one cannot burn the month. `urgent` may additionally draw the reserve.
-  `waitable` never reaches the budget check at all, because for it cloud is a wake-rights
-  question decided earlier: no wake, no cloud, no demand.
+- **Budget.** A monthly cap, and on the async plane it is *enforced*, not merely
+  displayed. `necessary` may spend the **paced pool** — the cap minus a reserve, scaled
+  by how much of the month has elapsed, so week one cannot burn the month. `urgent` may
+  additionally draw the reserve. `waitable` never reaches the budget check at all,
+  because for it cloud is a wake-rights question decided earlier: no wake, no cloud, no
+  demand.
+
+  **The sync plane is outside all of this, and that is a hole, not a design.** A
+  completion served through `/v1/chat/completions` is never captured by `usage.py`, so it
+  is never gated by `budget.py` either — a registered provider account driven through the
+  sync plane can spend real money with no appearance in the cap, the timeline, the
+  connections panel, or the *avoided cloud spend* headline this project names as its
+  reason to exist. Two things follow: the headline is a floor rather than a figure on any
+  fleet using the sync plane against a cloud account, and "enforced" above should be read
+  as "enforced where clusterbuck executes the job itself". Closing it means metering the
+  sync plane, most likely through a LiteLLM success callback writing the same usage rows.
+
+  A related smaller one: a capability with no `price_*_per_1k` contributes `$0.0`
+  silently, so a tier added without prices quietly deflates the headline rather than
+  complaining.
 
 Cloud models are **artifacts with a price and no host node**. They enter the same catalog
 and the same ability matrix as local ones, measured rather than assumed — and by the same
@@ -801,6 +827,7 @@ tests fail.
 docker run -d --name cbk-redis -p 6379:6379 redis:7-alpine
 
 cd server && uv venv && uv pip install -e ".[dev]" && uv run pytest
+uv run ruff check clusterbuck tests
 CBK_API_KEY=… uv run cbk-server      # API + sync plane + dashboard on :8018
 
 cd worker && uv venv && uv pip install -e ".[dev]" && uv run pytest
@@ -817,9 +844,11 @@ The e2e scripts each prove one property against real processes and a real Redis;
 share `deploy/e2e/lib.sh` for the harness. `USE_OLLAMA=1` runs them against real
 inference instead of the zero-weight stub.
 
-CI gates every PR on: both unit suites, the contract validator, the full e2e suite, the
-worker's cross-platform tests on macOS and Windows, and a parse/lint pass over every
-PowerShell and shell script.
+CI gates every PR on: both unit suites, **both lint passes**, the contract validator, the
+full e2e suite, the worker's cross-platform tests on macOS and Windows, and a parse/lint
+pass over every PowerShell and shell script. (The server's lint gate is newer than the
+rest: the coordinator is the largest body of Python here and was for a long time the only
+part with no linting at all, while 575 lines of PowerShell had a dedicated job.)
 
 ### Worker self-update
 

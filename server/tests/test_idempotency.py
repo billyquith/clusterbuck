@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 
 import redis
-
 from clusterbuck.queue import stream_key
 
 KEY = "req-4f9c1e70a2"

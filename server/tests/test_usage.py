@@ -7,7 +7,6 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from clusterbuck.fleet import CapabilitySpec, Fleet
 from clusterbuck.queue import Queue
 from clusterbuck.store import Store

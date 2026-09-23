@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from clusterbuck.catalog import (
     PROFILE_DISK_QUOTA_GB,
-    RECLAIM_UNUSED_DAYS,
     fits,
     propose_reeval,
     quota_for,
@@ -186,7 +184,7 @@ def test_upgrade_proposed_for_better_fitting_artifact(store):
 
 def test_no_upgrade_when_nothing_fits(store):
     # A tiny node with a tiny quota: the only fitting artifact is already installed.
-    ids = scan_node(store, _node(ram_gb=8.0, disk_quota_gb=3.0), now="t")
+    scan_node(store, _node(ram_gb=8.0, disk_quota_gb=3.0), now="t")
     kinds = {p.kind for p in store.list_proposals()}
     assert "upgrade" not in kinds
 
@@ -366,7 +364,6 @@ def test_digest_change_actually_drops_the_stale_score(client):
     cleared the ability row, so the stale score kept driving routing forever. This asserts the
     EFFECT (score gone, artifact re-queued for measurement), not the announcement.
     """
-    from clusterbuck.evaluation import SCALE_VERSION
 
     node = _enroll(client)
     hdr = {"x-cbk-node-key": node["node_key"]}

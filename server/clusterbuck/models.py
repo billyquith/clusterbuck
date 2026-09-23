@@ -151,7 +151,7 @@ class JobSubmit(BaseModel):
     submitter: Submitter | None = None  # optional caller provenance (§1b)
 
     @model_validator(mode="after")
-    def _check(self) -> "JobSubmit":
+    def _check(self) -> JobSubmit:
         if self.capability is None and (
             self.task_class is None or self.min_ability is None
         ):
@@ -189,7 +189,7 @@ class ReservationSubmit(BaseModel):
     window: Window = Field(default_factory=Window)
 
     @model_validator(mode="after")
-    def _check(self) -> "ReservationSubmit":
+    def _check(self) -> ReservationSubmit:
         if self.window.recur is not None:
             raise ValueError("recurring reservations are not supported yet (M2b)")
         if self.window.start != "asap":
@@ -362,7 +362,7 @@ class JobRecord(BaseModel):
         return self.model_dump(mode="json", exclude_none=True)
 
     @classmethod
-    def from_wire(cls, data: dict[str, Any]) -> "JobRecord":
+    def from_wire(cls, data: dict[str, Any]) -> JobRecord:
         """The inverse of `to_wire` — used by the coordinator's own cloud executor (ADR 30)
         to read back a job it (or a client) enqueued, the same way a worker parses one."""
         return cls.model_validate(data)

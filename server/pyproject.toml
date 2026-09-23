@@ -38,3 +38,21 @@ packages = ["clusterbuck"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+# Mirrors worker/pyproject.toml. The coordinator had no lint configuration and no CI lint
+# step at all, while the worker had both and 575 lines of PowerShell had a dedicated job —
+# so the largest body of Python in the repo was the only part nothing checked.
+line-length = 96
+src = ["clusterbuck"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+# The docs and comments here use en dashes and arrows deliberately, matching the repo's voice.
+#
+# UP042 wants `StrEnum` in place of `(str, Enum)`. Declined: these enums are serialised
+# onto the wire and compared against JSON, and the two differ in how `str()` and f-strings
+# render a member — `StrEnum` gives the value, `(str, Enum)` gives `Urgency.waitable`.
+# Every call site here already passes `.value` explicitly, so switching would be a silent
+# behaviour change in the formatting of anything that does not, in exchange for nothing.
+ignore = ["RUF001", "RUF002", "RUF003", "UP042"]

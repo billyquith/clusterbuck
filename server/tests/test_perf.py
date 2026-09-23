@@ -7,12 +7,10 @@ from __future__ import annotations
 
 import json
 import random
-import re
 import time
 
 import pytest
 import redis
-
 from clusterbuck.perf_runner import CATEGORIES
 
 # --- queries come from the shared suite: pure unit tests, no fixtures ---
@@ -70,9 +68,8 @@ def test_the_ability_floors_still_separate_served_from_unassigned():
 
 @pytest.fixture()
 def app_client(redis_url, tmp_path):
-    from fastapi.testclient import TestClient
-
     from clusterbuck.api import create_app
+    from fastapi.testclient import TestClient
 
     app = create_app(
         redis_url=redis_url, db_path=str(tmp_path / "perf.db"), start_scheduler=False

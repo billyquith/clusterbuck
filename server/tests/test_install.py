@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from clusterbuck.catalog import (
     apply_action_result,
     install_allowed,
@@ -32,7 +31,8 @@ def _enrolled(store: Store, *, profile="shared", ram=64.0, auto=False) -> str:
         hostname, os, arch, profile_ = "h", "darwin", "arm64", profile
 
         class hw:
-            ram_gb, accelerator, vram_gb, disk_free_gb, bench_tps_small = ram, "metal", None, 900.0, None
+            ram_gb, accelerator, vram_gb = ram, "metal", None
+            disk_free_gb, bench_tps_small = 900.0, None
 
     req = _Req()
     req.profile = profile

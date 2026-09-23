@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from clusterbuck.eval_runner import (
     EVAL_CLIENT_KEY,
     artifacts_needing_eval,
@@ -14,7 +13,6 @@ from clusterbuck.eval_runner import (
     eval_tick,
 )
 from clusterbuck.evaluation import (
-    MIN_ITEMS_FOR_SCORE,
     SCALE_VERSION,
     TIER1_MAX_ABILITY,
     EvalItem,
@@ -47,7 +45,11 @@ async def queue(redis_url):
     await q.aclose()
 
 
-def _enroll_with(store: Store, artifacts: list[str], caps: list[str] = [CAP]) -> str:
+def _enroll_with(store: Store, artifacts: list[str],
+                 caps: list[str] | None = None) -> str:
+    # `None` rather than `[CAP]` as the default: a mutable default is shared across every
+    # call, so one test appending to it would silently change what the next test enrolls.
+    caps = [CAP] if caps is None else caps
     req = EnrollRequest(
         join_token="jt", hostname="h", os="linux", arch="arm64",
         hw=HwProbe(ram_gb=32, accelerator="cpu", disk_free_gb=100), profile="shared",
@@ -91,7 +93,8 @@ async def test_in_flight_artifacts_are_not_redispatched(store, queue):
     _enroll_with(store, [ARTIFACT])
     assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 2
     assert artifacts_needing_eval(store, suite=SUITE, min_items=1) == []   # already under eval
-    assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 0  # no duplicate storm
+    # No duplicate storm.
+    assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 0
 
 
 # --- dispatch shape ---
@@ -149,7 +152,8 @@ async def test_unfinished_batch_records_nothing(store, queue):
     }))
 
     assert await collect(store, queue, now="t", suite=SUITE, min_items=1) == 1
-    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY   # its batch settled
+    # Its batch settled.
+    assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY
     assert store.get_ability(ARTIFACT, "summarize", SCALE_VERSION) is None  # still waiting
 
 
@@ -211,7 +215,8 @@ def test_unkeyed_cloud_artifacts_are_not_candidates(store, monkeypatch):
 
 def test_keyed_cloud_artifact_is_a_candidate(store, monkeypatch):
     fleet = _cloud_fleet(monkeypatch)
-    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE, min_items=1) == [(CLOUD_ARTIFACT, [CLOUD_CAP])]
+    assert artifacts_needing_eval(store, fleet=fleet, suite=SUITE, min_items=1) == [
+        (CLOUD_ARTIFACT, [CLOUD_CAP])]
 
 
 async def test_cloud_artifact_dispatch_uses_cloud_ok_privacy(store, queue, monkeypatch):
@@ -231,12 +236,14 @@ async def test_cloud_artifact_dispatch_uses_cloud_ok_privacy(store, queue, monke
 
 async def test_cloud_artifact_scored_end_to_end(store, queue, monkeypatch):
     fleet = _cloud_fleet(monkeypatch)
-    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE, min_items=1)
+    collected, dispatched = await eval_tick(
+        store, queue, now="t", fleet=fleet, suite=SUITE, min_items=1)
     assert (collected, dispatched) == (0, 2)
 
     await _finish(queue, store, text_for=lambda r: '{"n": 1}' if r.task_class == "extract"
                   else "the fox")
-    collected, dispatched = await eval_tick(store, queue, now="t", fleet=fleet, suite=SUITE, min_items=1)
+    collected, dispatched = await eval_tick(
+        store, queue, now="t", fleet=fleet, suite=SUITE, min_items=1)
     assert collected == 2
     assert store.get_ability(CLOUD_ARTIFACT, "extract", SCALE_VERSION) == TIER1_MAX_ABILITY
 
@@ -278,7 +285,7 @@ async def test_mixed_batch_does_not_score_from_a_shrunken_sample(store, queue):
         "completed_at": "t", "error": "model server down"}))
 
     await collect(store, queue, now="t", suite=single, min_items=1)
-    pending, scored, passed, failed = store.eval_progress(ARTIFACT, "extract")
+    pending, scored, _passed, failed = store.eval_progress(ARTIFACT, "extract")
     assert (pending, scored, failed) == (0, 1, 1)
     # 1 of 2 items produced signal — below the majority threshold, so no score.
     assert store.get_ability(ARTIFACT, "extract", SCALE_VERSION) is None
@@ -313,7 +320,8 @@ async def test_seeded_artifacts_are_still_measured(store, queue):
 
     # It has a score, but only a seeded one — so it must still be queued for measurement.
     assert store.get_ability("llama3.2:3b", "extract", SCALE_VERSION) is not None
-    assert [a for a, _ in artifacts_needing_eval(store, suite=SUITE, min_items=1)] == ["llama3.2:3b"]
+    assert [a for a, _ in artifacts_needing_eval(store, suite=SUITE, min_items=1)] == [
+        "llama3.2:3b"]
     assert await dispatch(store, queue, now="t", suite=SUITE, min_items=1) == 2
 
     # A real measurement replaces the seed and is labelled as earned.

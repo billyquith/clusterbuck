@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from clusterbuck.queue import Queue, stream_key
 from clusterbuck.reaper import reaper_scan
 from clusterbuck.store import Store
@@ -120,7 +119,8 @@ async def test_finished_but_unacked_job_is_not_rerun(store, queue):
 
 
 async def test_scan_discovers_capabilities_from_redis(store, queue):
-    """Streams exist because clients submitted to them, not only because fleet.yaml names them."""
+    """Streams exist because clients submitted to them, not only because fleet.yaml
+    names them."""
     await _submit(queue, store, "job_disc")
     await _claim_and_die(queue)
 
