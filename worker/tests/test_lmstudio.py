@@ -203,3 +203,31 @@ async def test_ollama_is_unaffected():
     assert path == "/api/generate"
     assert '"keep_alive": 0' in body or '"keep_alive":0' in body
     await http.aclose()
+
+
+async def test_install_on_an_lm_studio_node_says_it_cannot_rather_than_404ing():
+    """`can_manage` reads the DETECTED server, not the configured word, so it agrees with
+    `unload` about what is on the other end. Judging it from `auto` alone meant an
+    LM Studio node answered "yes" and then reported Ollama's `HTTP 404` from a pull path
+    that was never going to exist — a confusing failure where "this adapter cannot
+    install" is the plain truth."""
+    http = _server({"/api/v1/models": V1_MODELS})
+    inventory = ModelInventory(http, f"{BASE}/v1", "auto")
+    manager = ModelManager(http, BASE, "auto", flavour=inventory.flavour)
+
+    assert await manager.can_manage() is False
+    ok, error = await manager.install("qwen/qwen3-30b-a3b")
+    assert ok is False
+    assert "lmstudio" in error and "manually" in error
+    assert "404" not in error
+    await http.aclose()
+
+
+async def test_ollama_can_still_install():
+    http = _server({"/api/ps": {"models": []}, "/api/pull": {"status": "success"}})
+    inventory = ModelInventory(http, f"{BASE}/v1", "auto")
+    manager = ModelManager(http, BASE, "auto", flavour=inventory.flavour)
+
+    assert await manager.can_manage() is True
+    assert await manager.install("qwen2.5:32b") == (True, None)
+    await http.aclose()

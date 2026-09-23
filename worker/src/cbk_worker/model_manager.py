@@ -49,9 +49,13 @@ class ModelManager:
             return await self._flavour()
         return self._manager if self._manager != "auto" else OLLAMA
 
-    @property
-    def can_manage(self) -> bool:
+    async def can_manage(self) -> bool:
         """Whether this node can install/remove models itself.
+
+        Reads the DETECTED server, not the configured word, so it agrees with `unload`
+        about what is on the other end. Judging it from `auto` alone meant an
+        LM Studio node answered "yes" and then reported `HTTP 404` from Ollama's pull
+        path — a confusing failure where "this adapter cannot install" is the plain truth.
 
         Installation stays Ollama-only. LM Studio 0.4.0 does have
         `POST /api/v1/models/download`, but pulling weights is gated on an approved
@@ -59,11 +63,11 @@ class ModelManager:
         second vendor into that path is a separate change from giving the owner their
         memory back.
         """
-        return self._manager in ("ollama", "auto")
+        return await self.flavour() == OLLAMA
 
     async def install(self, registry_ref: str) -> tuple[bool, str | None]:
-        if not self.can_manage:
-            return (False, f"model manager '{self._manager}' cannot install; "
+        if not await self.can_manage():
+            return (False, f"model manager '{await self.flavour()}' cannot install; "
                            f"install {registry_ref} manually")
         try:
             # Ollama streams NDJSON progress; stream=false returns a single final object.
@@ -128,8 +132,8 @@ class ModelManager:
 
     async def remove(self, artifact: str) -> tuple[bool, str | None]:
         """Remove an artifact, returning disk to the owner."""
-        if not self.can_manage:
-            return (False, f"model manager '{self._manager}' cannot remove; "
+        if not await self.can_manage():
+            return (False, f"model manager '{await self.flavour()}' cannot remove; "
                            f"remove {artifact} manually")
         try:
             resp = await self._client.request("DELETE", f"{self._base}/api/delete",
