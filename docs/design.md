@@ -717,6 +717,24 @@ nothing, and crashing nowhere, so neither launchd's `KeepAlive` nor systemd's
 `Restart=always` would notice. A zombie is strictly worse than a crash, because a crash is
 recovered in seconds.
 
+**And it is not only Redis.** HTTP crosses the same socket on the same sleeping machine,
+and was left on defaults long after the broker was hardened — which cost an outage. A
+node's model server kept its listening socket but stopped accepting, so every claim sat
+in `SYN_SENT`; the inference client was built as `AsyncClient(timeout=600.0)`, and a
+single float in httpx sets **every** timeout, connect included. Each job therefore spent
+ten minutes failing to open a connection a healthy peer answers in two milliseconds, and
+the node heartbeated "fine" throughout because the heartbeat is a different connection.
+It claimed work it could not do, ten minutes at a time, and the tier looked busy rather
+than broken.
+
+The two timeouts are not one concern and are no longer one number (`worker/http.py`):
+connecting is fast or it is broken, while reading is slow by nature and must stay
+generous, because a 70B generating a long answer legitimately takes minutes. Idle pooled
+connections are expired rather than revalidated — httpx has no equivalent of redis-py's
+health check — and transport-level retries cover connection establishment only, never a
+request that reached the server, so a flapping peer is ridden out without ever spending
+the GPU twice on one job.
+
 So the worker's broker client states every setting that makes this survivable rather than
 inheriting it — a socket timeout, connect timeout, TCP keepalive, a health check that
 PINGs a connection idle longer than the poll interval could explain, and a bounded retry

@@ -8,9 +8,8 @@ import contextlib
 import signal
 from typing import Any
 
-import httpx
-
 from . import broker, probe
+from . import http as cbk_http
 from .cli import Out
 from .config import (
     AGENT_FLAVOUR,
@@ -310,10 +309,14 @@ async def run_work(args: argparse.Namespace) -> int:
             running.add_signal_handler(sig, stop.set)
 
     redis = broker.connect(cfg.redis_url)
-    # Inference can be slow; the pull path slower still. Separate clients, separate patience.
-    async with httpx.AsyncClient(timeout=cfg.inference_timeout_s) as infer_http, \
-               httpx.AsyncClient(timeout=30.0) as beat_http, \
-               httpx.AsyncClient(timeout=3600.0, follow_redirects=True) as mgr_http:
+    # Inference can be slow; a model pull slower still. Separate clients, separate
+    # patience — but all three built through `http.py`, so the part that must NOT be
+    # patient (opening a connection) is bounded the same way on each. A single float
+    # would set connect and read alike, which is how a peer that had stopped accepting
+    # connections cost ten minutes per job instead of five seconds.
+    async with cbk_http.inference_client(cfg.inference_timeout_s) as infer_http, \
+               cbk_http.control_client(30.0) as beat_http, \
+               cbk_http.control_client(3600.0, follow_redirects=True) as mgr_http:
         loop = WorkLoop(redis, ModelClient(infer_http, cfg), cfg, log=Out.dim)
         inventory = ModelInventory(beat_http, cfg.model_server_url, cfg.model_manager)
         manager = ModelManager(mgr_http, inventory.native_base, cfg.model_manager,
@@ -352,7 +355,7 @@ async def run_submit(args: argparse.Namespace) -> int:
         Out.error("give either --capability or --task-class (with --min-ability)")
         return 1
 
-    async with httpx.AsyncClient(timeout=30.0, headers=admin_headers()) as http:
+    async with cbk_http.control_client(30.0, headers=admin_headers()) as http:
         resp = await http.post(f"{server_url(args.server)}/jobs", json=body)
         if resp.status_code >= 400:
             Out.error(f"submit failed: HTTP {resp.status_code} {resp.text}")
@@ -367,7 +370,7 @@ async def run_submit(args: argparse.Namespace) -> int:
 
 
 async def run_status(args: argparse.Namespace) -> int:
-    async with httpx.AsyncClient(timeout=30.0, headers=admin_headers()) as http:
+    async with cbk_http.control_client(30.0, headers=admin_headers()) as http:
         resp = await http.get(f"{server_url(args.server)}/jobs/{args.job_id}")
         if resp.status_code == 404:
             Out.error(f"unknown job {args.job_id}")
@@ -396,7 +399,7 @@ async def run_status(args: argparse.Namespace) -> int:
 
 async def run_fleet(args: argparse.Namespace) -> int:
     base = server_url(args.server)
-    async with httpx.AsyncClient(timeout=30.0, headers=admin_headers()) as http:
+    async with cbk_http.control_client(30.0, headers=admin_headers()) as http:
         fleet = await http.get(f"{base}/fleet")
         fleet.raise_for_status()
         body = fleet.json()
@@ -437,7 +440,7 @@ async def run_enroll(args: argparse.Namespace) -> int:
     Out.dim(f"probed ram={req.hw.ram_gb}GB accel={req.hw.accelerator} "
             f"disk={req.hw.disk_free_gb}GB arch={req.arch}")
 
-    async with httpx.AsyncClient(timeout=30.0) as http:
+    async with cbk_http.control_client(30.0) as http:
         try:
             body = await RegistryClient(http, server).enroll(req)
         except Exception as e:
