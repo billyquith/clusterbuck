@@ -18,7 +18,7 @@ from cbk_worker.model_manager import ModelManager
 OLLAMA = "http://127.0.0.1:11434"
 
 
-def _manager(handler, manager: str = "auto") -> tuple[httpx.AsyncClient, ModelManager]:
+def _manager(handler, manager: str = "ollama") -> tuple[httpx.AsyncClient, ModelManager]:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return client, ModelManager(client, OLLAMA, manager)
 

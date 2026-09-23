@@ -231,3 +231,22 @@ async def test_ollama_can_still_install():
     assert await manager.can_manage() is True
     assert await manager.install("qwen2.5:32b") == (True, None)
     await http.aclose()
+
+
+async def test_an_undetected_auto_manages_nothing_rather_than_guessing_ollama():
+    """The trap the detection work left behind.
+
+    `ModelManager`'s no-inventory fallback still resolved `auto` to Ollama, so any future
+    two-argument construction would silently restore the very assumption 68ded30 removed
+    — and restore it in the one place that then talks to the wrong native API. `auto`
+    means nobody has looked yet, and something that cannot detect should manage nothing
+    rather than manage the wrong thing.
+    """
+    http = _server({"/api/ps": {"models": []}, "/api/generate": {}})
+    manager = ModelManager(http, BASE, "auto")          # deliberately no flavour provider
+
+    assert await manager.flavour() == NONE
+    assert await manager.can_manage() is False
+    ok, error = await manager.unload("qwen2.5:32b")
+    assert ok is False and "cannot unload" in error
+    await http.aclose()

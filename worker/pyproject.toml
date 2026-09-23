@@ -1,6 +1,6 @@
 [project]
 name = "cbk-worker"
-version = "0.16.0"
+version = "0.17.0"
 description = "clusterbuck worker agent — Python implementation"
 readme = "README.md"
 requires-python = ">=3.11"

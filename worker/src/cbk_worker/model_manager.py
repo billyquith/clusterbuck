@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
-from .inventory import LMSTUDIO, OLLAMA
+from .inventory import LMSTUDIO, NONE, OLLAMA
 
 
 def _trim(s: str, limit: int = 160) -> str:
@@ -45,9 +45,17 @@ class ModelManager:
         self._flavour = flavour
 
     async def flavour(self) -> str:
+        """Which server is on the other end, from the inventory that discovered it.
+
+        Without that inventory an explicit `CBK_MODEL_MANAGER` is still taken at its
+        word, but `auto` resolves to NONE rather than Ollama — because `auto` means
+        "nobody has looked", and guessing Ollama is exactly the assumption that made an
+        LM Studio node report an empty machine. A construction with no way to detect
+        should manage nothing, not manage the wrong thing.
+        """
         if self._flavour is not None:
             return await self._flavour()
-        return self._manager if self._manager != "auto" else OLLAMA
+        return self._manager if self._manager != "auto" else NONE
 
     async def can_manage(self) -> bool:
         """Whether this node can install/remove models itself.
