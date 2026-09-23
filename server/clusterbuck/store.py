@@ -968,16 +968,28 @@ class Store:
             return len(list(s.exec(select(JoinToken).where(JoinToken.used == 0))))
 
     def claim_token(self, token: str, used_by: str) -> bool:
-        """Atomically burn a one-time join token. True only on the first claim."""
+        """Burn a one-time join token. True only for the caller that actually burnt it.
+
+        A single guarded UPDATE, not read-then-write. It said "atomically" while being
+        `s.get()` → test `used` → assign → commit, which is the pattern this module's own
+        `insert` docstring warns about: *"safe only because a single tick writes them; a
+        client-driven endpoint has as many concurrent writers as the retry storm it is
+        there to absorb."* `POST /nodes/enroll` is exactly such an endpoint — auth-exempt
+        by design, since a joining machine has no operator key — so two joiners racing
+        one token could both read `used = 0` and both be granted a node identity.
+
+        `WHERE used = 0` moves the decision into the database, and `rowcount` is the
+        answer: exactly one UPDATE can match. The same shape as `insert`'s unique index,
+        for the same reason.
+        """
         with self._session() as s:
-            t = s.get(JoinToken, token)
-            if t is None or t.used:
-                return False
-            t.used = 1
-            t.used_by = used_by
-            s.add(t)
+            result = s.exec(
+                update(JoinToken)
+                .where(JoinToken.token == token, JoinToken.used == 0)
+                .values(used=1, used_by=used_by)
+            )
             s.commit()
-            return True
+            return bool(result.rowcount)
 
     def enroll_node(self, *, node_id: str, node_key: str, req, capabilities: str,
                     enrolled_at: str) -> None:

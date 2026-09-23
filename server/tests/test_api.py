@@ -393,3 +393,23 @@ def test_queue_position_for_an_urgent_job_counts_its_own_tier(
     row = client.get(f"/jobs/{urgent}").json()
     assert row["queue_position"] == 0, (
         "nothing is ahead of it on the urgent stream; the base-tier backlog is not")
+
+
+def test_an_oversized_prompt_is_refused_rather_than_written_to_the_broker(client):
+    """Redis holds the payload of every queued job in memory, so an unbounded `content`
+    was an unbounded write to the broker from a single POST — with no quota, no rate
+    limit and no retention sweep behind it. 422 at the edge is the cheap half of that."""
+    from clusterbuck.models import MAX_CONTENT_CHARS
+
+    r = _submit(client, messages=[{"role": "user", "content": "x" * (MAX_CONTENT_CHARS + 1)}])
+    assert r.status_code == 422
+
+    ok = _submit(client, messages=[{"role": "user", "content": "x" * 1000}])
+    assert ok.status_code == 202, "ordinary prompts are untouched"
+
+
+def test_too_many_messages_is_refused(client):
+    from clusterbuck.models import MAX_MESSAGES
+
+    r = _submit(client, messages=[{"role": "user", "content": "hi"}] * (MAX_MESSAGES + 1))
+    assert r.status_code == 422

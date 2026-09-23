@@ -7,6 +7,7 @@ GET  /jobs/{id} → assemble lifecycle state from SQLite + the result blob in Re
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -57,7 +58,8 @@ from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, sta
 from .queue import Queue, stream_key, tier_for, tier_of
 from .reservations import admit, iso
 from .routing import NoCapableArtifact, resolve
-from .signing import build_manifest, load_private_pem
+from .signing import (build_manifest, load_private_pem, public_pem,
+                      sign_bootstrap)
 from .store import Store
 from .sync import build_router, sync_routes
 from .tiering import tiering_ready
@@ -907,6 +909,17 @@ def create_app(
             return None
         return pw
 
+    def _artifact_path() -> Path | None:
+        """The blessed `cbk.pyz`, or None if none is configured or it is missing.
+
+        Shared by `/worker/artifact`, which serves it, and `/nodes/bootstrap`, which
+        publishes its digest — so the digest a joiner checks always describes the bytes
+        that same coordinator will hand it.
+        """
+        path = (worker_artifact if worker_artifact is not None
+                else settings.worker_artifact)
+        return Path(path) if path and Path(path).is_file() else None
+
     def _require_join_password(presented: str | None) -> None:
         """Gate for the two bootstrap routes. 404 when unconfigured, 401 when wrong.
 
@@ -963,12 +976,43 @@ def create_app(
                   request.client.host if request.client else "?")
 
         fleet = app.state.fleet
-        return {
+        body = {
             "join_token": token,
             "redis_url": advertised,
             "consumer_group": settings.consumer_group,
             "capabilities": sorted(fleet.capabilities) if fleet else [],
         }
+        # What the joiner needs to check the artifact it is about to install as a service.
+        #
+        # `join.py` used to accept whatever `/worker/artifact` returned, verifying only
+        # that it was non-empty — while the UPDATE channel that patches the same binary
+        # afterwards verifies an ECDSA signature and a digest before writing a byte. The
+        # bootstrap is the step that installs the first copy, so it was the weaker half of
+        # a chain whose strong half nobody could reach without passing through it.
+        #
+        # Two levels, because they defend different things. The digest is always present
+        # and catches a corrupted download or a swapped file on disk. The signature is
+        # present only when an update signing key is configured, and is the real defence:
+        # verified against a public key the operator moved out of band, it survives an
+        # attacker who controls the whole channel, which a digest served over that same
+        # channel cannot.
+        artifact = _artifact_path()
+        if artifact is not None:
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            version = settings.worker_current_version or ""
+            body["artifact_sha256"] = digest
+            key_path = app.state.update_signing_key
+            if key_path and Path(key_path).is_file():
+                body["artifact_signature"] = sign_bootstrap(
+                    load_private_pem(Path(key_path).read_text()),
+                    sha256=digest, version=version)
+                body["artifact_version"] = version
+                # So the node can verify its own updates from here on. Without it
+                # `update.py` refuses every manifest — correct, but it left the patch
+                # channel permanently inert on every node built the documented way.
+                body["update_public_key"] = public_pem(
+                    load_private_pem(Path(key_path).read_text()))
+        return body
 
     @app.get("/releases/{filename}")
     async def serve_release_artifact(filename: str) -> FileResponse:
@@ -1027,14 +1071,13 @@ def create_app(
         open on the grounds that the code is public.
         """
         _require_join_password(x_cbk_join_password)
-        path = (worker_artifact if worker_artifact is not None
-                else settings.worker_artifact)
-        if not path or not Path(path).is_file():
+        path = _artifact_path()
+        if path is None:
             raise HTTPException(
                 status_code=404,
                 detail="no worker artifact configured (set CBK_WORKER_ARTIFACT)",
             )
-        return FileResponse(path, media_type="application/octet-stream",
+        return FileResponse(str(path), media_type="application/octet-stream",
                             filename="cbk.pyz")
 
     @app.post("/nodes/tokens", status_code=201)
@@ -1069,7 +1112,11 @@ def create_app(
         node = app.state.store.get_node(node_id)
         if node is None:
             raise HTTPException(status_code=404, detail="unknown node")
-        if x_cbk_node_key != node.node_key:
+        # Constant-time, for the reason auth.py:key_matches states about the operator
+        # key: a plain `!=` leaks the key through response timing. The per-node key had
+        # been left on `!=` while the operator key and the join password both used
+        # compare_digest.
+        if not key_matches(x_cbk_node_key, node.node_key):
             raise HTTPException(status_code=401, detail="bad node key")
         now = _now_iso()
         store = app.state.store
@@ -1104,6 +1151,25 @@ def create_app(
         observed = {a: (body.digests or {}).get(a) for a in body.installed}
         notes: list[str] = []
         for artifact, old, new in store.observe_node_models(node_id, observed, now):
+            # Fleet-wide, on one node's say-so, and deliberately left that way — but said
+            # out loud, because it is the most destructive thing a heartbeat can cause.
+            #
+            # Ability belongs to the ARTIFACT, not to the node hosting it, so a genuine
+            # upstream change really does stale every score for that name. The trust
+            # assumption is that `installed`/`digests` are honest: an enrolled node can
+            # drop the measured scores for an artifact it does not run, and routing then
+            # cannot clear `min_ability` until the re-eval completes. ADR 26's
+            # single-operator model accepts that — enrolling a node is already an act of
+            # trust — but an operator watching the log should see it happen rather than
+            # discover it as an unexplained 422 storm.
+            #
+            # Gating on "is this artifact known to the catalog or the matrix" was tried
+            # and is worse than nothing: an unknown artifact has no scores to delete, so
+            # the check blocks only the harmless case and waves through the harmful one.
+            _log.warning(
+                "node %s reports %s changed upstream (%s -> %s) — dropping its measured "
+                "ability fleet-wide and re-queuing it for evaluation",
+                node_id, artifact, old, new)
             # The artifact changed upstream, so it is a NEW artifact (ADR 15): it inherits
             # neither the stored score nor the measurements behind it. Merely raising a
             # proposal left the stale score driving routing forever, because nothing consumed

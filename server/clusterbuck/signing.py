@@ -99,3 +99,43 @@ def build_manifest(private_key: ec.EllipticCurvePrivateKey, *, version: str, rid
                                     sha256=sha256, channel=channel, url=url,
                                     protocol_version=protocol_version),
     }
+
+
+# --- bootstrap artifact ---------------------------------------------------------------
+#
+# The update channel was signed from the start; the BOOTSTRAP that installs the first copy
+# was not. `join.py` fetched `cbk.pyz` over plain HTTP and checked only that it was
+# non-empty, then installed it as a service — so an on-path attacker on the LAN (ARP, DNS
+# or mDNS spoofing of the coordinator's name) had root-installed code execution on every
+# joining machine, against a coordinator whose patch channel is rigorously signed.
+#
+# Same primitive, separate payload. A manifest signature must not be replayable as an
+# artifact signature or vice versa, so the two are domain-separated by a prefix rather
+# than sharing `signing_payload`.
+_BOOTSTRAP_DOMAIN = "cbk-bootstrap-artifact-v1"
+
+
+def bootstrap_payload(*, sha256: str, version: str) -> bytes:
+    """The exact bytes an artifact signature covers: the digest, bound to a version."""
+    return "\n".join([_BOOTSTRAP_DOMAIN, sha256, version]).encode()
+
+
+def sign_bootstrap(private_key: ec.EllipticCurvePrivateKey, *, sha256: str,
+                   version: str) -> str:
+    return base64.b64encode(private_key.sign(
+        bootstrap_payload(sha256=sha256, version=version),
+        ec.ECDSA(hashes.SHA256()),
+    )).decode()
+
+
+def verify_bootstrap(public_key: ec.EllipticCurvePublicKey, *, sha256: str, version: str,
+                     signature: str) -> bool:
+    try:
+        public_key.verify(
+            base64.b64decode(signature),
+            bootstrap_payload(sha256=sha256, version=version),
+            ec.ECDSA(hashes.SHA256()),
+        )
+        return True
+    except (InvalidSignature, KeyError, ValueError):
+        return False

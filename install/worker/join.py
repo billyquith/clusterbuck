@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import platform
@@ -134,6 +135,78 @@ def bootstrap(coordinator: str, password: str) -> dict:
             "  Check the address, and that the coordinator is listening.")
 
 
+def verify_artifact(path: Path, cfg: dict, pubkey_pem: str | None) -> None:
+    """Check the downloaded artifact before anything installs it as a service.
+
+    This file is about to be run as a long-lived service, usually as root. Until now the
+    only check was `st_size != 0`, while the UPDATE channel that patches the very same
+    binary afterwards verifies an ECDSA signature and a digest before writing a byte. The
+    bootstrap was the soft underside of a hard shell: a LAN on-path attacker (ARP, DNS or
+    mDNS spoofing of the coordinator's name, all easy against the plain-HTTP default) got
+    root-installed code execution on every joining machine.
+
+    Two levels, and they defend different things:
+
+    * **Digest** — always, when the coordinator publishes one. Catches a corrupted or
+      truncated download and a swapped file on the coordinator's disk. It does NOT stop a
+      full on-path attacker, who controls the bootstrap response and the artifact alike.
+    * **Signature** — only with `--pubkey-file`, and this is the real defence. The key
+      travels out of band, exactly as the join password does, so it does not matter who
+      controls the channel.
+
+    A coordinator too old to publish either is accepted with a warning rather than
+    refused: it is the status quo, and failing the join outright would strand fleets
+    mid-upgrade. Say so loudly instead.
+    """
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    published = cfg.get("artifact_sha256")
+
+    if not published:
+        warn("this coordinator published no artifact digest, so the download could not "
+             "be verified.\n  Upgrade the coordinator to get integrity checking here.")
+        return
+
+    if digest != published:
+        die("the downloaded artifact does not match the digest the coordinator "
+            f"published.\n  expected {published}\n  got      {digest}\n"
+            "  Refusing to install it. This is either a corrupted download or a "
+            "tampered one.")
+    ok("artifact digest matches the coordinator's")
+
+    signature = cfg.get("artifact_signature")
+    if pubkey_pem is None:
+        if signature:
+            warn("the coordinator signed this artifact, but no --pubkey-file was given, "
+                 "so the signature was not checked.\n  The digest above came down the "
+                 "same connection as the artifact, so it does not protect against an "
+                 "on-path attacker. Pass --pubkey-file for a real guarantee.")
+        return
+    if not signature:
+        die("--pubkey-file was given but the coordinator published no signature.\n"
+            "  Configure CBK_UPDATE_SIGNING_KEY on the coordinator, or drop the flag to "
+            "accept digest-only verification.")
+
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        die("--pubkey-file needs the `cryptography` package on this machine:\n"
+            "    python3 -m pip install cryptography")
+
+    import base64
+    payload = "\n".join(
+        ["cbk-bootstrap-artifact-v1", digest, cfg.get("artifact_version") or ""]
+    ).encode()
+    try:
+        serialization.load_pem_public_key(pubkey_pem.encode()).verify(
+            base64.b64decode(signature), payload, ec.ECDSA(hashes.SHA256()))
+    except Exception:
+        die("the artifact's signature does NOT verify against the supplied public key.\n"
+            "  Refusing to install it. Either the key is the wrong one, or this is not "
+            "the coordinator you think it is.")
+    ok("artifact signature verifies against the supplied key")
+
+
 def fetch_artifact(coordinator: str, password: str, dest: Path) -> Path:
     """Download the coordinator's blessed `cbk.pyz`."""
     url = f"{coordinator.rstrip('/')}/worker/artifact"
@@ -200,8 +273,13 @@ def installer_command(
     ]
 
 
-def installer_env() -> dict[str, str] | None:
+def installer_env(pubkey_pem: str | None = None) -> dict[str, str] | None:
     """Environment for the platform installer.
+
+    Also how the update-signing public key reaches it, when one was supplied. In the
+    environment rather than argv deliberately: argv is world-readable through `ps` for
+    the lifetime of the call. A public key is not secret, but this is the hook the next
+    secret would be bolted onto, so it starts in the right place.
 
     `install.ps1` runs under Windows PowerShell 5.1, which autoloads its core modules from
     PSModulePath. Launch this script from PowerShell 7 and that variable is inherited
@@ -213,10 +291,16 @@ def installer_env() -> dict[str, str] | None:
     Dropping the inherited value lets 5.1 compute its own default module path.
     """
     if platform.system() != "Windows":
-        return None
+        # Nothing to repair, so inherit — unless we have a key to hand down, in which
+        # case the environment has to be materialised to carry it.
+        if not pubkey_pem:
+            return None
+        return {**os.environ, "CBK_UPDATE_PUBKEY_PEM": pubkey_pem}
     # dict(os.environ) upper-cases its keys on Windows, so a plain pop("PSModulePath")
     # silently matches nothing. Drop every spelling.
     env = {k: v for k, v in os.environ.items() if k.lower() != "psmodulepath"}
+    if pubkey_pem:
+        env["CBK_UPDATE_PUBKEY_PEM"] = pubkey_pem
     return env
 
 
@@ -267,6 +351,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--coordinator", required=True,
                     help="coordinator URL, e.g. http://coordinator.local:8018")
+    ap.add_argument("--pubkey-file", default=os.environ.get("CBK_UPDATE_PUBKEY_FILE"),
+                    help="PEM public key to verify the downloaded artifact against. "
+                         "Carry it out of band, like the join password — a digest served "
+                         "over the same connection as the artifact cannot protect against "
+                         "an on-path attacker, and a signature can. Also installed on the "
+                         "node so its self-update channel works.")
     ap.add_argument("--model", required=True,
                     help="model this node advertises, e.g. qwen2.5:7b")
     # Prefer the prompt or the env var: a password passed as an argument lands in shell
@@ -311,10 +401,19 @@ def main(argv: list[str] | None = None) -> int:
     ok("got a single-use join token and the broker URL "
        "(the operator key stayed on the coordinator)")
 
+    pubkey_pem = None
+    if args.pubkey_file:
+        pk = Path(args.pubkey_file)
+        if not pk.is_file():
+            die(f"no such public key file: {pk}")
+        pubkey_pem = pk.read_text()
+
     staging = Path(tempfile.mkdtemp(prefix="cbk-join-")) / "cbk.pyz"
     info("downloading the coordinator's worker build")
     fetch_artifact(args.coordinator, password, staging)
     ok(f"artifact → {staging} ({staging.stat().st_size // 1024} KiB)")
+    # Before the installer runs it as a service, not after.
+    verify_artifact(staging, cfg, pubkey_pem)
 
     cmd = installer_command(
         repo_root,
@@ -340,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     info("handing off to the platform installer (service, config, enrolment)")
-    result = subprocess.run(cmd, env=installer_env())
+    result = subprocess.run(cmd, env=installer_env(pubkey_pem))
     if result.returncode != 0:
         die(f"the platform installer failed (exit {result.returncode})")
 

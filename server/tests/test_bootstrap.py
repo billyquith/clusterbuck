@@ -38,6 +38,7 @@ def fleet_file(tmp_path):
 
 def _client(tmp_path, redis_url, fleet_file, *,
             join_password=GOOD_PASSWORD, artifact=None, api_key=None,
+            signing_key=None,
             advertise="redis://:pw@192.168.1.10:6379/0"):
     """A coordinator with bootstrap configured as the test wants it.
 
@@ -48,6 +49,7 @@ def _client(tmp_path, redis_url, fleet_file, *,
     app = create_app(redis_url=redis_url, db_path=str(tmp_path / "b.db"),
                      fleet_path=str(fleet_file), start_scheduler=False, api_key=api_key,
                      join_password=join_password, worker_artifact=artifact,
+                     update_signing_key=signing_key,
                      # Routable on purpose: the test Redis is on localhost, and bootstrap
                      # refuses to advertise a loopback address to a remote worker.
                      broker_advertise_url=advertise)
@@ -266,3 +268,132 @@ def test_refusing_mints_no_token(tmp_path, redis_url, fleet_file):
     with TestClient(app) as c:
         c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD})
         assert c.app.state.store.unused_token_count() == 0
+
+
+def test_a_token_survives_being_claimed_concurrently(tmp_path):
+    """Single-use has to hold against CONCURRENT claims, not just sequential ones.
+
+    `/nodes/enroll` is auth-exempt by design — a joining machine has no operator key — so
+    it is precisely the client-driven endpoint `Store.insert`'s docstring warns about:
+    "as many concurrent writers as the retry storm it is there to absorb". The old
+    `claim_token` read the row, tested `used`, then assigned and committed, so two joiners
+    could both see `used = 0` and both be granted a node identity off one token.
+
+    Threads rather than tasks, because the store is synchronous SQLite and this is a
+    write-write race in the database, not in the event loop.
+    """
+    import threading
+
+    from clusterbuck.store import Store
+
+    store = Store(str(tmp_path / "race.db"))
+    store.mint_token("jt_contended", created_at="2026-01-01T00:00:00Z")
+
+    winners: list[bool] = []
+    lock = threading.Lock()
+    start = threading.Barrier(8)
+
+    def claim(i: int) -> None:
+        start.wait()
+        got = store.claim_token("jt_contended", used_by=f"node-{i}")
+        with lock:
+            winners.append(got)
+
+    threads = [threading.Thread(target=claim, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(winners) == 1, f"exactly one claimant may win, got {sum(winners)}"
+    assert store.unused_token_count() == 0
+
+
+# --- the artifact a joining machine is about to run as a service --------------------
+
+
+def _artifact(tmp_path, body=b"#!/usr/bin/env python3\nzipapp-ish\n"):
+    a = tmp_path / "cbk.pyz"
+    a.write_bytes(body)
+    return a
+
+
+def test_bootstrap_publishes_a_digest_for_the_artifact_it_serves(
+    tmp_path, redis_url, fleet_file
+):
+    """`join.py` installs this file as a root service. It used to check only that the
+    download was non-empty — while the update channel that patches the same binary
+    afterwards verifies a signature and a digest before writing a byte.
+
+    The digest must describe the bytes THIS coordinator will actually hand over, so both
+    endpoints resolve the artifact through one helper.
+    """
+    import hashlib
+
+    art = _artifact(tmp_path)
+    with _client(tmp_path, redis_url, fleet_file, artifact=art) as c:
+        body = c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD}).json()
+        served = c.get("/worker/artifact", headers={HEADER: GOOD_PASSWORD}).content
+
+    assert body["artifact_sha256"] == hashlib.sha256(art.read_bytes()).hexdigest()
+    assert body["artifact_sha256"] == hashlib.sha256(served).hexdigest()
+
+
+def test_bootstrap_signs_the_artifact_and_hands_over_the_verifying_key(
+    tmp_path, redis_url, fleet_file
+):
+    """The digest travels the same connection as the artifact, so it cannot defend
+    against an on-path attacker — only a signature checked against an out-of-band key
+    can. The key also goes to the node, because without `CBK_UPDATE_PUBKEY` the agent
+    refuses every update: correct, but it left the patch channel permanently inert on
+    every node built the documented way.
+    """
+    from clusterbuck.signing import (generate_keypair, private_pem, public_pem,
+                                     verify_bootstrap)
+
+    key = generate_keypair()
+    key_file = tmp_path / "signing.pem"
+    key_file.write_text(private_pem(key))
+
+    art = _artifact(tmp_path)
+    with _client(tmp_path, redis_url, fleet_file, artifact=art,
+                 signing_key=str(key_file)) as c:
+        body = c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD}).json()
+
+    assert verify_bootstrap(
+        key.public_key(), sha256=body["artifact_sha256"],
+        version=body["artifact_version"], signature=body["artifact_signature"])
+    assert body["update_public_key"].strip() == public_pem(key).strip()
+
+
+def test_an_artifact_signature_does_not_verify_against_a_different_digest(
+    tmp_path, redis_url, fleet_file
+):
+    """Domain separation and binding, both. The signature covers the digest, so it cannot
+    be lifted onto a different binary — which is the whole point of signing it."""
+    from clusterbuck.signing import generate_keypair, private_pem, verify_bootstrap
+
+    key = generate_keypair()
+    key_file = tmp_path / "signing.pem"
+    key_file.write_text(private_pem(key))
+
+    art = _artifact(tmp_path)
+    with _client(tmp_path, redis_url, fleet_file, artifact=art,
+                 signing_key=str(key_file)) as c:
+        body = c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD}).json()
+
+    assert not verify_bootstrap(
+        key.public_key(), sha256="0" * 64,
+        version=body["artifact_version"], signature=body["artifact_signature"])
+
+
+def test_no_artifact_configured_means_no_digest_rather_than_a_crash(
+    tmp_path, redis_url, fleet_file
+):
+    """Bootstrap still has to work for a coordinator that serves no artifact — the joiner
+    warns and carries on, so this must not 500."""
+    with _client(tmp_path, redis_url, fleet_file, artifact=None) as c:
+        r = c.post("/nodes/bootstrap", headers={HEADER: GOOD_PASSWORD})
+    assert r.status_code == 201
+    assert "artifact_sha256" not in r.json()
+    assert r.json()["join_token"]

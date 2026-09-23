@@ -162,12 +162,39 @@ CBK_MODEL=${MODEL_NAME}
 CBK_MODEL_MANAGER=${MODEL_MANAGER}
 CBK_NODE_STATE=${NODE_STATE}
 EOF
-  chown root:root "$ENV_FILE"
-  chmod 600 "$ENV_FILE"
   ok "worker.env written → $ENV_FILE"
 else
   ok "worker.env already exists (not overwritten — edit manually to change)"
 fi
+
+# The update-signing public key, if the caller has one (join.py passes it in the
+# environment rather than as an argument, so it never appears in `ps`).
+#
+# Without this the agent REFUSES every update — correct behaviour, since an update channel
+# is remote code execution and there is no unsigned path, but it meant that every node
+# built by the documented join flow had a permanently inert patch channel while the
+# coordinator happily marked it `stale`. That reads exactly like "self-update is not
+# configured" on a coordinator where it is fully configured.
+if [[ -n "${CBK_UPDATE_PUBKEY_PEM:-}" ]]; then
+  PUBKEY_FILE="$ETC_DIR/update-pubkey.pem"
+  umask 022                      # public key: world-readable is fine, world-writable is not
+  printf '%s\n' "$CBK_UPDATE_PUBKEY_PEM" > "$PUBKEY_FILE"
+  chown root:root "$PUBKEY_FILE"
+  chmod 644 "$PUBKEY_FILE"
+  if ! grep -q '^CBK_UPDATE_PUBKEY=' "$ENV_FILE" 2>/dev/null; then
+    printf 'CBK_UPDATE_PUBKEY=%s\n' "$PUBKEY_FILE" >> "$ENV_FILE"
+  fi
+  ok "update-signing public key → $PUBKEY_FILE (self-update enabled)"
+fi
+
+# Outside the branch, so an existing file is repaired on every re-run and not only on the
+# run that created it. This file holds CBK_REDIS_URL *including the Redis password*, and
+# Redis carries every prompt and completion in plaintext. A worker.env written by hand,
+# restored from a backup, or left by an older installer kept whatever mode it had, forever
+# — while the node.json block below claimed "the same reason worker.env is re-secured
+# every time" for a thing that was not happening.
+chown root:root "$ENV_FILE"
+chmod 600 "$ENV_FILE"
 
 # ── service ───────────────────────────────────────────────────────────────────
 info "service"

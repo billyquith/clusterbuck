@@ -43,9 +43,24 @@ class Privacy(str, Enum):
     cloud_ok = "cloud_ok"
 
 
+# Bounds on what a client can put on the wire. Not a quota and not a rate limit — those
+# are separate and still absent — just a ceiling, so a single request cannot exhaust
+# Redis or the disk. Redis holds the payload of every queued job in memory, so an
+# unbounded `content` was an unbounded write to the broker from one POST.
+#
+# Sized to be irrelevant to real work and fatal to abuse: 1 MiB of prompt is far past any
+# model's context window, and 512 messages is a conversation nothing local will hold.
+# JobRecord carries them too: it is the shape that actually goes on the stream.
+MAX_CONTENT_CHARS = 1_048_576
+MAX_MESSAGES = 512
+# A node's self-reported inventory writes one `node_models` row per entry, per node, and
+# is never pruned. No real node serves hundreds of artifacts.
+MAX_INVENTORY = 256
+
+
 class Message(BaseModel):
     role: Literal["system", "user", "assistant"]
-    content: str
+    content: str = Field(max_length=MAX_CONTENT_CHARS)
 
 
 class Submitter(BaseModel):
@@ -84,8 +99,8 @@ class JobSubmit(BaseModel):
     min_ability: int | None = Field(default=None, ge=1, le=10)
     capability: str | None = None
 
-    messages: list[Message] | None = None
-    prompt: str | None = None
+    messages: list[Message] | None = Field(default=None, max_length=MAX_MESSAGES)
+    prompt: str | None = Field(default=None, max_length=MAX_CONTENT_CHARS)
 
     params: dict[str, Any] = Field(default_factory=dict)
     urgency: Urgency = Urgency.waitable
@@ -263,8 +278,8 @@ class HeartbeatRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     mode: Literal["active", "away", "paused"]
-    installed: list[str] = Field(default_factory=list)
-    loaded: list[str] = Field(default_factory=list)
+    installed: list[str] = Field(default_factory=list, max_length=MAX_INVENTORY)
+    loaded: list[str] = Field(default_factory=list, max_length=MAX_INVENTORY)
     # artifact → content digest, where the model server exposes it (drives re-eval, ADR 15).
     digests: dict[str, str] | None = None
     # The worker's build-stamped release version. The coordinator judges FITNESS from this,
@@ -290,8 +305,8 @@ class JobRecord(BaseModel):
     id: str
     created_at: str
     capability: str
-    messages: list[Message] | None = None
-    prompt: str | None = None
+    messages: list[Message] | None = Field(default=None, max_length=MAX_MESSAGES)
+    prompt: str | None = Field(default=None, max_length=MAX_CONTENT_CHARS)
     params: dict[str, Any] = Field(default_factory=dict)
     urgency: Urgency
     escalate_after_min: int | None = None

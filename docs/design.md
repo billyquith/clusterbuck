@@ -275,6 +275,28 @@ machine holds one password; it receives a token that burns on use, the broker UR
 worker artifact. A password under 16 characters leaves the route disabled rather than
 weakly guarding the Redis credential.
 
+**The artifact is checked before it becomes a service.** The bootstrap installs a binary
+and runs it as root, and for a long time it verified only that the download was
+non-empty — while the *update* channel that patches that same binary afterwards verifies
+an ECDSA signature and a digest before writing a byte. The soft step was the one every
+node had to pass through to reach the hard one. Bootstrap now publishes the artifact's
+SHA-256, and its signature when a signing key is configured, and `join.py` checks both:
+
+- the **digest** catches a corrupted download or a swapped file, but travels the same
+  connection as the artifact, so it cannot defend against an on-path attacker;
+- the **signature**, verified against a key the operator moved out of band
+  (`--pubkey-file`), can — which is why the joiner says plainly when it has only the
+  first.
+
+A coordinator too old to publish either is accepted with a warning rather than refused;
+failing the join outright would strand a fleet mid-upgrade.
+
+The same response carries the **update public key**, which the installer writes to
+`worker.env`. Without it the agent refuses every update — correct, since an update channel
+is remote code execution and there is no unsigned path, but it meant a node built the
+documented way had a permanently inert patch channel while the coordinator cheerfully
+marked it `stale`.
+
 **The probe** reports RAM, **VRAM** (the card's total on CUDA; on Metal the share of
 unified memory the GPU may wire down), CPU arch, OS, accelerator, and free disk **on the
 volume the model server actually writes weights to** — not the filesystem root, which on
@@ -676,8 +698,13 @@ sleeping peers every cooldown window — in a fleet whose whole resting state is
 
 - **LAN-only by default.** Bind the coordinator, Redis and model servers to the local
   network, and put a shared key on the API.
-- **Redis is its own exposure.** It holds prompts and completions in plaintext and needs
-  its own `requirepass`.
+- **Redis is its own exposure, and the join password is a key to it.** Redis holds
+  prompts and completions in plaintext, has no ACLs, and every worker shares one
+  credential — which `/nodes/bootstrap` hands out. So compromise of the join password, or
+  of any single worker's `worker.env`, means: read every prompt and result across all
+  capabilities, claim jobs from any stream, **and forge results by writing a
+  `result_key` first**, since first-writer-wins makes the forgery terminal. Treat that
+  password as equivalent to the broker credential, because it is one.
 - **One operator secret** (`CBK_API_KEY`), presented as `X-CBK-Api-Key`, a bearer token
   or a cookie. Unset means auth is **disabled** and warned at startup, which keeps dev and
   the e2e scripts working. Exempt: `/healthz`, `/static/*`, `/releases/*`, enrollment

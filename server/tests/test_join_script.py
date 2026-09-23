@@ -163,3 +163,97 @@ def test_the_profile_reaches_both_installers(join):
         cmd = join.installer_command(REPO, system=system, **_args(profile="dedicated"))
         assert flag in cmd, f"{flag} missing on {system}"
         assert cmd[cmd.index(flag) + 1] == "dedicated"
+
+
+# --- verifying the artifact before it becomes a root service ------------------------
+
+
+def _staged(tmp_path, body=b"pretend-zipapp"):
+    import hashlib
+    p = tmp_path / "cbk.pyz"
+    p.write_bytes(body)
+    return p, hashlib.sha256(body).hexdigest()
+
+
+def test_a_tampered_artifact_is_refused(tmp_path):
+    """The whole point. This file is about to be installed and run as a service, usually
+    as root; the only previous check was `st_size != 0`."""
+    join = _load()
+    art, _ = _staged(tmp_path)
+
+    with pytest.raises(SystemExit):
+        join.verify_artifact(art, {"artifact_sha256": "0" * 64}, None)
+
+
+def test_a_matching_digest_passes(tmp_path):
+    join = _load()
+    art, digest = _staged(tmp_path)
+    join.verify_artifact(art, {"artifact_sha256": digest}, None)  # no raise
+
+
+def test_an_old_coordinator_without_a_digest_warns_rather_than_failing(tmp_path, capsys):
+    """Refusing outright would strand a fleet mid-upgrade, so this is the status quo plus
+    a loud warning — not a hard stop."""
+    join = _load()
+    art, _ = _staged(tmp_path)
+
+    join.verify_artifact(art, {}, None)
+
+    assert "could not be verified" in capsys.readouterr().out
+
+
+def test_a_digest_alone_is_reported_as_insufficient_when_a_signature_exists(
+    tmp_path, capsys
+):
+    """A digest served over the same connection as the artifact proves nothing against an
+    on-path attacker. If the coordinator signed the artifact and the operator did not
+    supply a key, say so rather than implying the check was meaningful."""
+    join = _load()
+    art, digest = _staged(tmp_path)
+
+    join.verify_artifact(
+        art, {"artifact_sha256": digest, "artifact_signature": "irrelevant"}, None)
+
+    out = capsys.readouterr().out
+    assert "on-path attacker" in out and "--pubkey-file" in out
+
+
+def test_a_good_signature_verifies_and_a_bad_one_is_refused(tmp_path):
+    """End to end against the coordinator's own signer, so the two sides cannot drift on
+    the payload they agree to sign."""
+    from clusterbuck.signing import generate_keypair, public_pem, sign_bootstrap
+
+    join = _load()
+    art, digest = _staged(tmp_path)
+    key = generate_keypair()
+    cfg = {
+        "artifact_sha256": digest,
+        "artifact_version": "0.18.0",
+        "artifact_signature": sign_bootstrap(key, sha256=digest, version="0.18.0"),
+    }
+
+    join.verify_artifact(art, cfg, public_pem(key))  # no raise
+
+    other = generate_keypair()
+    with pytest.raises(SystemExit):
+        join.verify_artifact(art, cfg, public_pem(other))
+
+
+def test_a_key_without_a_signature_is_refused_rather_than_silently_downgraded(tmp_path):
+    """Asking for signature verification and getting none back is the interesting case:
+    it is what an attacker stripping the field looks like."""
+    join = _load()
+    from clusterbuck.signing import generate_keypair, public_pem
+
+    art, digest = _staged(tmp_path)
+    with pytest.raises(SystemExit):
+        join.verify_artifact(art, {"artifact_sha256": digest},
+                             public_pem(generate_keypair()))
+
+
+def test_the_pubkey_reaches_the_installer_through_the_environment_not_argv(tmp_path):
+    """argv is world-readable through `ps` for the life of the call. The key is not
+    secret, but this is the hook the next secret would be bolted onto."""
+    join = _load()
+    env = join.installer_env("-----BEGIN PUBLIC KEY-----\nx\n-----END PUBLIC KEY-----")
+    assert env["CBK_UPDATE_PUBKEY_PEM"].startswith("-----BEGIN PUBLIC KEY-----")
