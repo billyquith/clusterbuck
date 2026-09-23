@@ -237,10 +237,13 @@ async def wake_reconcile_scan(
 ) -> list[str]:
     """Re-attempt the wake an unserved job with wake rights is owed. Returns capabilities woken.
 
-    **A wake fired is not a wake delivered.** Every other caller of `maybe_wake` is
-    edge-triggered — one burst at submit, one on escalation, one on a reservation's
-    warming edge — and a magic packet is fire-and-forget UDP with no acknowledgement by
-    construction (`wol.py`). It is lost for entirely ordinary reasons: a sleeping machine
+    **A wake fired is not a wake delivered.** The two demand-side callers of `maybe_wake`
+    are edge-triggered — one burst at submit, one on escalation — and a magic packet is
+    fire-and-forget UDP with no acknowledgement by construction (`wol.py`). (Reservations
+    are the third caller and retry for themselves across the warming window, which is the
+    same lesson applied where this scan cannot reach: a booking warms before any job
+    exists, so it is invisible to the queued-job population below.)
+    It is lost for entirely ordinary reasons: a sleeping machine
     on Wi-Fi that never registered with a sleep proxy, a node on another subnet (the
     broadcast does not cross one), a switch that aged out the MAC, a node reachable only
     over a tunnel and so holding no MAC to try at all.

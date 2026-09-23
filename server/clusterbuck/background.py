@@ -84,9 +84,11 @@ async def coordinator_loop(
 
         if ticks % wake_every == 0:
             # Retry a wake that was owed and may simply not have landed: WoL is
-            # unacknowledged UDP, and every other caller of `maybe_wake` fires once on an
-            # edge. Without this a lost packet left an urgent job queued with no terminal
-            # state and nothing to try again.
+            # unacknowledged UDP, and the two demand-side callers — submit and escalation
+            # — each fire once on an edge. Without this a lost packet left an urgent job
+            # queued with no terminal state and nothing to try again. (Reservations retry
+            # their own warm-up wake for the length of the warming window; this scan
+            # covers queued JOBS, which is a booking's blind spot and vice versa.)
             with _isolated("wake-reconcile"):
                 await wake_reconcile_scan(store, queue, wake)
 
