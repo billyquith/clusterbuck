@@ -63,7 +63,7 @@ from .store import Store
 from .sync import build_router, sync_routes
 from .tiering import tiering_ready
 from .usage import build_usage_summary, venue_of
-from .versions import assess, policy_from_settings
+from .versions import assess, parse_version, policy_from_settings, version_gt
 from .wake import WakeCoordinator
 from .web import WEB_DIR, web_routes
 
@@ -161,8 +161,24 @@ def _build_update_for(app, node, flavour: str | None = None) -> dict | None:
         art = release.get("artifacts", {}).get(rid)
         if art is None:
             return None
-        # Already on the release being offered ⇒ nothing to do.
-        if node.agent_version and node.agent_version == release["version"]:
+        # Only ever offer a node something NEWER than it runs.
+        #
+        # This was an equality check, which meant a channel naming an older build offered
+        # every node a downgrade — and the worker, checking equality too, installed it.
+        # That is the accidental half of the hazard: a release bumps five settings and
+        # nothing reconciles them (see the release note in design.md), so a channel left
+        # behind is an ordinary mistake rather than an attack. This fleet's did exactly
+        # that, offering 0.10.0 to a node running 0.18.0 with auto-update on.
+        #
+        # The worker refuses a non-newer manifest as well, and that refusal is the real
+        # control, since it also covers a REPLAYED manifest an attacker serves without
+        # going through this function. This half stops the coordinator being the thing
+        # that gets it wrong, and keeps the mistake out of a signed payload entirely.
+        offered, running = parse_version(release["version"]), parse_version(
+            node.agent_version)
+        if running is not None and offered is not None and not version_gt(
+            offered, running
+        ):
             return None
         key = load_private_pem(Path(key_path).read_text())
         return build_manifest(

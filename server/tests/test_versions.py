@@ -249,3 +249,66 @@ def test_a_manifest_entry_missing_on_disk_says_so(release_client, tmp_path):
     (rel / "cbk-0.9.0.pyz").unlink()
     r = release_client.get("/releases/cbk-0.9.0.pyz")
     assert r.status_code == 404 and "missing on disk" in r.json()["detail"]
+
+
+# --- the coordinator must not OFFER a downgrade ------------------------------------
+
+
+def test_version_gt_compares_numerically_not_lexically():
+    """The trap the string form walks into: "0.9.0" sorts ABOVE "0.10.0" as text, so a
+    lexical gate would treat every release after .9 in a 0.x line as a downgrade."""
+    from clusterbuck.versions import parse_version as pv
+    from clusterbuck.versions import version_gt
+
+    assert version_gt(pv("0.10.0"), pv("0.9.0"))
+    assert not version_gt(pv("0.9.0"), pv("0.10.0"))
+    assert not version_gt(pv("0.19.0"), pv("0.19.0")), "equal is not newer"
+    assert version_gt(pv("1.0.1"), pv("1.0")), "padded: 1.0 == 1.0.0 < 1.0.1"
+
+
+def test_a_channel_left_behind_does_not_offer_a_node_a_downgrade(
+    tmp_path, redis_url, monkeypatch
+):
+    """`_build_update_for` checked EQUALITY, so a channel naming an older build offered
+    every node a downgrade — and the worker, also checking equality, installed it.
+
+    This is the accidental half of the hazard rather than the malicious one: a release
+    touches five settings and nothing reconciles them, so a channel left behind is an
+    ordinary mistake. This fleet's did exactly that, offering 0.10.0 to a node on 0.18.0
+    with auto-update on. The worker refuses a non-newer manifest too — that is the real
+    control, since it also covers a manifest replayed without passing through here — but
+    the coordinator should not be the thing that gets it wrong.
+    """
+    from clusterbuck.api import _build_update_for
+    from clusterbuck.signing import generate_keypair, private_pem
+
+    key_file = tmp_path / "signing.pem"
+    key_file.write_text(private_pem(generate_keypair()))
+    release = tmp_path / "release.json"
+
+    class _App:
+        class state:
+            update_signing_key = str(key_file)
+            update_release = str(release)
+
+    class _Node:
+        node_id, os, arch = "node-x", "darwin", "arm64"
+        agent_version = "0.18.0"
+
+    def _publish(version: str) -> None:
+        release.write_text(_json.dumps({
+            "version": version, "channel": "stable", "protocol_version": 1,
+            "artifacts": {"py3-none-any": {
+                "url": f"http://c:8018/releases/cbk-{version}.pyz", "sha256": "a" * 64}},
+        }))
+
+    _publish("0.10.0")
+    assert _build_update_for(_App, _Node(), "python") is None, \
+        "a channel behind the node must offer nothing"
+
+    _publish("0.18.0")
+    assert _build_update_for(_App, _Node(), "python") is None, "equal offers nothing"
+
+    _publish("0.19.0")
+    offered = _build_update_for(_App, _Node(), "python")
+    assert offered is not None and offered["version"] == "0.19.0", "newer is still offered"

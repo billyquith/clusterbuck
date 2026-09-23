@@ -97,6 +97,41 @@ def verify(m: UpdateManifest, public_key_pem: str) -> bool:
         return False
 
 
+def _parse_version(v: str | None) -> tuple[int, ...] | None:
+    """'1.4.2' -> (1, 4, 2). None for anything unparseable, and it never raises.
+
+    Deliberately a second implementation of the coordinator's `versions.parse_version`
+    rather than a shared one: the two halves meet only at the wire contract and share no
+    code, which is what keeps the system polyglot. The behaviour that must agree is
+    pinned by a test on each side, not by an import.
+    """
+    if not v:
+        return None
+    core = v.strip().split("+")[0].split("-")[0]   # drop pre-release / build metadata
+    try:
+        return tuple(int(part) for part in core.split("."))
+    except ValueError:
+        return None
+
+
+def _is_newer(offered: str | None, running: str | None) -> bool:
+    """Is `offered` strictly newer than `running`?
+
+    Compared as INTEGER TUPLES, padded to equal length so 1.4 < 1.4.1. The padding and
+    the parsing are both load-bearing: as strings, "0.9.0" sorts ABOVE "0.10.0", so a
+    lexical floor would have refused every update for the whole of a 0.x line and called
+    it a downgrade.
+
+    Unparseable on either side returns False — refuse. An update channel is remote code
+    execution, so the answer to "I cannot tell which of these is newer" is no.
+    """
+    a, b = _parse_version(offered), _parse_version(running)
+    if a is None or b is None:
+        return False
+    n = max(len(a), len(b))
+    return a + (0,) * (n - len(a)) > b + (0,) * (n - len(b))
+
+
 def should_pause_for_skew(m: UpdateManifest) -> bool:
     """Skew gate (protocols.md §7): a worker too far behind the release's protocol pauses
     pulling until it has updated, rather than speaking a stale queue contract."""
@@ -201,6 +236,29 @@ class UpdateApplier:
         if not verify(m, self._public_key_pem):
             return UpdateResult(Outcome.REFUSED,
                                 f"signature invalid for {m.version} ({m.rid}) — refusing")
+
+        # (3) Newer, or nothing. Checked AFTER the signature deliberately: a replayed
+        # manifest carries a PERFECTLY VALID signature, because it was genuinely signed
+        # once. Verification is not the control that stops it, and putting this first
+        # would imply it was.
+        #
+        # The signed payload is (version, rid, sha256, channel, url, protocol_version) —
+        # no timestamp, no nonce, no expiry. So every manifest the operator's key has
+        # ever signed stays valid forever, and the heartbeat carrying it is plain HTTP.
+        # An on-path attacker who captured one old response could replay it to walk a
+        # worker back to a known-vulnerable build, and the only check was equality: a
+        # version merely DIFFERENT from ours was installed, in either direction.
+        #
+        # Not hypothetical. This fleet's channel spent a fortnight offering 0.10.0 to a
+        # node running 0.18.0 with auto-update on, through nothing worse than a release
+        # that bumped some of its settings and not others — no attacker required.
+        if not _is_newer(m.version, AGENT_VERSION):
+            return UpdateResult(
+                Outcome.REFUSED,
+                f"refusing to move from {AGENT_VERSION} to {m.version}: an update must "
+                f"be strictly newer. A correctly signed manifest offering an older build "
+                f"is either a replayed one or a misconfigured channel; roll back by hand "
+                f"with cbk.prev.pyz if that is genuinely what you want.")
 
         if should_pause_for_skew(m):
             self._log(f"note: {m.version} requires protocol {m.protocol_version}, "

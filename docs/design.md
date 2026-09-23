@@ -877,8 +877,31 @@ pinned public key, then the digest of what it downloaded, before writing a byte.
 channel itself is deliberately unauthenticated, because the signature is the boundary; an
 attacker who can serve the file still cannot make a worker install it.
 
+**Newer, or nothing.** An update must be strictly newer than the build it replaces —
+checked on both sides, and by comparing parsed integer tuples rather than strings, since
+lexically `0.9.0` sorts above `0.10.0`.
+
+The worker's half is the security control, and it sits *after* signature verification on
+purpose: a replayed manifest carries a perfectly valid signature, because it was
+genuinely signed once. The signed payload has no timestamp, nonce or expiry, so every
+manifest the operator's key has ever produced stays valid forever, and the heartbeat
+carrying it is plain HTTP — an on-path attacker who captured one old response could walk
+a worker back to a known-vulnerable build. Verification was never the thing that stopped
+that; nothing was, because the only check was *equality*, and a version merely different
+was installed in either direction.
+
+The coordinator's half stops the accidental case, which turned out to be the common one:
+a release touches five settings and nothing reconciles them, so a channel left behind is
+an ordinary mistake rather than an attack. This fleet's spent a fortnight offering 0.10.0
+to a node running 0.18.0 with auto-update on.
+
+*Still open:* this bounds the direction, not the age. A worker legitimately on an old
+build can still be offered an older-but-newer-than-it manifest by replay. Closing that
+needs a `not_before` inside the signed payload — a contract change, and not done.
+
 The previous artifact is retained as `cbk.prev.pyz`, so a bad release can be reverted by
-hand. Per-node `auto_update: false` opts out.
+hand; note that reverting this way is deliberately outside the update path, which will
+not move a node backwards. Per-node `auto_update: false` opts out.
 
 `release.json` is **unsigned source data** — version, channel, protocol version, and an
 artifact per release-key with its URL and SHA-256. The coordinator signs a manifest

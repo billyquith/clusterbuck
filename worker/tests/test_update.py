@@ -284,3 +284,67 @@ async def test_the_windows_refusal_comes_before_any_download(monkeypatch, tmp_pa
 
     assert got.outcome is Outcome.REFUSED
     assert called is False
+
+
+# --- the version floor: newer, or nothing -------------------------------------------
+
+
+@pytest.mark.parametrize("offered,running,newer", [
+    ("0.19.0", "0.18.0", True),
+    ("0.18.0", "0.19.0", False),      # the downgrade this exists to stop
+    ("0.19.0", "0.19.0", False),      # equal is not newer
+    # THE TRAP. Lexically "0.9.0" > "0.10.0", so a string comparison would call every
+    # release in a 0.x line after .9 a downgrade and refuse the lot.
+    ("0.10.0", "0.9.0", True),
+    ("0.9.0", "0.10.0", False),
+    ("1.0", "1.0.1", False),          # padded to equal length: 1.0 == 1.0.0 < 1.0.1
+    ("1.0.1", "1.0", True),
+    ("0.19.0-rc1", "0.18.0", True),   # pre-release metadata dropped, core compared
+    # Unparseable either side ⇒ refuse. An update channel is remote code execution, so
+    # "I cannot tell which is newer" resolves to no.
+    ("garbage", "0.18.0", False),
+    ("0.19.0", "garbage", False),
+    (None, "0.18.0", False),
+])
+def test_is_newer(offered, running, newer):
+    from cbk_worker.update import _is_newer
+
+    assert _is_newer(offered, running) is newer
+
+
+async def test_a_correctly_signed_downgrade_is_refused(tmp_path, monkeypatch):
+    """The replay case, and why the floor sits AFTER signature verification.
+
+    The manifest here is genuinely signed by the key the worker pins — exactly what a
+    replayed one looks like, because it WAS signed once. The signed payload carries no
+    timestamp, nonce or expiry, so every manifest the operator's key ever produced stays
+    valid forever, and the heartbeat carrying it is plain HTTP. Verification therefore
+    cannot be the control that stops a downgrade; the floor is.
+
+    Not hypothetical: this fleet's channel offered 0.10.0 to a node running 0.18.0 with
+    auto-update on, through nothing worse than a release that bumped some of its five
+    settings and not others.
+    """
+    monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
+    older = _older_than(upd.AGENT_VERSION)
+    m, pem = _signed(tmp_path, b"NEW", version=older)
+
+    async with httpx.AsyncClient() as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+
+    assert result.outcome is upd.Outcome.REFUSED
+    assert "strictly newer" in result.detail
+    assert older in result.detail and upd.AGENT_VERSION in result.detail
+    # And nothing was fetched or swapped: the artifact on disk is untouched.
+    assert (tmp_path / "cbk.pyz").read_bytes() == b"OLD"
+
+
+def _older_than(version: str) -> str:
+    """A version one minor below `version`, so the test tracks the real AGENT_VERSION
+    instead of hard-coding a number that goes stale at the next release."""
+    parts = list(upd._parse_version(version))
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] > 0:
+            parts[i] -= 1
+            return ".".join(str(x) for x in parts)
+    raise AssertionError(f"cannot build a version older than {version}")

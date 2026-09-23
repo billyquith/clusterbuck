@@ -67,6 +67,9 @@ log "building 0.7.0 and 0.9.9 zipapps…"
     --out "$DIST" >/dev/null 2>&1 ) || fail "0.9.9 build failed"
 [[ -f "$INSTALL/cbk.pyz" && -f "$DIST/cbk-0.9.9.pyz" ]] || fail "zipapps not produced"
 SHA=$(sha256 "$DIST/cbk-0.9.9.pyz")
+# Published too, so step 5 can offer it back as a signed downgrade.
+cp "$INSTALL/cbk.pyz" "$DIST/cbk-0.7.0.pyz"
+SHA_OLD=$(sha256 "$DIST/cbk-0.7.0.pyz")
 SIZE=$(( $(wc -c < "$DIST/cbk-0.9.9.pyz") / 1024 ))
 log "built; 0.9.9 is ${SIZE} KB, digest ${SHA:0:16}…"
 
@@ -185,4 +188,26 @@ log "previous artifact retained at cbk.prev.pyz ($(sha256 "$INSTALL/cbk.prev.pyz
 [[ "$(node_field "$NODE" fitness)" == "ok" ]] || fail "fitness not ok after updating"
 log "coordinator now judges it fit ✓"
 
-printf '\033[32m[selfupd-py] PASS — signed zipapp self-update applied; tamper and unsigned paths refused\033[0m\n'
+# --- 5. newer, or nothing: a correctly signed DOWNGRADE is refused ----------------------
+#
+# The node now runs 0.9.9 and 0.7.0 is still published and still validly signed — which
+# is exactly what a replayed manifest looks like, and what a channel left behind after a
+# partial release produces. Before the version floor, the check was equality, so a
+# version merely DIFFERENT was installed in either direction.
+: > "$WORKDIR/worker.log"
+cat > "$WORKDIR/release.json" <<JSON
+{"version":"0.7.0","channel":"stable","protocol_version":1,
+ "artifacts":{
+   "$RID":{"url":"http://127.0.0.1:$FILE_PORT/cbk-0.7.0.pyz","sha256":"$SHA_OLD"}
+ }}
+JSON
+cp "$INSTALL/cbk.pyz" "$WORKDIR/before-downgrade.pyz"
+sleep 6          # several heartbeats: ample time to have taken the bait
+
+AFTER=$(node_field "$NODE" agent_version)
+[[ "$AFTER" == "0.9.9" ]] || fail "node went BACKWARDS to $AFTER — the version floor failed"
+cmp -s "$INSTALL/cbk.pyz" "$WORKDIR/before-downgrade.pyz" \
+  || fail "the installed artifact was replaced by an older one"
+log "a correctly signed 0.7.0 was offered and refused; still $AFTER ✓"
+
+printf '\033[32m[selfupd-py] PASS — signed zipapp self-update applied; tamper, unsigned and downgrade paths refused\033[0m\n'

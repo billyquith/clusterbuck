@@ -54,6 +54,17 @@ def _lt(a: tuple[int, ...], b: tuple[int, ...]) -> bool:
     return a + (0,) * (n - len(a)) < b + (0,) * (n - len(b))
 
 
+def version_gt(a: tuple[int, ...], b: tuple[int, ...]) -> bool:
+    """Strictly newer. The public form of `_lt`, for the update-offer gate.
+
+    Exposed because "is this build newer than that one" is now a decision two places
+    make — the fitness check here, and `_build_update_for`, which must never offer a node
+    a version below the one it runs. Comparing the parsed tuples rather than the strings
+    is the whole point: lexically, "0.9.0" sorts above "0.10.0".
+    """
+    return _lt(b, a)
+
+
 @dataclass(frozen=True)
 class VersionPolicy:
     current: str | None = None
