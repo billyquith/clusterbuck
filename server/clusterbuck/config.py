@@ -52,9 +52,12 @@ class Settings:
     # runs one blessed build rather than whatever its own checkout produced. Unset ⇒ 404.
     worker_artifact: str | None = os.environ.get("CBK_WORKER_ARTIFACT") or None
     # Urgency-tiered streams (ADR 34). `auto` tiers a capability only once every node
-    # enrolled for it demonstrably reads the urgent stream (it says so in the `queues` it
-    # heartbeats), because a worker that predates tiering reads only the base stream and an
-    # urgent-tier write would strand the job. `on`/`off` force it either way.
+    # CURRENTLY REPORTING QUEUES for it demonstrably reads the urgent stream (it says so
+    # in the `queues` it heartbeats), because a worker that predates tiering reads only
+    # the base stream and an urgent-tier write would strand the job. A node reporting no
+    # queues abstains rather than vetoing — it is paused or cut off, which says nothing
+    # about what it could read on resuming — and if none is reporting any the gate stays
+    # shut. `on`/`off` force it either way.
     urgent_streams: str = os.environ.get("CBK_URGENT_STREAMS", "auto")
     # Reaper (ADR 20): a claimed entry idle longer than this is treated as abandoned and
     # requeued. MUST exceed the longest plausible inference, or a merely-busy worker's job

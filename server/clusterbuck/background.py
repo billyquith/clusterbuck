@@ -12,9 +12,12 @@ the one tick that had its own handler was the purely observational one that matt
 least. Now every tick gets the same treatment, and a failure costs only its own turn.
 
 Cadences, fastest to slowest: escalation / reservations / usage / observe run every tick;
-the wake reconciler on `wake_every`, which is tied to the wake cooldown rather than chosen
-— `maybe_wake` coalesces to at most one wake per capability per `wake_cooldown_s`, so
-scanning faster than that window can only burn queries; the reaper and the terminating
+the wake reconciler on `wake_every`, whose default is chosen to match the DEFAULT wake
+cooldown — `maybe_wake` coalesces to at most one wake per capability per
+`wake_cooldown_s`, so scanning faster than that window can only burn queries. Nothing
+derives one from the other, so moving `CBK_WAKE_COOLDOWN_S` or `CBK_ESCALATION_INTERVAL_S`
+away from their defaults breaks the correspondence: the cost is wasted queries or a slower
+retry, never a missed wake. The reaper and the terminating
 backstops run on `reaper_every` because the thresholds they enforce are measured in
 minutes; evals on `eval_every`; the planner on `planner_every`, because it is advisory and
 compares slow-moving state.

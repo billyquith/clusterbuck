@@ -254,16 +254,23 @@ semantics natively.
  stream cannot starve another capability the same node serves.
  The base stream keeps its historical name, so a coordinator that does not tier and a
  worker that does interoperate in both directions. The coordinator only writes to the
- urgent tier once every node enrolled for that capability reports an urgent stream among
- the `queues` on its heartbeat (`CBK_URGENT_STREAMS=auto|on|off`) — a worker built before
- tiering reads only the base stream, and an urgent-tier write would strand the job.
+ urgent tier once every node that is **currently reporting queues** for that capability
+ names an urgent stream among them (`CBK_URGENT_STREAMS=auto|on|off`) — a worker built
+ before tiering reads only the base stream, and an urgent-tier write would strand the
+ job. A node reporting *no* queues abstains rather than vetoing: `queues` is what a node
+ says it is claiming from right now, so it is empty whenever the node is paused or cut
+ off from the broker, and neither says anything about what it could read on resuming. If
+ no node is reporting any, the gate stays shut.
 - **Consumer group:** one shared group named **`cbk-workers`** (`CBK_CONSUMER_GROUP`) per
  stream, created with `XGROUP CREATE … $ MKSTREAM` (tolerate `BUSYGROUP`). Every worker
  joins the *same* group, so each job is delivered to exactly one of them.
 - **Claiming:** `XREADGROUP GROUP cbk-workers <worker-id> COUNT n STREAMS <stream> >`,
  urgent tier first (above).
- Note the worker polls with a short block rather than waiting indefinitely: it has a
-heartbeat to send and a pause flag to notice, so it must come back to its own loop.
+ Note the read is **non-blocking** — no `BLOCK` argument — and the worker sleeps between
+ polls instead: it has a pause flag to notice and a job to be able to abandon, so it must
+ come back to its own loop. A worker MUST NOT block here. Its broker socket carries a
+ read timeout precisely because no legitimate operation on this path outlasts one (see
+ the worker's `broker.py`), and a blocking read would trip it every time.
 
  ```
  {
@@ -546,7 +553,7 @@ POST /reservations
 - Jobs opt in with `"reservation": "rsv_…"` on `POST /jobs`; they may be submitted
  before the window and queue against it.
 - `GET /reservations/{id}` → lifecycle state
- (`scheduled | warming | open | draining | closed | replanned`) + updated plan.
+ (`scheduled | warming | open | draining | closed`, or `cancelled` on DELETE).
 - `DELETE /reservations/{id}` cancels; recurring reservations carry the recurrence on
  the parent and spawn per-occurrence instances.
 

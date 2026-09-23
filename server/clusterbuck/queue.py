@@ -323,7 +323,8 @@ class Queue:
 
         Needed to MOVE an entry between tiers: the payload is not stored in SQLite
         (`messages`/`prompt`/`params` are not columns), so it has to be read off the
-        stream before the entry is withdrawn.
+        stream before the entry goes anywhere — `move_if_unclaimed` is handed the payload
+        this returns, because the move deletes the source entry in the same atomic step.
         """
         entries = await self._r.xrange(stream, min=entry_id, max=entry_id, count=1)
         for _id, fields in entries or []:

@@ -103,7 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["dedicated", "shared", "background"])
     enroll.add_argument("--state", help="path to the persisted node identity")
 
-    for verb, helptext in (("pause", "Owner eviction: stop claiming jobs"),
+    for verb, helptext in (("pause", "Owner eviction: stop claiming, and on a shared "
+                                     "node stop the running job and free its RAM"),
                            ("resume", "Resume claiming jobs")):
         sp = sub.add_parser(verb, parents=[common], help=helptext)
         sp.add_argument("--state", help="path to the persisted node identity")
