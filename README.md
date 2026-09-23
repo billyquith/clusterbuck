@@ -88,14 +88,21 @@ through llama.cpp/Metal. Two flags change on such a node:
 
 ```bash
 --model-server  http://127.0.0.1:1234/v1   # LM Studio's port, not Ollama's 11434
---model-manager none                       # the adapter speaks Ollama's native API
 ```
 
-The trade is confined to model *management*, not to running jobs. Discovery still works
-(it goes through the portable `/v1/models` every server implements), but loaded-model and
-digest reporting are Ollama-native, so on an LM Studio node an approved install must be
-done by hand and a model updated in place won't be spotted by digest change. Inference,
-routing, eval and ability scoring are unaffected.
+One flag, because the default `--model-manager auto` probes for whichever native API
+answers. **Do not set `none` here** — that is the value that turns the adapter off, and a
+node running with it reports nothing warm and no digests, which is indistinguishable from
+a healthy idle machine. (`lmstudio` may be pinned explicitly to skip the probe; it is not
+required.)
+
+What still differs on such a node, and only this: **installs** are Ollama-only, so an
+approved proposal has to be carried out by hand there; and **digests** are absent, because
+LM Studio publishes a quantization and a size but no content hash, so a model updated in
+place will not be spotted by a digest change. Residency *is* reported, which is what makes
+a cold start provable and therefore `stats.load_s` measurable. Unloading needs LM Studio
+0.4.0 or newer, which is where its unload endpoint arrives; older builds are told so
+rather than failing quietly. Inference, routing, eval and ability scoring are unaffected.
 
 ## The two reachability rules
 
@@ -198,7 +205,7 @@ rather than sent. From there it:
    no job ever routes.
 
 `--dry-run` reports what it would do and installs nothing. On a macOS worker add
-`--model-server http://127.0.0.1:1234/v1 --model-manager none` for LM Studio.
+`--model-server http://127.0.0.1:1234/v1` for LM Studio; the adapter is detected.
 
 Both clones need git access to a private repo. That is the one prerequisite joining
 cannot fetch for you.
