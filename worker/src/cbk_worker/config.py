@@ -55,6 +55,20 @@ class WorkerConfig:
     # moment this worker gives up on it — double the compute for one answer. The coordinator
     # documents the other half of the pair at its own definition.
     inference_timeout_s: float = 600.0
+    # Ceiling on jobs this node runs at once. 1 keeps the historical behaviour exactly,
+    # which is why it is the default: raising it is an operator's decision about their
+    # own machine, not something an upgrade should do to every node in a fleet.
+    #
+    # It is a CEILING, not a target. The effective limit is derived per beat from the
+    # node's profile and the owner's presence (`WorkLoop.effective_limit`), because a
+    # flat number cannot be right for both a dedicated box that exists to serve and a
+    # laptop somebody is using.
+    #
+    # Worth raising when the model server batches well — vLLM's continuous batching, or
+    # Ollama with OLLAMA_NUM_PARALLEL — since a single-request-at-a-time worker leaves
+    # most of a fast accelerator idle. Worth leaving at 1 when it does not: concurrent
+    # requests to a server that serialises them internally buy nothing and cost memory.
+    max_concurrent_jobs: int = 1
     # Which model-manager adapter handles the non-OpenAI bits (residency, digests,
     # installs, unloading): auto | ollama | lmstudio | none.
     #
@@ -83,6 +97,7 @@ class WorkerConfig:
             result_ttl_s=_int_env("CBK_RESULT_TTL_S", 86400),
             heartbeat_s=_int_env("CBK_HEARTBEAT_MS", 10000) / 1000.0,
             inference_timeout_s=_float_env("CBK_INFERENCE_TIMEOUT_S", 600.0),
+            max_concurrent_jobs=max(1, _int_env("CBK_MAX_CONCURRENT_JOBS", 1)),
             model_manager=os.environ.get("CBK_MODEL_MANAGER") or "auto",
             ladder_hysteresis_s=_float_env("CBK_LADDER_HYSTERESIS_S", 120.0),
         )

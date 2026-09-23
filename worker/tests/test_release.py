@@ -131,6 +131,9 @@ class _FakeLoop:
     def set_installed(self, artifacts) -> None: ...
     def set_resident(self, loaded) -> None: ...
 
+    def set_presence(self, mode, profile) -> None:
+        self.presence = (mode, profile)
+
 
 class _FakeInventory:
     def __init__(self, loaded: list[str]) -> None:

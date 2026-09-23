@@ -178,12 +178,18 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
     """Re-read the persisted mode, drive the ladder, take a model inventory, report."""
     pending_result: ActionResult | None = None
     previous_mode: str | None = None
+    beat_ok = True
     while not stop.is_set():
         try:
             state = load_state(state_path)
             if state is not None:
                 effective = ladder.update(state.mode)
                 loop.paused = effective == "paused"
+                # How much of this machine the loop may take at once. The effective mode
+                # rather than the desired one, so the presence ladder's hysteresis damps
+                # this decision too — a coffee break must not make the node greedy, and
+                # nothing here should need its own second damper.
+                loop.set_presence(effective, state.profile)
                 caps = ladder.capabilities()
                 await loop.set_capabilities(caps)
 
@@ -258,11 +264,24 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                     pending_result = await _execute_action(manager, resp.action)
         except asyncio.CancelledError:
             raise           # shutdown, not a failed beat
-        except Exception:
+        except Exception as e:
             # A missed heartbeat is transient by nature — an unreachable coordinator, a
             # restarting model server. Retry on the next beat rather than taking the worker
             # down; jobs already claimed keep running regardless.
-            pass
+            #
+            # But SAY SO, on the edge. Swallowing this silently made a transient outage and
+            # a permanent bug — a contract mismatch, a revoked node key, an AttributeError
+            # in this very block — indistinguishable: the node simply went quiet and the
+            # coordinator showed it as `silent`, with nothing on either side of the wire
+            # saying why. Logged on the transition only, so a coordinator that is down for
+            # an hour does not produce six lines a minute.
+            if beat_ok:
+                Out.dim(f"heartbeat failed: {e.__class__.__name__}: {e} — retrying")
+            beat_ok = False
+        else:
+            if not beat_ok:
+                Out.dim("heartbeat is getting through again")
+            beat_ok = True
 
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=cfg.heartbeat_s)

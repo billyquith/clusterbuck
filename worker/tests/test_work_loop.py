@@ -33,6 +33,19 @@ _OK = {
 pytestmark = pytest.mark.usefixtures("redis_client")
 
 
+
+async def _claim(loop) -> bool:
+    """Claim whatever is waiting AND let it finish.
+
+    `poll_once` STARTS jobs rather than awaiting them, so a node can run more than one at
+    a time. A test that asserts on a result therefore has to wait for the job it just
+    claimed; `drain` is the same wait the loop performs on shutdown.
+    """
+    took = await loop.poll_once()
+    await loop.drain()
+    return took
+
+
 def _cfg(**kw) -> WorkerConfig:
     defaults = {"worker_id": "node-test", "consumer_group": "cbk-workers",
                 "capabilities": ("8b-extract",), "poll_s": 0.01}
@@ -62,7 +75,7 @@ async def test_a_queued_job_is_claimed_run_acked_and_its_result_stored(redis_cli
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire()})
 
-    assert await loop.poll_once() is True
+    assert await _claim(loop) is True
 
     stored = json.loads(await redis_client.get("res:job_1"))
     assert stored["status"] == "done" and stored["worker"] == "node-test"
@@ -86,7 +99,7 @@ async def test_a_failed_job_still_gets_a_terminal_result_and_is_acked(redis_clie
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_fail")})
 
-    await loop.poll_once()
+    await _claim(loop)
 
     stored = json.loads(await redis_client.get("res:job_fail"))
     assert stored["status"] == "failed" and stored["error"]
@@ -102,7 +115,7 @@ async def test_the_result_carries_the_configured_ttl(redis_client):
     loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_ttl")})
-    await loop.poll_once()
+    await _claim(loop)
     ttl = await redis_client.ttl("res:job_ttl")
     assert 0 < ttl <= 1234
     await http.aclose()
@@ -116,12 +129,12 @@ async def test_paused_worker_claims_nothing_and_leaves_the_job_queued(redis_clie
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_paused")})
 
     loop.paused = True
-    assert await loop.poll_once() is False
+    assert await _claim(loop) is False
     assert await redis_client.get("res:job_paused") is None
 
     # Unpausing picks it up — the job waited, it was not lost.
     loop.paused = False
-    assert await loop.poll_once() is True
+    assert await _claim(loop) is True
     assert await redis_client.get("res:job_paused") is not None
     await http.aclose()
 
@@ -139,7 +152,7 @@ async def test_one_job_per_capability_per_pass_so_a_busy_queue_cannot_starve_ano
     await redis_client.xadd(stream_key("32b-reason"),
                             {"job": _job_wire("big_0", capability="32b-reason")})
 
-    await loop.poll_once()      # one pass
+    await _claim(loop)      # one pass
 
     # The big job ran on the very first pass, despite three small jobs queued ahead of it.
     assert await redis_client.get("res:big_0") is not None
@@ -171,7 +184,7 @@ async def test_set_capabilities_subscribes_the_new_queue_live(redis_client):
     assert loop.capabilities == ("8b-extract", "70b-reason")
     await redis_client.xadd(stream_key("70b-reason"),
                             {"job": _job_wire("job_big", capability="70b-reason")})
-    assert await loop.poll_once() is True
+    assert await _claim(loop) is True
     assert await redis_client.get("res:job_big") is not None
     await http.aclose()
 
@@ -183,7 +196,7 @@ async def test_a_malformed_entry_is_acked_rather_than_poisoning_the_queue(redis_
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"not-a-job": "garbage"})
 
-    await loop.poll_once()
+    await _claim(loop)
     pending = await redis_client.xpending(stream_key("8b-extract"), cfg.consumer_group)
     assert pending["pending"] == 0, "an entry with no job field stayed pending forever"
     await http.aclose()
@@ -244,12 +257,12 @@ async def test_urgent_work_is_served_before_a_patient_backlog(redis_client):
     await redis_client.xadd(stream_key("8b-extract", URGENT_TIER),
                             {"job": _job_wire("now", urgency="urgent")})
 
-    await loop.poll_once()
+    await _claim(loop)
 
     assert await redis_client.get("res:now") is not None, "urgent tier read first"
     assert await redis_client.get("res:patient") is None, "backlog waits its turn"
 
-    await loop.poll_once()
+    await _claim(loop)
     assert await redis_client.get("res:patient") is not None
     await http.aclose()
 
@@ -261,7 +274,7 @@ async def test_the_base_stream_is_read_when_the_urgent_tier_is_empty(redis_clien
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("only")})
 
-    assert await loop.poll_once() is True
+    assert await _claim(loop) is True
     assert await redis_client.get("res:only") is not None
     await http.aclose()
 
@@ -283,7 +296,7 @@ async def test_a_busy_urgent_tier_still_cannot_starve_another_capability(redis_c
     await redis_client.xadd(stream_key("32b-reason"),
                             {"job": _job_wire("big_0", capability="32b-reason")})
 
-    await loop.poll_once()
+    await _claim(loop)
 
     assert await redis_client.get("res:rush_0") is not None
     assert await redis_client.get("res:big_0") is not None, "not starved by the rush"
@@ -301,7 +314,7 @@ async def test_a_job_is_acked_on_the_tier_it_came_from(redis_client):
     await redis_client.xadd(stream_key("8b-extract", URGENT_TIER),
                             {"job": _job_wire("job_ack", urgency="urgent")})
 
-    await loop.poll_once()
+    await _claim(loop)
 
     pending = await redis_client.xpending(
         stream_key("8b-extract", URGENT_TIER), cfg.consumer_group)
@@ -317,7 +330,7 @@ async def test_a_malformed_urgent_entry_is_acked_on_its_own_tier(redis_client):
     await redis_client.xadd(stream_key("8b-extract", URGENT_TIER),
                             {"not-a-job": "garbage"})
 
-    await loop.poll_once()
+    await _claim(loop)
 
     pending = await redis_client.xpending(
         stream_key("8b-extract", URGENT_TIER), cfg.consumer_group)
@@ -410,7 +423,7 @@ async def test_a_model_swap_clears_the_throughput_window(redis_client):
             await redis_client.xadd(stream_key("c"), {"job": json.dumps({
                 "id": f"j-{pinned}", "created_at": "t", "capability": "c",
                 "prompt": "hi", "params": params, "result_key": f"r-{pinned}"})})
-            await loop.poll_once()
+            await _claim(loop)
 
         await run(None)
         await run(None)
@@ -448,7 +461,7 @@ async def test_a_late_copy_does_not_overwrite_an_answer_that_already_landed(redi
                   "role": "assistant", "content": "answered while you were away"}}]}}
     await redis_client.set("res:job_slept", json.dumps(winner))
 
-    assert await loop.poll_once() is True
+    assert await _claim(loop) is True
 
     stored = json.loads(await redis_client.get("res:job_slept"))
     assert stored["worker"] == "node-other", "the first answer must survive"
@@ -469,7 +482,7 @@ async def test_a_dead_letter_is_not_quietly_turned_into_a_success(redis_client):
         "error": "abandoned by its worker and retried 3 times (max_attempts=3)",
     }))
 
-    await loop.poll_once()
+    await _claim(loop)
 
     assert json.loads(await redis_client.get("res:job_dl"))["status"] == "failed"
     await http.aclose()
@@ -487,7 +500,7 @@ async def test_a_late_copy_is_still_acked(redis_client):
     await redis_client.set("res:job_ack", json.dumps(
         {"job_id": "job_ack", "status": "done", "worker": "node-other"}))
 
-    await loop.poll_once()
+    await _claim(loop)
 
     pending = await redis_client.xpending(stream_key("8b-extract"), cfg.consumer_group)
     assert pending["pending"] == 0
@@ -503,7 +516,7 @@ async def test_the_ordinary_path_still_writes_its_result(redis_client):
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_fresh")})
 
-    await loop.poll_once()
+    await _claim(loop)
 
     stored = json.loads(await redis_client.get("res:job_fresh"))
     assert stored["worker"] == "node-test" and stored["status"] == "done"
@@ -656,17 +669,24 @@ async def test_a_job_completed_before_the_evict_is_not_mistaken_for_one(redis_cl
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_one")})
 
-    assert await loop.poll_once() is True
+    assert await _claim(loop) is True
     assert loop.evict() is False                      # too late; it already finished
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_two")})
-    assert await loop.poll_once() is True
+    assert await _claim(loop) is True
 
     assert json.loads(await redis_client.get("res:job_two"))["status"] == "done"
     await http.aclose()
 
 
 async def test_a_shutdown_cancellation_is_not_swallowed_as_an_eviction(redis_client):
-    """A genuine cancel must stay a cancel, or the process stops exiting when asked."""
+    """A genuine cancel must stay a cancel, or the process stops exiting when asked.
+
+    Cancelling the JOB task rather than the poll: jobs now run as their own tasks, so
+    that is what a hard shutdown actually cancels. The distinction under test is
+    unchanged and is the reason `_evicted_tasks` exists — a cancellation nobody asked
+    for via `evict()` must propagate as `CancelledError` and NOT be re-labelled
+    `Evicted`, which `_process` handles by leaving the entry for the reaper.
+    """
     started = asyncio.Event()
 
     async def hang(request: httpx.Request) -> httpx.Response:
@@ -680,11 +700,16 @@ async def test_a_shutdown_cancellation_is_not_swallowed_as_an_eviction(redis_cli
     await loop.ensure_groups()
     await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("job_shutdown")})
 
-    polling = asyncio.create_task(loop.poll_once())
+    assert await loop.poll_once() is True
     await asyncio.wait_for(started.wait(), timeout=5)
-    polling.cancel()                                  # shutdown, nobody called evict()
+
+    running = next(iter(loop._running))
+    running.cancel()                                  # shutdown, nobody called evict()
     with pytest.raises(asyncio.CancelledError):
-        await polling
+        await running
+
+    assert await redis_client.get("res:job_shutdown") is None, \
+        "a shutdown mid-generation answers nothing; the reaper owns the job"
     await http.aclose()
 
 
@@ -695,3 +720,187 @@ def test_an_eviction_can_never_be_caught_as_a_failure():
 
     assert issubclass(Evicted, BaseException)
     assert not issubclass(Evicted, Exception)
+
+
+# --- concurrency: a ceiling the operator sets, a limit the machine allows -----------
+
+
+def _loop(redis_client, model, **cfgkw):
+    return WorkLoop(redis_client, model, _cfg(**cfgkw), log=lambda _: None)
+
+
+@pytest.mark.parametrize("profile,mode,ceiling,expected", [
+    # A dedicated box exists to serve: nobody is waiting for it, so it runs the ceiling
+    # whatever the "presence" says — the mode on such a node describes nothing anyone
+    # feels. Holding slots back is the same pure loss as dropping its weights on a pause.
+    ("dedicated", "active", 4, 4),
+    ("dedicated", "away", 4, 4),
+    # Somebody's machine. At `away` it looks idle and the ladder is already climbing to
+    # heavier models, so take the ceiling; at `active` a person is using it, and one job
+    # at a time is what the node always did.
+    ("shared", "away", 4, 4),
+    ("shared", "active", 4, 1),
+    ("background", "active", 4, 1),
+    # Unknown profile yields, for the reason `yields_to_a_person` gives: being wrong that
+    # way costs throughput, the other way costs somebody their laptop.
+    (None, "active", 4, 1),
+    (None, "away", 4, 4),
+    # Paused takes everything, either way. Claiming stops; what is in hand finishes or is
+    # evicted, depending on the profile.
+    ("dedicated", "paused", 4, 0),
+    ("shared", "paused", 4, 0),
+    # The ceiling is still a ceiling.
+    ("dedicated", "away", 1, 1),
+])
+def test_effective_limit_follows_the_profile_and_the_owner(
+    redis_client, profile, mode, ceiling, expected
+):
+    loop = _loop(redis_client, None, max_concurrent_jobs=ceiling)
+    loop.set_presence(mode, profile)
+    assert loop.effective_limit == expected
+
+
+async def test_the_default_is_one_at_a_time_so_an_upgrade_changes_no_node(redis_client):
+    """The ceiling defaults to 1 deliberately: raising it is an operator's decision about
+    their own hardware, not something an upgrade does to every node in a fleet."""
+    http, model = _model()
+    loop = _loop(redis_client, model)
+    loop.set_presence("away", "dedicated")
+    assert loop.effective_limit == 1
+    await http.aclose()
+
+
+async def test_a_dedicated_node_runs_jobs_concurrently(redis_client):
+    """The capacity finding this exists for. Every model server clusterbuck targets can
+    serve concurrent requests, and vLLM's continuous batching gains are near-linear — but
+    the worker awaited each job inline, so fleet throughput was `number of nodes`, not
+    `nodes x concurrency`, and a fast accelerator sat mostly idle.
+    """
+    running = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await release.wait()
+        running -= 1
+        return httpx.Response(200, json=_OK)
+
+    http, model = _model(slow)
+    loop = _loop(redis_client, model, max_concurrent_jobs=3)
+    loop.set_presence("away", "dedicated")
+    await loop.ensure_groups()
+    for i in range(3):
+        await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire(f"c_{i}")})
+
+    # Three passes, because the fairness rule still takes one job per capability per pass.
+    for _ in range(3):
+        await loop.poll_once()
+    await asyncio.sleep(0.05)
+    assert peak == 3, f"expected 3 jobs in flight at once, saw {peak}"
+
+    release.set()
+    await loop.drain()
+    for i in range(3):
+        assert await redis_client.get(f"res:c_{i}") is not None
+    await http.aclose()
+
+
+async def test_an_active_owner_holds_a_shared_node_to_one_job(redis_client):
+    """The other half, and the one that matters more: the worker must not get greedy on
+    a machine somebody is sitting at."""
+    running = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await release.wait()
+        running -= 1
+        return httpx.Response(200, json=_OK)
+
+    http, model = _model(slow)
+    loop = _loop(redis_client, model, max_concurrent_jobs=4)
+    loop.set_presence("active", "shared")
+    await loop.ensure_groups()
+    for i in range(3):
+        await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire(f"s_{i}")})
+
+    first = asyncio.ensure_future(loop.poll_once())
+    await asyncio.sleep(0.05)
+    assert peak == 1, f"a shared node with its owner present took {peak} jobs at once"
+
+    release.set()
+    await first
+    await loop.drain()
+    await http.aclose()
+
+
+async def test_an_eviction_stops_every_job_not_just_the_newest(redis_client):
+    """`evict` held ONE task. On a node running several, cancelling only the most recent
+    would hold the GPU for exactly as long as the one it did stop — and an eviction is a
+    person reaching for their own laptop."""
+    started = asyncio.Event()
+    count = 0
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        count += 1
+        if count >= 2:
+            started.set()
+        await asyncio.sleep(30)
+        return httpx.Response(200, json=_OK)
+
+    http, model = _model(hang)
+    loop = _loop(redis_client, model, max_concurrent_jobs=2)
+    loop.set_presence("away", "dedicated")
+    await loop.ensure_groups()
+    for i in range(2):
+        await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire(f"e_{i}")})
+
+    for _ in range(2):
+        await loop.poll_once()
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    assert loop.evict() is True
+    await loop.drain()
+
+    for i in range(2):
+        assert await redis_client.get(f"res:e_{i}") is None, \
+            "an evicted job must not be answered — both of them"
+    pending = await redis_client.xpending(stream_key("8b-extract"), "cbk-workers")
+    assert pending["pending"] == 2, "both still claimed, so the reaper requeues both"
+    await http.aclose()
+
+
+async def test_throughput_is_only_sampled_from_a_job_that_ran_alone(redis_client):
+    """Both figures are wall-clock over tokens, so a job sharing the accelerator reads as
+    slower than the node is — and `load_s` subtracts generation from wall time USING tps,
+    so a deflated tps inflates every load estimate and over-warms every reservation.
+    Under concurrency the honest answer is fewer samples, not faster-looking ones."""
+    release = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await release.wait()
+        return httpx.Response(200, json=_OK)
+
+    http, model = _model(slow)
+    loop = _loop(redis_client, model, max_concurrent_jobs=2)
+    loop.set_presence("away", "dedicated")
+    await loop.ensure_groups()
+    for i in range(2):
+        await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire(f"t_{i}")})
+
+    for _ in range(2):
+        await loop.poll_once()
+    await asyncio.sleep(0.02)
+    release.set()
+    await loop.drain()
+
+    assert loop.jobs_done == 2, "both jobs ran"
+    assert loop.tps is None, "neither job had the machine to itself, so neither measured"
+    await http.aclose()

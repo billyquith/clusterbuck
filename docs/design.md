@@ -349,6 +349,48 @@ wherever the coordinator reads enrolled nodes — urgency tiering, for one. The 
 panel's worker count is a separate and stricter signal: live stream consumers,
 idle-filtered.
 
+### How much of a machine to take at once
+
+A worker ran **one job at a time**, and not per capability — strictly serial across every
+capability it served, so a slow job on one blocked even the *urgent* tier of another on
+the one node that was awake. Fleet throughput was therefore *number of nodes*, when every
+model server here can serve concurrent requests and vLLM's continuous batching gains are
+close to linear up to the KV-cache limit. A fast accelerator sat mostly idle.
+
+`CBK_MAX_CONCURRENT_JOBS` is the operator's ceiling for the hardware, **default 1** so an
+upgrade changes no existing node. What the machine actually allows is derived from it each
+beat, because a flat number cannot be right for both a box that exists to serve and a
+laptop somebody is using — the same distinction `profile` already draws for model pulls
+and for eviction:
+
+| profile | `active` | `away` | `paused` |
+|---|---|---|---|
+| `dedicated` | ceiling | ceiling | 0 |
+| `shared` / `background` / unknown | 1 | ceiling | 0 |
+
+A dedicated node has nobody waiting for it, so holding slots back is the same pure loss as
+dropping its weights on a pause. Somebody's machine takes the ceiling only when it looks
+idle — which is when the presence ladder is already climbing to heavier models anyway —
+and drops to one job the moment the owner is back. An unknown profile yields, for the
+reason it yields everywhere else.
+
+No hysteresis of its own: the mode arriving here has already been damped by the presence
+ladder, and a second damper would make the node slow to give the machine back, which is
+the one direction that must stay immediate.
+
+Two consequences worth knowing. An eviction cancels **every** job in flight, not the most
+recent — cancelling one of three would hold the GPU exactly as long as the one it stopped.
+And `stats.tps` and `stats.load_s` are sampled **only from a job that ran alone**: both are
+wall-clock over tokens, so a job sharing the accelerator reads as slower than the node is,
+and `load_s` is derived by subtracting generation from wall time *using* `tps` — a deflated
+rate would inflate every load estimate and over-warm every reservation. Fewer honest
+samples, not faster-looking ones.
+
+*Not built:* backing the ceiling off when concurrency turns out not to pay. Deciding that
+needs throughput compared across concurrency levels on the same artifact, and the only
+samples this node trusts are the solo ones — so the data to make that call does not exist
+yet. Raising the ceiling is an operator's judgement about their own model server for now.
+
 ### The owner always wins
 
 Every node carries a **profile** — `dedicated`, `shared` or `background` — describing how

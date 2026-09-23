@@ -96,16 +96,29 @@ class WorkLoop:
         # say (LM Studio, llama.cpp), which is unknown, not "nothing loaded" — and unknown
         # is never evidence that a job was a cold start.
         self._resident: frozenset[str] | None = None
-        # The model call currently in flight, and the one `evict` cancelled. Held as the
-        # TASK OBJECT rather than a boolean flag so the two can be compared by identity:
+        # The model calls currently in flight, and the ones `evict` cancelled. Held as
+        # TASK OBJECTS rather than a boolean flag so the two can be compared by identity:
         # a flag set just as a job finished would still be standing when the next job
         # started, and that job would then read a completion of its own as an eviction.
-        self._inflight: asyncio.Task | None = None
-        self._evicted_task: asyncio.Task | None = None
+        #
+        # Sets rather than single slots because a node may run more than one job at a
+        # time (`max_concurrent_jobs`). An eviction is the owner taking the machine back,
+        # so it takes ALL of them — cancelling only the most recent would leave the
+        # person waiting on whatever else happened to be generating.
+        self._inflight: set[asyncio.Task] = set()
+        self._evicted_tasks: set[asyncio.Task] = set()
+        # The per-job processing tasks, which is what slot accounting counts. Distinct
+        # from `_inflight`: a job holds a slot for its whole life, including the result
+        # write and the ack, while it is only in `_inflight` during the model call.
+        self._running: set[asyncio.Task] = set()
         # Whether the broker is answering. Reported on the heartbeat by emptying `queues`
         # — a node that cannot reach Redis is claiming from nothing, and saying otherwise
         # would have the coordinator suppress a wake on this node's behalf.
         self.broker_ok = True
+        # Whose machine this is, and whether they are at it. Drives `effective_limit`.
+        # Defaults are the cautious pair: unknown profile, owner present.
+        self._mode: str = "active"
+        self._profile: str | None = None
 
     @property
     def tps(self) -> float | None:
@@ -262,11 +275,15 @@ class WorkLoop:
         server abandons the generation behind it is the server's business. Freeing the RAM
         is the separate job of `ModelManager.unload`.
         """
-        task = self._inflight
-        if task is None or task.done():
+        live = {t for t in self._inflight if not t.done()}
+        if not live:
             return False
-        self._evicted_task = task
-        task.cancel()
+        # ALL of them. An eviction is a person reaching for their own laptop; leaving one
+        # generation running because it was not the most recent would hold the GPU for
+        # exactly as long as the one we did stop.
+        self._evicted_tasks |= live
+        for task in live:
+            task.cancel()
         return True
 
     async def _complete(self, job: Job) -> tuple[dict, dict | None]:
@@ -274,30 +291,108 @@ class WorkLoop:
 
         Translates a cancellation WE caused into `Evicted`, and lets any other one through
         untouched: a genuine shutdown must stay a `CancelledError` or the process would
-        stop exiting when asked.
+        stop exiting when asked. Membership of `_evicted_tasks` is what distinguishes
+        them, by task identity — see the note on those sets in `__init__`.
         """
         task = asyncio.ensure_future(self._model.complete(job))
-        self._inflight = task
+        self._inflight.add(task)
         try:
             return await task
         except asyncio.CancelledError:
-            if self._evicted_task is task:
+            if task in self._evicted_tasks:
                 raise Evicted() from None
             raise
         finally:
-            self._inflight = None
-            if self._evicted_task is task:
-                self._evicted_task = None
+            self._inflight.discard(task)
+            self._evicted_tasks.discard(task)
+
+    def set_presence(self, mode: str | None, profile: str | None) -> None:
+        """Tell the loop whose machine this is and whether they are at it.
+
+        Fed by the heartbeat task from the ladder's EFFECTIVE mode (already damped by the
+        presence hysteresis) and the node's enrolled profile.
+        """
+        self._mode = mode or "active"
+        self._profile = profile
+
+    @property
+    def effective_limit(self) -> int:
+        """How many jobs this node may run at once, right now.
+
+        `max_concurrent_jobs` is a ceiling the operator sets for the hardware; this is
+        what the machine's situation allows of it. A flat number cannot be right for both
+        a dedicated box that exists to serve and a laptop somebody is using, and the
+        profile is exactly the distinction the rest of the system already draws for model
+        pulls and for eviction (design.md §12, `commands.yields_to_a_person`). This is
+        that same line applied to a third resource: attention.
+
+        * **dedicated** — nobody is waiting for this machine, so it runs the full
+          ceiling. Holding slots back would be the same pure loss as dropping its weights
+          on a pause.
+        * **shared / background / unknown** — the machine is somebody's. At `away` it
+          looks idle and the ladder is already climbing to heavier models, so take the
+          ceiling; at `active` a person is using it and the node takes one job at a time,
+          which is what it always did. Unknown profile yields, for the reason
+          `yields_to_a_person` gives: being wrong that way costs throughput, the other
+          way costs somebody their laptop.
+        * **paused** — nothing, either way. Claiming stops; what is in hand finishes or
+          is evicted, depending on the profile.
+
+        No hysteresis of its own, deliberately. The mode arriving here has already been
+        damped by the presence ladder, which exists precisely so a coffee break does not
+        thrash an expensive decision; adding a second damper on top would make the node
+        slow to give the machine back, which is the one direction that must stay
+        immediate.
+        """
+        ceiling = max(1, self._cfg.max_concurrent_jobs)
+        if self._mode == "paused":
+            return 0
+        if self._profile == "dedicated":
+            return ceiling
+        return ceiling if self._mode == "away" else 1
+
+    @property
+    def free_slots(self) -> int:
+        """How many more jobs this node may take right now."""
+        return max(0, self.effective_limit - len(self._running))
+
+    def _spawn(self, cap: str, entry_id: str, fields: dict, *, tier: str | None) -> None:
+        """Run one job as its own task, holding a slot until it is completely done.
+
+        The slot covers the result write and the ack, not just the model call: a job
+        whose generation has finished is still occupying memory and still owes an
+        answer, so releasing its slot early would let the node over-commit.
+        """
+        task = asyncio.ensure_future(self._process(cap, entry_id, fields, tier=tier))
+        self._running.add(task)
+        task.add_done_callback(self._running.discard)
 
     async def poll_once(self) -> bool:
-        """Read at most one job per capability and process it. True if it did work."""
-        if self.paused:
+        """Claim what this node has room for and start it. True if it claimed anything.
+
+        Jobs are STARTED here, not awaited. `_process` used to be awaited inline, which
+        made the node strictly serial across every capability it served — so a slow job
+        on one capability blocked even the URGENT tier of another, defeating the tier on
+        the one node that was awake. At `max_concurrent_jobs = 1` the behaviour is
+        unchanged, because `run` waits for the slot before polling again.
+        """
+        if self.paused or self.effective_limit <= 0:
             return False
         did_work = False
         # One job per capability per pass, rather than draining a stream before looking at
         # the next: that ordering is what keeps a busy small-model queue from starving the
         # big-model queue this node also serves.
         for cap in self._capabilities:
+            # Out of slots, but capabilities still unvisited: WAIT for one rather than
+            # abandoning the pass. Breaking here instead would quietly undo the fairness
+            # the loop above exists for — at a limit of 1 the first capability would take
+            # the only slot every pass and a second capability's queue would never be
+            # read at all. Waiting reproduces exactly what awaiting each job inline used
+            # to do: claim one, run it, move to the next capability.
+            if self.free_slots <= 0:
+                await self._wait_for_slot()
+                if self.paused:
+                    break
             # Urgent tier first, base only if it had nothing. Note this stays INSIDE the
             # one-job-per-capability discipline: the tier loop breaks as soon as it takes
             # a job, so a busy urgent stream cannot drain to empty while another
@@ -310,10 +405,21 @@ class WorkLoop:
                 for _stream, messages in entries or []:
                     for entry_id, fields in messages:
                         did_work = took = True
-                        await self._process(cap, entry_id, fields, tier=tier)
+                        self._spawn(cap, entry_id, fields, tier=tier)
                 if took:
                     break
         return did_work
+
+    async def _wait_for_slot(self) -> None:
+        """Block until at least one running job finishes, or return if none are."""
+        if not self._running:
+            return
+        await asyncio.wait(tuple(self._running), return_when=asyncio.FIRST_COMPLETED)
+
+    async def drain(self) -> None:
+        """Wait for every job in flight to finish. For shutdown and for tests."""
+        while self._running:
+            await asyncio.gather(*tuple(self._running), return_exceptions=True)
 
     async def run(self, stop: asyncio.Event) -> None:
         await self.ensure_groups()
@@ -354,13 +460,32 @@ class WorkLoop:
                 if not self.broker_ok:
                     self._log("broker is back — claiming again")
                 self.broker_ok = True
-            if did_work:
+            if did_work and self.free_slots > 0:
                 continue
-            # Idle: wait out the poll interval, but wake immediately on shutdown.
+            # Nothing to claim, or no room to put it. Either way, wait — but wake on
+            # whichever comes first: shutdown, the poll interval, or a running job
+            # finishing and freeing its slot.
+            #
+            # That last one is what keeps a full node responsive. Sleeping out the poll
+            # interval regardless would add up to `poll_s` of idle GPU to every job on a
+            # saturated node; spinning instead would burn a core polling Redis. At
+            # `max_concurrent_jobs = 1` this reduces to the old behaviour: claim one,
+            # wait for it, repeat.
+            waiters = [asyncio.ensure_future(stop.wait())]
+            if self._running and self.free_slots <= 0:
+                waiters.append(asyncio.ensure_future(
+                    asyncio.wait(tuple(self._running),
+                                 return_when=asyncio.FIRST_COMPLETED)))
             try:
-                await asyncio.wait_for(stop.wait(), timeout=self._cfg.poll_s)
-            except TimeoutError:
-                pass
+                await asyncio.wait(waiters, timeout=self._cfg.poll_s,
+                                   return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waiters:
+                    w.cancel()
+
+        # Shutting down: the jobs already claimed keep their slots until they answer, so
+        # they are not silently abandoned to the reaper on a graceful stop.
+        await self.drain()
 
     async def _process(self, capability: str, entry_id: str,
                        fields: dict[str, str], *, tier: str | None = None) -> None:
@@ -384,6 +509,9 @@ class WorkLoop:
         # belong to that artifact and the answer changes when a job pins something else.
         served = str((job.params or {}).get("model") or self._cfg.model_name)
         cold = self._was_cold(served)
+        # Whether this job has the machine to itself for its whole run. Sampled at both
+        # ends: one job in flight now, and still only this one when it finishes.
+        solo_at_start = len(self._running) <= 1
         if served != self._tps_model:
             # A throughput window that survives a model swap reports the old model's speed
             # as the new one's — flattering a big model that just landed, libelling a small
@@ -396,13 +524,29 @@ class WorkLoop:
                 raise RuntimeError(refusal)
             completion, usage = await self._complete(job)
             elapsed = time.monotonic() - t0
+            solo = solo_at_start and len(self._running) <= 1
             result = Result(job_id=job.id, status="done", worker=self._cfg.worker_id,
                             started_at=started_at, finished_at=_now_iso(),
                             completion=completion, usage=usage)
             self.jobs_done += 1
-            # Load first: it needs the throughput measured BEFORE this job, since this
-            # job's own rate includes the load it is trying to isolate.
-            if cold:
+            # Only a job that ran ALONE is a measurement.
+            #
+            # Both figures are wall-clock divided by tokens, so a job that shared the
+            # accelerator with another reads as slower than the node is — and `load_s`
+            # is derived by subtracting generation from wall time using `tps`, so a
+            # deflated tps inflates every load estimate built on it, which in turn
+            # over-warms every reservation. Under concurrency the honest answer is fewer
+            # samples, not faster-looking ones. At a limit of 1 this is always true and
+            # nothing changes.
+            #
+            # `solo` is captured before the awaits above, because by now other jobs may
+            # have started or finished; what matters is whether this one had the machine
+            # to itself while it ran.
+            if not solo:
+                pass
+            elif cold:
+                # Load first: it needs the throughput measured BEFORE this job, since
+                # this job's own rate includes the load it is trying to isolate.
                 self._record_load(usage, elapsed)
             else:
                 self._record_tps(usage, elapsed)
