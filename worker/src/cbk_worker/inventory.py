@@ -60,19 +60,35 @@ class ModelInventory:
             self._detected = await self._probe()
         return self._detected or NONE
 
+    @staticmethod
+    def _carries(body: Any, key: str) -> bool:
+        """Whether a probe response is the SHAPE that path is supposed to return."""
+        return isinstance(body, dict) and isinstance(body.get(key), list)
+
     async def _probe(self) -> str | None:
         """Ask each server for something only it serves. None = could not tell, retry later.
 
-        Ordered, not shape-matched, because both products answer a `models` key on some
-        path: Ollama has `/api/ps` and no `/api/v1/models`; LM Studio has the reverse. The
-        v0 path is tried last so a 0.3.6-era LM Studio is still recognised, since it can
-        report residency even though it cannot unload.
+        Shape-matched, not merely status-matched, and that is the whole lesson of putting
+        this on real hardware: LM Studio answers an endpoint it does not have with HTTP
+        200 and an `{"error": ...}` body, so "did `/api/ps` respond?" said yes on a node
+        with no Ollama within reach. The question has to be "did it respond with a
+        `models` LIST", which an error body does not.
+
+        Ordered as well, because the two products share the `models` key on different
+        paths: Ollama serves it at `/api/ps`, LM Studio at `/api/v1/models`. The v0 path
+        is tried last so a 0.3.6-era LM Studio is still recognised, since it can report
+        residency even though it cannot unload.
         """
-        if await self._get_json(f"{self.native_base}/api/ps") is not None:
+        if self._carries(await self._get_json(f"{self.native_base}/api/ps"), "models"):
             return OLLAMA
-        for path in ("/api/v1/models", "/api/v0/models"):
-            if await self._get_json(f"{self.native_base}{path}") is not None:
-                return LMSTUDIO
+        if self._carries(
+            await self._get_json(f"{self.native_base}/api/v1/models"), "models"
+        ):
+            return LMSTUDIO
+        if self._carries(
+            await self._get_json(f"{self.native_base}/api/v0/models"), "data"
+        ):
+            return LMSTUDIO
         return None  # nothing answered; unknown, and deliberately not remembered
 
     async def _get_json(self, url: str) -> Any | None:
@@ -83,9 +99,17 @@ class ModelInventory:
             resp = await self._client.get(url)
             if resp.status_code >= 400:
                 return None
-            return resp.json()
+            body = resp.json()
         except Exception:
             return None
+        # **A 200 is not an answer.** LM Studio replies to an endpoint it does not have
+        # with HTTP 200 and `{"error": "Unexpected endpoint or method. (GET /api/tags)"}`,
+        # which is how probing for Ollama's paths on an LM Studio node came back positive
+        # and got the whole node classified as Ollama. Observed on a live 0.4.x box; no
+        # amount of reading the docs would have shown it.
+        if isinstance(body, dict) and body.get("error"):
+            return None
+        return body
 
     async def installed(self) -> list[str]:
         """Models the server can serve, via the portable OpenAI endpoint."""
@@ -130,9 +154,12 @@ class ModelInventory:
         draw. `/api/v0/models` (0.3.6+) instead carries a flat `state` of
         `loaded`/`not-loaded`.
 
-        Shapes transcribed from LM Studio's published API docs, not from a live node
-        (none was reachable when this was written) — which is the other reason every
-        branch fails closed to "unknown" rather than guessing.
+        Shapes CONFIRMED against a live LM Studio 0.4.x node (2026-09-23), having first
+        been transcribed from the published docs. Two things the docs did not show: a
+        `loaded_instances` entry keys its identifier `id`, not `instance_id`; and the
+        same model is typed `llm` by v1 and `vlm` by v0, so `type` is not a reliable
+        filter. Every branch still fails closed to "unknown", because a wrong positive
+        here would record warm jobs as cold starts.
         """
         body = await self._get_json(f"{self.native_base}/api/v1/models")
         if isinstance(body, dict) and isinstance(body.get("models"), list):
