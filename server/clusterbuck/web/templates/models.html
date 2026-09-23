@@ -32,6 +32,80 @@
       <section class="panel" style="margin-bottom:1rem"
                hx-get="/ui/models" hx-trigger="load, every 15s">…</section>
       <section hx-get="/ui/nodes" hx-trigger="load, every 10s">…</section>
+
+      {# Static reference, deliberately outside the polled sections above: they are
+         swapped wholesale on a timer, which would close this mid-read. Rendered from
+         TASK_CLASS_DESCRIPTIONS and the scale constants, so it cannot drift from them. #}
+      <details class="panel legend" id="models-legend">
+        <summary><h2>What the columns mean</h2></summary>
+
+        <h3>Ability scores — how well, per kind of job</h3>
+        <p>Each model is measured on four kinds of job, scored 1–10 by running a fixed
+          suite of short test prompts through the node as ordinary jobs. A job asking for
+          <code>task_class</code> + <code>min_ability</code> is routed only to a model that
+          clears that bar in that class — the four are never averaged.</p>
+        <dl class="facts legend-classes">
+          {% for tc in task_classes %}{% set d = descriptions[tc] %}
+          <dt><strong>{{ tc }}</strong></dt>
+          <dd><strong>{{ d.short }}.</strong> {{ d.tests }}
+            <br><span class="muted">Evidence for: {{ d.good_for }}.</span>
+            {% if d.caveat %}<br><span class="pill warn">caveat</span> {{ d.caveat }}{% endif %}
+          </dd>
+          {% endfor %}
+        </dl>
+
+        <h3>Reading a score</h3>
+        <dl class="facts">
+          <dt>the scale</dt>
+          <dd>Anchored, not relative: roughly 9–10 frontier cloud, 7 a strong 70B-class
+            local model, 5 a good 8B at Q4, 3 a 3B, 1 sub-1B or broken. Versioned
+            (currently {{ scale }}) so an old score is never compared with a new one.</dd>
+          <dt>{{ "%g"|format(ceiling) }} is the ceiling</dt>
+          <dd>The checks are mechanical — right field, right number, within the limit —
+            so they prove <em>compliance</em>, not quality. A perfect pass maps to
+            {{ "%g"|format(ceiling) }}, meaning “passed everything the checker can verify”.
+            Anything above {{ "%g"|format(ceiling) }} did not come from this checker — it
+            was written by an operator (judged evaluation is designed, not built).</dd>
+          <dt><span class="muted">7/10</span></dt>
+          <dd>Suite items passed out of those scored — the evidence behind the number.</dd>
+          <dt><span class="pill warn">seed</span></dt>
+          <dd>A placeholder that shipped in the code, not a measurement. The model is
+            queued to be measured.</dd>
+          <dt><span class="muted">—</span></dt>
+          <dd>Not measured yet. Need-shaped routing cannot select it for that class.</dd>
+        </dl>
+
+        <h3>The other columns</h3>
+        <dl class="facts">
+          <dt>serves</dt>
+          <dd>The capability tiers that name this model — the address a client sends a job
+            to. A tier name such as <code>8b-extract</code> is a terse label a person chose;
+            nothing reads meaning into it, and a tier is not limited to the class in its
+            name. The line under it is the tier's <code>description</code> from
+            <code>fleet.yaml</code>, and is what the tier is for. The scores are what say
+            what the model is actually good at.</dd>
+          <dt><span class="pill ok">tools</span></dt>
+          <dd>Supports tool / function calling.</dd>
+          <dt><span class="pill ok">json</span></dt>
+          <dd>The runtime can constrain output to a JSON schema. This is about the
+            <em>form</em> of the output; the extract score is about getting the content
+            right.</dd>
+          <dt><span class="pill ok">vision</span></dt>
+          <dd>Accepts images as input.</dd>
+          <dt>no pill</dt>
+          <dd>Not declared in the model catalog — which may mean “no” or just “not
+            curated”. Either way, a job that <code>requires</code> the feature skips this
+            model until the catalog says it has it.</dd>
+          <dt>footprint</dt>
+          <dd>Download size, parameter count and quantisation, and the context window
+            (how many tokens of input plus output it can hold at once).</dd>
+          <dt>tok/s</dt>
+          <dd>Median output tokens per second, measured on that node from real jobs.</dd>
+          <dt><span class="pill ok">warm</span> / <span class="pill">installed</span></dt>
+          <dd>Warm is loaded in memory and answers immediately; installed is on disk
+            and pays a load first.</dd>
+        </dl>
+      </details>
     </div>
     <div class="tab-panel" data-tab-panel="proposals">
       <section id="proposals-panel" hx-get="/ui/proposals" hx-trigger="load, every 8s">…</section>

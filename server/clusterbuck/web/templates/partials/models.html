@@ -4,7 +4,7 @@
 <table>
   <tr>
     <th>artifact</th><th>node</th><th>serves</th>
-    {% for tc in task_classes %}<th class="n">{{ tc }}</th>{% endfor %}
+    {% for tc in task_classes %}<th class="n" title="{{ descriptions[tc].short }} — see “What the columns mean” below">{{ tc }}</th>{% endfor %}
     <th class="n">tok/s</th><th>footprint</th>
     <th>can do</th><th>state</th>
   </tr>
@@ -14,7 +14,13 @@
       {% if not r.in_catalog %}<br><span class="pill warn" title="No catalog entry, so its size and capabilities are unknown and the planner cannot propose it">uncurated</span>{% endif %}
     </td>
     <td>{{ r.node }}</td>
-    <td>{{ r.tiers }}
+    {# The row IS the model, so the fallback "runs <model>" would only repeat it; a tier
+       with no description shows its name alone and a nudge in the tooltip. #}
+    <td>{% for t in r.tiers %}
+      <div><code>{{ t.name }}</code>
+        {%- if t.description %}<br><span class="muted" style="font-size:.78rem">{{ t.description }}</span>
+        {%- else %} <span class="muted" title="No description — set description: for this tier in fleet.yaml">·</span>{% endif %}</div>
+      {% else %}<span class="muted">—</span>{% endfor %}
       {% if r.warnings %}<br><span class="pill warn" title="This node advertises {{ r.warnings|join(', ') }} but does not have the model that tier is registered to serve">advertises {{ r.warnings|length }} it lacks</span>{% endif %}
     </td>
 

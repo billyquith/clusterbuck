@@ -442,7 +442,11 @@ capabilities:
  # file, so a name declared here could only disagree with the one actually in use. A
  # declared value is still accepted for older files, but it must match or the fleet
  # refuses to load.
- 8b-extract: { model_server: "http://localhost:11434/v1", model: "…" } # → q:8b-extract
+ #
+ # `description` (optional) is display-only: what the dashboard shows beside the tier name,
+ # since the name is a terse routing key. Nothing routes on it.
+ 8b-extract: { model_server: "http://localhost:11434/v1", model: "…",
+               description: "Quick structured work: fields into JSON, tagging" } # → q:8b-extract
  32b-reason: { model_server: "http://localhost:11434/v1", model: "…" } # → q:32b-reason
  70b-reason: { model_server: "http://localhost:11434/v1", model: "…" } # → q:70b-reason
 

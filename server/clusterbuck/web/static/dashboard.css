@@ -220,3 +220,12 @@ dl.facts dd { margin: 0; }
   header { flex-wrap: wrap; padding: .8rem 1rem; }
   .panel-head { flex-wrap: wrap; }
 }
+/* The models page's reference legend. A <details> so it costs one line when you already
+   know the columns, and sits outside the polled partials so a refresh cannot shut it. */
+details.legend { margin-top: 1rem; }
+details.legend > summary { cursor: pointer; list-style: revert; }
+details.legend > summary h2 { display: inline; margin: 0; }
+details.legend h3 { font-size: .85rem; margin: 1.1rem 0 .4rem; }
+details.legend p { margin: 0 0 .6rem; color: var(--ink); max-width: 72ch; }
+details.legend dl.facts { max-width: 80ch; row-gap: .45rem; }
+details.legend code { font-size: .8rem; color: var(--muted); }

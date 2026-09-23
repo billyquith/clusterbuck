@@ -51,6 +51,44 @@ SUITE_VERSION = "2026.2"
 
 TASK_CLASSES = ["extract", "summarize", "reason", "code"]
 
+# What each class's score is evidence OF, rendered on the models page. Written from the
+# suite below rather than from the class names, because the names over-promise: `code`
+# sounds like "can write software" and the items only ask what a snippet prints. A reader
+# choosing a model for a job needs the narrower truth. Change these when the suite
+# changes — a test pins the keys to TASK_CLASSES, not the wording to the items.
+TASK_CLASS_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "extract": {
+        "short": "Pull stated facts into an exact shape",
+        "tests": "Given a sentence, log line or order, return the named fields as JSON "
+                 "with the right values — and an empty list when there is nothing to "
+                 "find. Includes one-word sentiment labels.",
+        "good_for": "form filling, parsing logs, tagging, classification",
+    },
+    "summarize": {
+        "short": "Compress without inventing, within a word limit",
+        "tests": "Summarise a sentence or two under a hard word limit, keeping the "
+                 "outcome and not importing plausible facts the source never stated.",
+        "good_for": "digests, titles, short abstracts",
+        "caveat": "Three of the ten items check only the word limit, so any short "
+                  "answer earns part of this score.",
+    },
+    "reason": {
+        "short": "Multi-step puzzles with one right answer",
+        "tests": "Small arithmetic, ordering, time and logic problems where the answer "
+                 "must be exact.",
+        "good_for": "step-by-step working, simple planning, sanity checks",
+    },
+    "code": {
+        "short": "Read Python and predict what it prints",
+        "tests": "Nine items ask what a short Python snippet prints or whether it "
+                 "raises; one asks for a SQL statement.",
+        "good_for": "explaining and tracing existing code",
+        "caveat": "Nothing here writes, fixes or refactors code, or runs it. A high "
+                  "score means the model reads code accurately, not that it can build "
+                  "software.",
+    },
+}
+
 # The highest ability a purely programmatic pass rate may claim. model-evaluation.md's
 # anchors put 7 at "strong 70B-class local" and 9–10 at "frontier cloud". Compliance checks
 # cannot distinguish those upper bands, so they do not get to assert them. A judged tier —

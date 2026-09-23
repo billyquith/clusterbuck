@@ -29,18 +29,24 @@ nodes:
 # price_*_per_1k are the CLOUD-EQUIVALENT rates a local run avoids paying (USD per 1k
 # tokens), used for the avoided-cloud-spend headline. Example values only — set them to the
 # rates of the cloud model you'd otherwise fall back to for each tier.
+#
+# `description` is what the dashboard shows beside the tier name — say what a client would
+# send here, in words. The name is a routing key and stays terse; this is for people.
 capabilities:
   8b-extract:
+    description: "Quick, cheap structured work: pull fields into JSON, tag, classify"
     model_server: "http://localhost:11434/v1"
     model: "llama3.2:3b"
     price_in_per_1k: 0.0002
     price_out_per_1k: 0.0006
   32b-reason:
+    description: "Step-by-step problems, summaries and reading code, where a small model slips"
     model_server: "http://localhost:11434/v1"
     model: "qwen2.5:32b"
     price_in_per_1k: 0.0009
     price_out_per_1k: 0.0027
   70b-reason:
+    description: "The strongest local model; slow — for work that must not go to the cloud"
     model_server: "http://localhost:11434/v1"
     model: "llama3.1:70b"
     price_in_per_1k: 0.0027

@@ -243,6 +243,7 @@ def models_client(redis_url, tmp_path):
     fleet.write_text(
         "capabilities:\n"
         "  8b-extract:\n"
+        "    description: 'Pull fields into JSON and tag things'\n"
         "    model_server: 'http://127.0.0.1:1/v1'\n"
         "    model: 'good:8b'\n"
     )
@@ -315,6 +316,63 @@ def test_models_flags_an_uncurated_artifact(models_client):
 
 def test_the_models_page_loads_the_joined_table(client):
     assert "/ui/models" in client.get("/models").text
+
+
+def test_every_task_class_is_described():
+    """A class added to the suite without a description would render as a blank row in
+    the legend, and its column header would explain nothing."""
+    from clusterbuck.evaluation import TASK_CLASS_DESCRIPTIONS, TASK_CLASSES
+
+    assert list(TASK_CLASS_DESCRIPTIONS) == TASK_CLASSES
+    for d in TASK_CLASS_DESCRIPTIONS.values():
+        assert d["short"] and d["tests"] and d["good_for"]
+
+
+def test_the_models_page_explains_its_columns(client):
+    """The legend sits on the page, not in the polled partial — a partial swapped every
+    15s would close an open <details> mid-read."""
+    from clusterbuck.evaluation import TIER1_MAX_ABILITY
+
+    page = client.get("/models").text
+    assert 'id="models-legend"' in page
+    for tc in ("extract", "summarize", "reason", "code"):
+        assert f"<strong>{tc}</strong>" in page
+    # The one caveat that answers "is it good at coding?" must not be lost.
+    assert "not that it can build" in page
+    assert f"{TIER1_MAX_ABILITY:g} is the ceiling" in page
+    assert "models-legend" not in client.get("/ui/models").text
+
+
+def test_a_tier_is_shown_with_what_it_is_for(models_client):
+    """`8b-extract` alone says a size and one job kind, not what to send there."""
+    for fragment in ("/ui/models", "/ui/nodes"):
+        html = models_client.get(fragment).text
+        assert "8b-extract" in html
+        assert "Pull fields into JSON and tag things" in html, fragment
+
+
+def test_a_tier_without_a_description_falls_back_to_its_model():
+    from clusterbuck.fleet import Fleet
+    from clusterbuck.web import _tier_view
+
+    fleet = Fleet(capabilities={"8b-extract": {"model": "good:8b"}})
+    assert _tier_view(fleet, "8b-extract") == {
+        "name": "8b-extract", "description": None, "model": "good:8b", "defined": True}
+    # A tier the registry does not define can never route; the view must say so.
+    assert _tier_view(fleet, "ghost")["defined"] is False
+
+
+def test_the_fleet_endpoint_carries_the_description(models_client):
+    body = models_client.get("/fleet").json()
+    assert body["capabilities"]["8b-extract"]["description"] == (
+        "Pull fields into JSON and tag things")
+
+
+def test_task_class_headers_carry_their_description(models_client):
+    from clusterbuck.evaluation import TASK_CLASS_DESCRIPTIONS
+
+    html = models_client.get("/ui/models").text
+    assert TASK_CLASS_DESCRIPTIONS["code"]["short"] in html
 
 
 # --- node liveness: a registry row is a declaration, not a heartbeat -------------------

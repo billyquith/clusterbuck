@@ -36,7 +36,15 @@
       {% else %}<span title="enrolled, but has never heartbeated">never seen</span>{% endif %}
       &middot; <span title="{{ n.os_arch }}">{{ n.id }}</span>
     </div>
-    {% if n.caps %}<div class="node-meta">serves {{ n.caps }}</div>{% endif %}
+    {% if n.caps %}<div class="node-meta tiers">serves
+      {%- for t in n.caps %}
+      <div><code>{{ t.name }}</code> &mdash;
+        {% if t.description %}{{ t.description }}
+        {%- elif t.model %}<span class="muted" title="No description — set description: for this tier in fleet.yaml">runs {{ t.model }}</span>
+        {%- else %}<span class="pill warn" title="This node advertises a tier the coordinator's fleet.yaml does not define, so no job can be routed to it">not in fleet.yaml</span>{% endif %}
+      </div>
+      {%- endfor %}
+    </div>{% endif %}
   </article>
   {% endfor %}
 </div>

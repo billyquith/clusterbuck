@@ -33,6 +33,11 @@ class CapabilitySpec(BaseModel):
     # provider natively via LiteLLM, keyed by `model`'s "<provider>/<model>" form.
     model_server: str | None = None
     model: str  # served model name at that endpoint, or a LiteLLM "<provider>/<model>" id
+    # What this tier is FOR, in words, for the dashboard. The tier name is a routing key a
+    # client addresses by, so it gets shortened to something like `8b-extract` — which
+    # tells a reader the size someone once had in mind and one kind of job, and nothing
+    # about what they would actually send it. Display only: nothing routes on it.
+    description: str | None = None
     # Cloud-equivalent price per 1k tokens. For a local capability this is the rate a local
     # run *avoids* paying (the avoided-cloud-spend headline); for a cloud one it is the
     # provider's actual rate (real budget spend, ADR 30). Split input/output because output

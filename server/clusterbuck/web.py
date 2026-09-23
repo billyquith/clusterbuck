@@ -61,7 +61,19 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 @web_routes.get("/models", response_class=HTMLResponse)
 async def models_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "models.html")
+    from .evaluation import (
+        SCALE_VERSION,
+        TASK_CLASS_DESCRIPTIONS,
+        TASK_CLASSES,
+        TIER1_MAX_ABILITY,
+    )
+
+    # The legend lives on the page, not in the polled partial: that partial is swapped
+    # wholesale every 15s, which would snap an open <details> shut mid-read.
+    return templates.TemplateResponse(
+        request, "models.html",
+        {"task_classes": TASK_CLASSES, "descriptions": TASK_CLASS_DESCRIPTIONS,
+         "ceiling": TIER1_MAX_ABILITY, "scale": SCALE_VERSION})
 
 
 @web_routes.get("/performance", response_class=HTMLResponse)
@@ -288,6 +300,22 @@ async def ui_decide(request: Request, proposal_id: str, decision: str) -> HTMLRe
     return await ui_proposals(request)
 
 
+def _tier_view(fleet, name: str) -> dict:
+    """A tier as a reader needs it: the name, plus what it is for.
+
+    Falls back to the model it serves when fleet.yaml gives no description, so a bare
+    routing key is never the only thing shown. A tier the registry does not define gets
+    neither — it cannot route, which the name alone already fails to say.
+    """
+    spec = fleet.capabilities.get(name) if fleet else None
+    return {
+        "name": name,
+        "description": spec.description if spec else None,
+        "model": spec.model if spec else None,
+        "defined": spec is not None,
+    }
+
+
 @web_routes.get("/ui/models", response_class=HTMLResponse)
 async def ui_models(request: Request) -> HTMLResponse:
     """One row per (artifact, node): the join the models page never made.
@@ -310,7 +338,7 @@ async def ui_models(request: Request) -> HTMLResponse:
     """
     import json as _json
 
-    from .evaluation import SCALE_VERSION, TASK_CLASSES
+    from .evaluation import SCALE_VERSION, TASK_CLASS_DESCRIPTIONS, TASK_CLASSES
     from .fleet import unservable_capabilities
 
     store = request.app.state.store
@@ -349,7 +377,7 @@ async def ui_models(request: Request) -> HTMLResponse:
                 "artifact": artifact,
                 "node": n.hostname or n.node_id,
                 "node_id": n.node_id,
-                "tiers": ", ".join(sorted(tiers_for.get(artifact, []))) or "—",
+                "tiers": [_tier_view(fleet, t) for t in sorted(tiers_for.get(artifact, []))],
                 "cells": cells,
                 "measured_cells": sum(1 for x in cells if x["score"] is not None
                                       and not x["seed"]),
@@ -390,8 +418,8 @@ async def ui_models(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "partials/models.html",
         {"rows": rows, "task_classes": TASK_CLASSES, "scale": SCALE_VERSION,
-         "measuring": measuring, "unmeasured": unmeasured,
-         "orphan_tiers": orphan_tiers})
+         "descriptions": TASK_CLASS_DESCRIPTIONS, "measuring": measuring,
+         "unmeasured": unmeasured, "orphan_tiers": orphan_tiers})
 
 
 @web_routes.get("/ui/nodes", response_class=HTMLResponse)
@@ -412,7 +440,7 @@ async def ui_nodes(request: Request) -> HTMLResponse:
         nodes.append({
             "wake": wake.get(n.node_id) or wake.get(n.hostname or ""),
             "id": n.node_id, "host": n.hostname, "mode": n.mode,
-            "caps": ", ".join(_json.loads(n.capabilities or "[]")),
+            "caps": [_tier_view(fleet, c) for c in _json.loads(n.capabilities or "[]")],
             "loaded": ", ".join(_json.loads(n.loaded or "[]")),
             "installed": ", ".join(installed),
             "n_installed": len(installed),

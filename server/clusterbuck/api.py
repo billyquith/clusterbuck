@@ -399,7 +399,7 @@ def create_app(
             "capabilities": {
                 name: {"queue": stream_key(name), "model": c.model,
                        "model_server": c.model_server,
-                       "cloud": c.cloud}
+                       "cloud": c.cloud, "description": c.description}
                 for name, c in fleet.capabilities.items()
             },
             "nodes": [
