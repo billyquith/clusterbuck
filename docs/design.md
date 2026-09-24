@@ -105,8 +105,12 @@ truncated. Filter on what a model *can* do, then compare how *well* it does it. 
 artifact that does not *declare* a required feature is excluded by name — undeclared reads
 as "no", since an unchecked feature fails at the model server where it looks like a model
 bug, or succeeds while quietly ignoring the request. The coordinator resolves the rest
-through the ability matrix (§6), cheapest first, and pins the artifact it chose onto the
-job. The pin matters:
+through the ability matrix (§6) — local before cloud, then the tier that should answer
+soonest, then the cheapest — and pins the artifact it chose onto the job. "Soonest" is
+the work already open on the tier over the decode speed of the machines reading its queue
+right now, plus a cold load if none has the model warm; a tier no machine is reading has
+no estimate and falls behind every live one, so without heartbeats the order is price
+alone. The pin matters:
 without it, `min_ability` was checked against a name in `fleet.yaml` that nothing
 reconciled with what the node actually loaded.
 
@@ -972,6 +976,14 @@ observation that does not exist yet.
 
 Short list, because reversing one of these quietly breaks something.
 
+- **Need-shaped routing weighs speed and idleness before price.** Tier prices are
+  cloud-equivalent rates, so cheapest-first was smallest-model-first: every job asked for
+  by `task_class` went to the slowest tier clearing the bar, while a machine five times
+  faster sat idle unless a client named its tier. Price is now the tie-break. Two limits
+  keep it honest: liveness is "reading this queue now" (so the presence ladder and pause
+  count), never "enrolled"; and speed never promotes cloud over local — that stays a
+  privacy and budget decision. Reservations keep the old order: a booking is for a window
+  that has not started, and who is idle now says nothing about it.
 - **A queue, not a serving cluster.** The scarce resource is availability. Everything
   follows from taking an intermittent fleet seriously.
 - **Pull, not push.** Subscription *is* liveness. A dispatcher would need a liveness table

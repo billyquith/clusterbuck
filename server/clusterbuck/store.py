@@ -727,6 +727,22 @@ class Store:
         return {"total": total, "by_class": by_class, "by_capability": by_capability,
                 "by_model": by_model, "max_tokens_in": max_in}
 
+    def open_jobs_by_capability(self) -> dict[str, int]:
+        """Jobs not yet terminal, per capability: the work already ahead of a new one.
+
+        From the store rather than Redis so routing stays one SQLite read on the submit
+        path. It over-counts a job whose terminal result has landed but not yet been
+        swept — seconds, on the observe tick — which errs towards spreading load.
+        """
+        placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
+        with self._conn() as c:
+            rows = c.execute(
+                f"SELECT capability, COUNT(*) AS n FROM jobs "
+                f"WHERE status NOT IN ({placeholders}) GROUP BY capability",
+                tuple(TERMINAL_STATUSES),
+            ).fetchall()
+        return {r["capability"]: r["n"] for r in rows}
+
     def model_throughput(self) -> dict[tuple[str, str], float]:
         """Output tokens/sec per (node, model), from finished jobs of any origin.
 

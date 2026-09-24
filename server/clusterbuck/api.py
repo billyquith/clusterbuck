@@ -573,6 +573,11 @@ def create_app(
             # `POST /catalog` away, whereas a missing ability needs a better model.
             raise HTTPException(status_code=422, detail=str(e)) from e
         capability = selection.capability
+        if selection.eta_s is not None:
+            # Speed and idleness now decide between tiers that all clear the bar; without
+            # this line the choice is invisible after the fact.
+            _log.info("job routed to %s (est. %.0fs to answer) for %s/%s",
+                      capability, selection.eta_s, body.task_class, body.min_ability)
 
         # PIN THE ARTIFACT ROUTING CHOSE. A capability is only a queue name; the worker
         # that drains it answers with its own CBK_MODEL, for every capability it serves.

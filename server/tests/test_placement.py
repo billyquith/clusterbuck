@@ -339,7 +339,7 @@ def test_gaps_name_an_idle_tier_and_why():
                            "by_model": {}, "max_tokens_in": 0})
     found = gaps(store, _fleet(busy="m", idle="n"), now=NOW, scale_version=SCALE_VERSION)
     idle = next(g for g in found if g.key == "idle-tier")
-    assert "speed is not weighed" in idle.detail
+    assert "answer soonest" in idle.detail
 
 
 def test_gaps_name_a_busy_model_with_no_catalog_entry():

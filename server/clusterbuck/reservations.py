@@ -102,9 +102,12 @@ def admit(
         # as `necessary` for cloud eligibility (paced budget, no reserve). In practice this
         # rarely matters: a no-host cloud capability (ADR 30) has no node either, so the
         # `not nodes` check just below declines it regardless.
+        # `etas={}`: a booking is for a window that has not started, so which machine is
+        # idle NOW says nothing about it. Routing's speed-and-idleness order is for work
+        # that runs on submission; a reservation keeps the ability-then-price order.
         capability = resolve_capability(
             fleet, store, capability=None, task_class=task_class,
-            min_ability=min_ability, privacy=privacy, urgency="necessary",
+            min_ability=min_ability, privacy=privacy, urgency="necessary", etas={},
         )
     except NoCapableArtifact as e:
         # Admission control is exactly where an unmeetable need should surface, and the

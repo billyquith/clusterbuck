@@ -3,7 +3,16 @@ privacy} into a concrete capability using the measured ability matrix.
 
 Selection: filter artifacts by `ability(artifact, task_class) ≥ min_ability`, by the job's
 privacy class, and — for a cloud candidate — by urgency's wake rights and the cloud budget
-(ADR 30) → prefer local → cheapest. Explicit `capability` addressing still wins for power
+(ADR 30) → prefer local → soonest answer → cheapest.
+
+"Soonest answer" is `tier_eta`: the work already open on a tier, over the combined decode
+speed of the machines serving it right now, plus a cold load if none has the model warm.
+It used to be cheapest-first alone, which on a fleet whose prices are cloud-equivalent
+rates means *smallest model first*: every need-shaped job went to the slowest tier that
+cleared the bar, and a machine five times faster sat idle unless a client named its tier.
+Price still breaks ties, and it still decides everything when no liveness is known — a
+tier nobody is serving has no estimate, so with no heartbeats the old order is exactly
+what comes back. Explicit `capability` addressing still wins for power
 users, but is no longer a free pass: fleet-management.md requires the same privacy and
 budget invariants there too ("submission validation rejects incoherent combos... fast, at
 the API"), so a caller naming a cloud capability directly is checked exactly as a
@@ -27,12 +36,76 @@ not been served on a measurement, and only the caller can decide whether that ma
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from .budget import BudgetDecision, check_cloud_budget
 from .evaluation import SCALE_VERSION, TIER1_MAX_ABILITY
 from .fleet import Fleet
 from .store import Store
+
+# Output length assumed for a job whose length is unknown, to turn tokens/sec into seconds.
+# Only the RATIO between tiers matters for the ranking; this sets how a cold load weighs
+# against decode time. Roughly the mean real completion on the fleet this was tuned on.
+TYPICAL_OUTPUT_TOKENS = 700
+
+# Decode speed assumed for a live node that has not reported one yet — a fresh node has
+# served nothing. Deliberately modest, so an unmeasured machine never outranks a measured
+# fast one on a guess, but a live one still beats a tier with no machine at all.
+DEFAULT_TPS = 10.0
+
+# Cold-load cost assumed when no live node has the model resident and none has reported
+# how long its loads take.
+DEFAULT_LOAD_S = 30.0
+
+
+@dataclass(frozen=True)
+class TierEta:
+    seconds: float          # math.inf when no machine is serving the tier right now
+    live_nodes: int
+    open_jobs: int
+    warm: bool
+
+
+def tier_eta(fleet: Fleet, store: Store, *, now: datetime | None = None,
+             silent_s: float | None = None) -> dict[str, TierEta]:
+    """Seconds until a new job on each local tier would plausibly be answered.
+
+    Liveness is `wake.nodes_serving`: a recent heartbeat AND the tier among the queues the
+    node is reading now. The second half is what makes the presence ladder and `pause`
+    count — a shared machine whose owner is at it stops reading its heavy tiers, and
+    routing stops preferring them the same moment, rather than sending work to a queue
+    only a sleeping ladder rung would drain.
+
+    Deliberately crude: one queue, machines draining it in parallel at their reported
+    decode speed. It only has to order tiers, not promise a time.
+    """
+    import json
+
+    from .config import settings
+    from .wake import nodes_serving
+
+    now = now or datetime.now(UTC)
+    silent_s = settings.node_silent_s if silent_s is None else silent_s
+    nodes = {n.node_id: n for n in store.list_nodes()}
+    open_jobs = store.open_jobs_by_capability()
+    out: dict[str, TierEta] = {}
+    for cap, spec in fleet.capabilities.items():
+        if spec.cloud:
+            continue
+        live = [nodes[i] for i in nodes_serving(nodes.values(), cap, silent_s=silent_s,
+                                                now=now)]
+        ahead = open_jobs.get(cap, 0)
+        if not live:
+            out[cap] = TierEta(math.inf, 0, ahead, False)
+            continue
+        capacity = sum((n.tps or DEFAULT_TPS) for n in live)
+        warm = any(spec.model in json.loads(n.loaded or "[]") for n in live)
+        load = 0.0 if warm else min((n.load_s or DEFAULT_LOAD_S) for n in live)
+        seconds = (ahead + 1) * TYPICAL_OUTPUT_TOKENS / capacity + load
+        out[cap] = TierEta(seconds, len(live), ahead, warm)
+    return out
 
 
 @dataclass(frozen=True)
@@ -49,6 +122,9 @@ class Selection:
     cloud: bool
     score: float | None = None
     provenance: str | None = None
+    # Estimated seconds to an answer on the chosen tier, when one was known. Carried for
+    # the log line: "why this tier" is otherwise invisible once speed decides it.
+    eta_s: float | None = None
 
     @property
     def on_a_guess(self) -> bool:
@@ -163,6 +239,7 @@ def resolve(
     cloud_budget_reserve_fraction: float = 0.2,
     now: float | None = None,
     scale_version: str = SCALE_VERSION,
+    etas: dict[str, TierEta] | None = None,
 ) -> Selection:
     """The capability to enqueue on AND the artifact that must run the job."""
     budget = check_cloud_budget(
@@ -215,8 +292,9 @@ def resolve(
 
     # Candidates whose artifact clears the ability bar for this task class, within privacy,
     # urgency's wake rights, and (for a cloud candidate) budget.
-    # (is_cloud, price, capability, artifact, score, provenance)
-    candidates: list[tuple[bool, float, str, str, float, str | None]] = []
+    etas = tier_eta(fleet, store) if etas is None else etas
+    # (is_cloud, eta, price, capability, artifact, score, provenance)
+    candidates: list[tuple[bool, float, float, str, str, float, str | None]] = []
     excluded_by_privacy = 0
     excluded_by_budget = 0
     unmet: dict[str, str] = {}
@@ -244,17 +322,22 @@ def resolve(
         best_available = score if best_available is None else max(best_available, score)
         if score < min_ability:
             continue
+        eta = etas[cap].seconds if cap in etas else math.inf
         candidates.append((
-            spec.cloud, spec.price_in_per_1k + spec.price_out_per_1k, cap,
+            spec.cloud, eta, spec.price_in_per_1k + spec.price_out_per_1k, cap,
             spec.model, score,
             store.ability_provenance(spec.model, task_class, scale_version),
         ))
 
     if candidates:
-        candidates.sort()  # prefer local (False < True) → cheapest
-        cloud, _price, cap, artifact, score, provenance = candidates[0]
+        # Local before cloud (False < True) — cost and privacy posture, unchanged. Then the
+        # soonest answer. Then cheapest, which is also the whole order when no tier has a
+        # live machine (every eta is inf).
+        candidates.sort()
+        cloud, eta, _price, cap, artifact, score, provenance = candidates[0]
         return Selection(capability=cap, artifact=artifact, cloud=cloud,
-                         score=score, provenance=provenance)
+                         score=score, provenance=provenance,
+                         eta_s=None if math.isinf(eta) else eta)
 
     if asked and not candidates and unmet and best_available is None:
         # Everything that could have run this was filtered on a declared capability, so

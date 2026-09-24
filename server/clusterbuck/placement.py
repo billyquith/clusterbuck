@@ -492,9 +492,10 @@ def gaps(store, fleet, *, advice: dict | None = None, now: datetime | None = Non
         if total and count / total < IDLE_TIER_SHARE:
             out.append(Gap("idle-tier", "info", f"{cap} is barely used",
                            f"{count} of {total} real jobs in {window}. A job addressed by "
-                           f"task_class + min_ability goes to the cheapest tier that clears "
-                           f"the bar — speed is not weighed — so this tier only receives "
-                           f"jobs that name it, even while its machines are idle."))
+                           f"task_class + min_ability goes to the tier that should answer "
+                           f"soonest among those clearing the bar, so a tier that stays idle "
+                           f"here usually has no machine reading its queue when jobs arrive, "
+                           f"or a model below the bars clients ask for."))
 
     for model, count in sorted(demand["by_model"].items(), key=lambda kv: -kv[1]):
         cloud_models = {s.model for s in caps.values() if s.cloud}
