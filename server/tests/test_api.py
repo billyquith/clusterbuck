@@ -231,7 +231,8 @@ _JOB_KEYS = {
     "id", "status", "urgency", "capability",
     "created_at", "started_at", "finished_at",
     "deadline", "escalates_at", "expires_at",
-    "queue_position", "result", "usage", "error", "attempts", "worker", "submitter",
+    "queue_position", "result", "usage", "error", "error_code", "attempts", "worker",
+    "submitter",
 }
 
 

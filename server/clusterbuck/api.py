@@ -58,7 +58,7 @@ from .models import (
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
 from .queue import Queue, stream_key, tier_for, tier_of
 from .reservations import admit, iso
-from .routing import MissingCapability, NoCapableArtifact, resolve
+from .routing import RoutingRefusal, resolve
 from .signing import build_manifest, load_private_pem, public_pem, sign_bootstrap
 from .store import Store
 from .sync import build_router, sync_routes
@@ -566,13 +566,17 @@ def create_app(
                 cloud_budget_monthly=settings.cloud_budget_monthly,
                 cloud_budget_reserve_fraction=settings.cloud_budget_reserve_fraction,
             )
-        except (MissingCapability, NoCapableArtifact) as e:
+        except RoutingRefusal as e:
             # Explicit failure beats silently serving below the requested ability floor,
             # or on a model that cannot do the thing at all. Both are 422 — the request
             # is well-formed and unservable — but they are raised separately so the
             # message names the right fix: a missing DECLARATION is usually one
             # `POST /catalog` away, whereas a missing ability needs a better model.
-            raise HTTPException(status_code=422, detail=str(e)) from e
+            #
+            # The status stays 422 for every refusal here, as documented; the code is
+            # what tells them apart.
+            raise CbkError(e.code, str(e), 422, reason=e.reason,
+                           capability=body.capability) from e
         capability = selection.capability
         if selection.eta_s is not None:
             # Speed and idleness now decide between tiers that all clear the bar; without
@@ -813,6 +817,28 @@ def create_app(
         )
         return ahead
 
+    def _error_code(status: str, result: dict | None) -> str | None:
+        """Why a job did not complete, as a code a client can branch on (protocols §1c).
+
+        `error` stays the free-text string it always was, so no poller breaks; this sits
+        beside it. The code comes from the result when its writer set one. Otherwise it is
+        derived: the coordinator's own terminal states (a deadline expiry, a cancellation)
+        write no result at all, and a worker too old to classify its failure still failed.
+
+        A `failed` job whose result has passed CBK_RESULT_TTL_S answers null, like its
+        `result`: the reason lived in the blob. Keeping it in SQLite would need a column
+        for something a client must persist on first sight anyway.
+        """
+        if result is not None and result.get("error_code"):
+            return result["error_code"]
+        if status == "expired":
+            return "job_expired"
+        if status == "cancelled":
+            return "job_cancelled"
+        if status == "failed" and result is not None:
+            return "worker_failed"
+        return None
+
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str) -> dict:
         row = app.state.store.get(job_id)
@@ -840,6 +866,7 @@ def create_app(
                 "result": None,
                 "usage": None,
                 "error": None,
+                "error_code": _error_code(row.status, None),
                 "attempts": row.attempts,
                 # From the pending list, so a running job finally has an answer to "has
                 # anything picked this up" — the result blob cannot say until it is over.
@@ -863,6 +890,7 @@ def create_app(
             "result": result.get("completion"),
             "usage": result.get("usage"),
             "error": result.get("error"),
+            "error_code": _error_code(status, result),
             "attempts": row.attempts,
             "worker": result.get("worker") or row.claimed_by,
             "submitter": _submitter_view(row),

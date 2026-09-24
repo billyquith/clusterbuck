@@ -165,6 +165,7 @@ async def test_missing_api_key_fails_the_job_without_calling_the_provider(
     result = await queue.read_result(record.result_key)
     assert result["status"] == "failed"
     assert "CBK_TEST_PROVIDER_KEY" in result["error"]
+    assert result["error_code"] == "capability_misconfigured"  # not a retryable outage
 
 
 async def test_ensure_groups_and_consumer_id(fleet, queue):

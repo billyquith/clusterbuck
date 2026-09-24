@@ -31,7 +31,7 @@ LIVE=11471 BROKEN=11472 DEAD=11473   # nothing listens on $DEAD
 
 PENDING=(
   sync-structured discovery-health
-  unsatisfiable expire orphan worker-server-dead worker-server-error cancel
+  worker-server-dead worker-server-error
 )
 
 flush_redis

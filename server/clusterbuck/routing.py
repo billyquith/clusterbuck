@@ -132,7 +132,25 @@ class Selection:
         return self.provenance == "seed"
 
 
-class NoCapableArtifact(Exception):
+class RoutingRefusal(Exception):
+    """A submit routing cannot serve, carrying the stable code a client branches on.
+
+    The message names the fix for a person; `code` (errors.CODES) is what a client acts
+    on, and it has to be set here, at the raise site that knows WHICH refusal this is —
+    by the time the HTTP edge sees the exception, only the text is left to tell them apart.
+    """
+
+    code = "ability_unsatisfied"
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 reason: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+        self.reason = reason
+
+
+class NoCapableArtifact(RoutingRefusal):
     """No artifact clears the requested ability bar within the job's privacy class.
 
     model-evaluation.md is explicit: a `min_ability` no local artifact can meet routes to
@@ -174,13 +192,15 @@ _FEATURE_ATTR = {
 }
 
 
-class MissingCapability(Exception):
+class MissingCapability(RoutingRefusal):
     """No artifact DECLARES a required capability (ADR 37).
 
     Separate from `NoCapableArtifact` because the two call for completely different
     fixes: this one usually means the catalog does not describe a model that can in fact
     do the thing, and the answer is one `POST /catalog` away — not a better model.
     """
+
+    code = "requirements_unsatisfied"
 
 
 def _declared(artifact: str, spec, catalog: dict) -> dict:
@@ -255,7 +275,8 @@ def resolve(
     if capability is not None:
         if fleet is None:
             raise NoCapableArtifact(
-                f"capability {capability!r} requested but no fleet registry is configured"
+                f"capability {capability!r} requested but no fleet registry is configured",
+                code="fleet_not_configured",
             )
         if capability not in fleet.capabilities:
             detail = f"unknown capability {capability!r}"
@@ -265,12 +286,17 @@ def resolve(
                 if available
                 else " (fleet registry has no capabilities registered)"
             )
-            raise NoCapableArtifact(detail)
+            raise NoCapableArtifact(detail, code="capability_not_found")
         spec = fleet.capabilities[capability]
         excluded = _cloud_gate(spec.cloud, privacy=privacy, urgency=urgency, budget=budget)
         if excluded is not None:
+            # Budget apart from privacy and urgency: those are the job's own terms and
+            # will not change on a retry; a budget is spent down and refilled.
+            is_policy = excluded in ("privacy=local_only", "urgency=waitable never uses cloud")
             raise NoCapableArtifact(
-                f"capability {capability!r} is cloud-backed and excluded: {excluded}"
+                f"capability {capability!r} is cloud-backed and excluded: {excluded}",
+                code="cloud_not_permitted" if is_policy else "cloud_budget_exhausted",
+                reason=excluded.split("=")[0] if is_policy else "budget",
             )
         if asked:
             why = _unmet(asked, _declared(spec.model, spec, catalog))
@@ -284,9 +310,15 @@ def resolve(
         # whatever CBK_MODEL happens to say on the node that claims the job.
         return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud)
 
-    if fleet is None or task_class is None or min_ability is None:
+    if fleet is None:
         raise NoCapableArtifact(
-            "need-shaped routing requires a fleet registry plus task_class and min_ability"
+            "need-shaped routing requires a fleet registry, and none is configured",
+            code="fleet_not_configured",
+        )
+    if task_class is None or min_ability is None:
+        raise NoCapableArtifact(
+            "need-shaped routing requires both task_class and min_ability",
+            code="invalid_request",
         )
 
     # Candidates whose artifact clears the ability bar for this task class, within privacy,

@@ -90,3 +90,88 @@ def test_a_bad_idempotency_key_names_the_header(client):
                              "messages": [{"role": "user", "content": "x"}]})
     assert resp.status_code == 400
     assert resp.json()["error"]["param"] == "Idempotency-Key"
+
+
+# --- submit-time routing refusals (all 422; the code tells them apart) ---
+
+_MSG = [{"role": "user", "content": "x"}]
+
+
+@pytest.mark.parametrize("job, code", [
+    ({"task_class": "extract", "min_ability": 10}, "ability_unsatisfied"),
+    ({"capability": "8b-extract", "requires": {"vision": True}}, "requirements_unsatisfied"),
+    ({"capability": "no-such-tier"}, "capability_not_found"),
+    ({"capability": "claude-sonnet", "privacy": "local_only"}, "cloud_not_permitted"),
+    ({"capability": "claude-sonnet", "privacy": "cloud_ok", "urgency": "waitable"},
+     "cloud_not_permitted"),
+])
+def test_each_routing_refusal_has_its_own_code(client, job, code):
+    resp = client.post("/jobs", json={"messages": _MSG, **job})
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    ENVELOPE.validate(body)
+    assert body["error"]["code"] == code
+
+
+def test_a_cloud_refusal_says_whether_policy_or_budget(client, monkeypatch):
+    import clusterbuck.routing as routing
+    from clusterbuck.budget import BudgetDecision
+
+    resp = client.post("/jobs", json={"messages": _MSG, "capability": "claude-sonnet",
+                                      "privacy": "local_only"})
+    assert resp.json()["error"]["reason"] == "privacy"
+
+    monkeypatch.setattr(routing, "check_cloud_budget",
+                        lambda *a, **k: BudgetDecision(False, "monthly cap reached"))
+    resp = client.post("/jobs", json={"messages": _MSG, "capability": "claude-sonnet",
+                                      "privacy": "cloud_ok", "urgency": "necessary"})
+    assert resp.json()["error"]["code"] == "cloud_budget_exhausted"
+    assert resp.json()["error"]["reason"] == "budget"
+
+
+# --- a job's error_code, as GET /jobs/{id} resolves it ---
+
+def _job_with_result(client, redis_url, result: dict | None, status: str | None = None):
+    import anyio
+    from clusterbuck.queue import Queue
+
+    job = client.post("/jobs", json={"capability": "8b-extract", "messages": _MSG}).json()
+    if status:
+        client.app.state.store.set_status(job["id"], status)
+    if result is not None:
+        async def write():
+            q = Queue.from_url(redis_url)
+            try:
+                await q.write_result(job["result_key"], {
+                    "job_id": job["id"], "worker": "node-a",
+                    "completed_at": "2026-09-02T00:00:00Z", **result})
+            finally:
+                await q.aclose()
+        anyio.run(write)
+    return client.get(f"/jobs/{job['id']}").json()
+
+
+def test_a_coded_failure_passes_its_code_through(client, redis_url):
+    view = _job_with_result(client, redis_url, {
+        "status": "failed", "error": "refused", "error_code": "model_server_unreachable"})
+    assert view["error_code"] == "model_server_unreachable"
+    assert view["error"] == "refused"  # still the string it always was
+
+
+def test_an_uncoded_failure_is_a_worker_failure(client, redis_url):
+    """An older worker writes no code; the job still failed, and says so."""
+    view = _job_with_result(client, redis_url, {"status": "failed", "error": "boom"})
+    assert view["error_code"] == "worker_failed"
+
+
+def test_the_coordinators_own_terminal_states_are_derived(client, redis_url):
+    # The deadline sweep and DELETE write no result blob at all.
+    assert _job_with_result(client, redis_url, None, "expired")["error_code"] == "job_expired"
+    assert _job_with_result(client, redis_url, None,
+                            "cancelled")["error_code"] == "job_cancelled"
+
+
+def test_success_and_waiting_carry_no_code(client, redis_url):
+    assert _job_with_result(client, redis_url, None)["error_code"] is None
+    done = _job_with_result(client, redis_url, {"status": "done", "completion": {}})
+    assert done["error_code"] is None

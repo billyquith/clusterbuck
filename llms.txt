@@ -110,9 +110,9 @@ addressing forms:
   client sending a large document must say how much context it needs, or risk it being
   routed to a model that silently truncates it.
 - A model that does not declare a feature counts as not having it. If nothing qualifies,
-  the submit fails with `422` naming the model and the missing feature. That is a
-  different fix from an ability miss (also `422`): usually an operator catalog entry,
-  not a better model.
+  the submit fails with `422`, code `requirements_unsatisfied`, naming the model and the
+  missing feature. That is a different fix from an ability miss (`ability_unsatisfied`):
+  usually an operator catalog entry, not a better model.
 - For structured output, set both `requires.json_schema: true` and
   `params.response_format` (e.g. `{"type": "json_object"}`). Without the requirement,
   `response_format` is dropped on the async path, because routing has not checked the
@@ -123,9 +123,11 @@ addressing forms:
 `POST /jobs` returns `202` with `{ "id", "result_key", "status": "queued" }`.
 Poll `GET /jobs/{id}` until `status` is terminal: `done`, `failed`, `expired`, or
 `cancelled`. A completed job returns its OpenAI-style chat completion in `result`, with
-token counts in `usage` and a message in `error` on failure. Persist that result
-immediately if it matters: completions expire after `CBK_RESULT_TTL_S` (24 hours by
-default).
+token counts in `usage`. Any other terminal status carries a message in `error` and a
+stable `error_code` to branch on: `job_expired`, `job_cancelled`, `job_orphaned` (resubmit
+under a fresh key), `job_abandoned`, `capability_misconfigured`, `worker_failed`, or a
+`model_server_*` code. Persist the result and the code immediately: both expire after
+`CBK_RESULT_TTL_S` (24 hours by default).
 
 All four terminal statuses are final. `done` and `failed` come from the first result
 written, so a job reported `failed` will not later turn up `done`. `expired` and
@@ -153,6 +155,8 @@ characters. Reuse the same key only when retrying the same logical submission af
 uncertain response. A replay returns `200` (not `202`) with `Idempotency-Replayed: true`
 and the existing job's `id`, and enqueues nothing. A submit rejected with `400` or `422`
 does not consume its key, so the same key can be retried once the fleet can serve it.
+To run the work again after any terminal status, use a **fresh** key: a key has no TTL,
+so the old one keeps returning the old, finished job.
 `submitter.request_id` is diagnostic provenance only, not a deduplication key.
 
 Branch on `error.code`, not on the HTTP status or the message (see *Errors*). Do not
@@ -176,10 +180,14 @@ Every error is OpenAI's envelope, so the stock SDK exposes the code as `.code`:
   message for older clients and is deprecated.
 - `retryable: true` means the identical request may succeed if retried soon (a transient
   model-server failure). It never means "retry until the fleet changes".
-- Codes in use: `invalid_request`, `unauthorized`, `not_found`, `fleet_not_configured`,
-  `capability_not_found`, `capability_misconfigured`, `reservation_invalid`,
-  `model_server_unreachable`, `model_server_timeout`, `model_server_error`,
-  `model_request_rejected`. The full vocabulary, with meanings, is
+- HTTP codes in use: `invalid_request`, `unauthorized`, `not_found`,
+  `fleet_not_configured`, `capability_not_found`, `capability_misconfigured`,
+  `reservation_invalid`, `model_server_unreachable`, `model_server_timeout`,
+  `model_server_error`, `model_request_rejected`. A refused `POST /jobs` is always `422`,
+  told apart by code: `ability_unsatisfied`, `requirements_unsatisfied`,
+  `capability_not_found`, `cloud_not_permitted`, `cloud_budget_exhausted`.
+- A job's terminal state carries `error_code` beside `error` (see above). The full
+  vocabulary, with meanings, is
   [contract/error-codes.json](contract/error-codes.json).
 
 ## Further reading

@@ -89,6 +89,7 @@ async def test_retries_are_bounded_then_dead_lettered(store, queue):
     result = await queue.read_result("res_job_doomed")
     assert result is not None and result["status"] == "failed"
     assert "max_attempts" in result["error"]
+    assert result["error_code"] == "job_abandoned"
     assert store.get("job_doomed").status == "failed"
     assert await _pending(queue) == 0  # nothing left stranded
 

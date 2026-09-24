@@ -91,6 +91,7 @@ async def reaper_scan(
                             f"abandoned by its worker and retried {attempts} times "
                             f"(max_attempts={max_attempts})"
                         ),
+                        "error_code": "job_abandoned",
                     }, only_if_absent=True)
                     if not wrote:
                         landed = await queue.read_result(result_key) or {}

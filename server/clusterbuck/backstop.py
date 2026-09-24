@@ -100,7 +100,7 @@ async def backstop_scan(
         # indistinguishable, and both are now actually reachable: this sweep selects rows
         # with no recorded entry AND queued rows whose recorded entry has gone.
         if await _terminalise(store, queue, fleet, row, group=group, status="failed",
-                              error=(
+                              error_code="job_orphaned", error=(
             "no queue entry exists for this job: it was either never enqueued (the "
             "coordinator recorded it but did not reach the queue) or its entry was "
             "trimmed away unserved. It cannot be recovered — resubmit it."
@@ -113,7 +113,7 @@ async def backstop_scan(
             "+00:00", "Z")
         for row in store.stale_queued_jobs(cutoff):
             if await _terminalise(store, queue, fleet, row, group=group, status="expired",
-                                  error=(
+                                  error_code="job_expired", error=(
                 f"unserved for longer than the configured maximum queue age "
                 f"({max_queue_age_s}s)"
             )):
@@ -128,7 +128,7 @@ async def backstop_scan(
 
 async def _terminalise(
     store: Store, queue: Queue, fleet: Fleet | None, row, *,
-    group: str, status: str, error: str,
+    group: str, status: str, error: str, error_code: str,
 ) -> bool:
     """Write a terminal answer for a job nothing else will ever answer.
 
@@ -167,6 +167,7 @@ async def _terminalise(
         "worker": COORDINATOR,
         "completed_at": now_iso(),
         "error": error,
+        "error_code": error_code,
     }, only_if_absent=True)
     if not wrote:
         landed = await queue.read_result(row.result_key) or {}

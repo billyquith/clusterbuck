@@ -44,9 +44,10 @@
     "capability_misconfigured": {
       "retryable": false,
       "planes": [
-        "sync"
+        "sync",
+        "job"
       ],
-      "description": "The alias is registered but cannot be served, e.g. a provider account whose API key is unset. An operator fix."
+      "description": "The capability is registered but cannot be served, e.g. a provider account whose API key is unset. An operator fix."
     },
     "ability_unsatisfied": {
       "retryable": false,
