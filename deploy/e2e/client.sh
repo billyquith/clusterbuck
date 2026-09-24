@@ -30,7 +30,7 @@ REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}"
 LIVE=11471 BROKEN=11472 DEAD=11473   # nothing listens on $DEAD
 
 PENDING=(
-  sync-unknown-alias sync-dead-server sync-structured discovery-health
+  sync-structured discovery-health
   unsatisfiable expire orphan worker-server-dead worker-server-error cancel
 )
 

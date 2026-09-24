@@ -28,7 +28,8 @@ import logging
 import secrets
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+
+from .errors import error_response
 
 _log = logging.getLogger("clusterbuck.auth")
 
@@ -104,10 +105,10 @@ def install_auth(app, api_key: str | None) -> None:
             return await call_next(request)
         presented, source = presented_key(request)
         if not key_matches(presented, api_key):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "missing or invalid API key (X-CBK-Api-Key)"},
-            )
+            # Built here, not raised: middleware runs outside the app's exception
+            # handlers, so this is the one refusal that must assemble its own envelope.
+            return error_response(
+                "unauthorized", "missing or invalid API key (X-CBK-Api-Key)", 401)
         response = await call_next(request)
         if source == "query":
             # Exchange the URL key for a cookie so the dashboard keeps working without it.

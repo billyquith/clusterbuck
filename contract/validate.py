@@ -64,6 +64,8 @@ def main() -> int:
             verdict = "valid" if expect_valid else "correctly rejected"
             print(f"  ok  {fixture.name} ({verdict})")
 
+    failures += _code_table_failures()
+
     print()
     if failures:
         print(f"{len(failures)} contract failure(s)")
@@ -71,6 +73,32 @@ def main() -> int:
     print(f"contract ok — {len(validators)} schemas, "
           f"{len(list(EXAMPLES.glob('*.json')))} fixtures")
     return 0
+
+
+def _code_table_failures() -> list[str]:
+    """The error-code table and the schemas that enumerate codes must name the same set.
+
+    `error-codes.json` carries what a schema enum cannot (retryable, plane, meaning), so
+    the two are separate files — and two files can drift, which is what this is for.
+    """
+    table = json.loads((HERE / "error-codes.json").read_text())["codes"]
+    envelope = json.loads((HERE / "error.schema.json").read_text())
+    enum = set(envelope["properties"]["error"]["properties"]["code"]["enum"])
+    failures = []
+    if enum != set(table):
+        failures.append(f"error.schema.json code enum differs from error-codes.json: "
+                        f"{sorted(enum ^ set(table))}")
+    result = json.loads((HERE / "result.schema.json").read_text())
+    job_codes = {c for c, spec in table.items() if "job" in spec["planes"]}
+    error_code = result["properties"].get("error_code")
+    if error_code is not None and set(error_code["enum"]) - {None} != job_codes:
+        failures.append(f"result.schema.json error_code enum differs from the job-plane "
+                        f"codes: {sorted((set(error_code['enum']) - {None}) ^ job_codes)}")
+    for f in failures:
+        print(f"FAIL  {f}")
+    if not failures:
+        print("  ok  error-codes.json agrees with every schema that enumerates codes")
+    return failures
 
 
 if __name__ == "__main__":

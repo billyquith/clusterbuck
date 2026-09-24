@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/billyquith/clusterbuck/contract/error.schema.json",
+  "title": "Error envelope",
+  "description": "The body of every client-facing HTTP error (sync and submit planes). OpenAI-shaped, so the stock SDK surfaces `code`. Branch on `error.code`; `message` is for people. `detail` repeats the message for clients predating the envelope and is deprecated.",
+  "type": "object",
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": [
+        "message",
+        "type",
+        "code",
+        "retryable"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "authentication_error",
+            "invalid_request_error",
+            "api_error"
+          ]
+        },
+        "code": {
+          "enum": [
+            "ability_unsatisfied",
+            "artifact_not_installed",
+            "capability_misconfigured",
+            "capability_not_found",
+            "cloud_budget_exhausted",
+            "cloud_not_permitted",
+            "conflict",
+            "fleet_not_configured",
+            "internal_error",
+            "invalid_request",
+            "job_abandoned",
+            "job_cancelled",
+            "job_expired",
+            "job_orphaned",
+            "model_request_rejected",
+            "model_server_error",
+            "model_server_timeout",
+            "model_server_unreachable",
+            "model_substituted",
+            "not_found",
+            "requirements_unsatisfied",
+            "reservation_invalid",
+            "unauthorized",
+            "worker_failed"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "param": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The request field at fault, when one is."
+        },
+        "capability": {
+          "type": "string",
+          "description": "The capability alias the request named."
+        },
+        "model": {
+          "type": "string",
+          "description": "The artifact routing resolved, when it got that far."
+        },
+        "reason": {
+          "type": "string",
+          "description": "A finer cause within the code, where one exists."
+        },
+        "use_async": {
+          "type": "boolean",
+          "description": "On a sync failure: the async plane (POST /jobs) could still serve this capability."
+        }
+      }
+    },
+    "detail": {
+      "description": "Deprecated: the message again, or a validation error list, as before the envelope existed."
+    }
+  }
+}

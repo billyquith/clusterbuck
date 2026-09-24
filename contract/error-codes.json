@@ -1,0 +1,183 @@
+{
+  "$comment": "The stable error codes clients branch on (protocols.md \u00a71c). `retryable` means the identical request may succeed if simply retried soon; it never means 'could succeed after an operator changes the fleet'. Each component defines these in its own code and a conformance test checks it against this file.",
+  "codes": {
+    "invalid_request": {
+      "retryable": false,
+      "planes": [
+        "sync",
+        "submit"
+      ],
+      "description": "The request is malformed: a missing or invalid field, header or deadline."
+    },
+    "unauthorized": {
+      "retryable": false,
+      "planes": [
+        "sync",
+        "submit"
+      ],
+      "description": "Missing or invalid credentials."
+    },
+    "not_found": {
+      "retryable": false,
+      "planes": [
+        "sync",
+        "submit"
+      ],
+      "description": "No such resource, e.g. an unknown job or reservation id."
+    },
+    "fleet_not_configured": {
+      "retryable": false,
+      "planes": [
+        "sync",
+        "submit"
+      ],
+      "description": "The coordinator has no fleet registry, so nothing can be routed."
+    },
+    "capability_not_found": {
+      "retryable": false,
+      "planes": [
+        "sync",
+        "submit"
+      ],
+      "description": "The named capability alias is not in the fleet registry."
+    },
+    "capability_misconfigured": {
+      "retryable": false,
+      "planes": [
+        "sync"
+      ],
+      "description": "The alias is registered but cannot be served, e.g. a provider account whose API key is unset. An operator fix."
+    },
+    "ability_unsatisfied": {
+      "retryable": false,
+      "planes": [
+        "submit"
+      ],
+      "description": "No artifact clears the requested min_ability for the task class."
+    },
+    "requirements_unsatisfied": {
+      "retryable": false,
+      "planes": [
+        "submit"
+      ],
+      "description": "No artifact declares what `requires` asks for. Often one catalog entry away."
+    },
+    "cloud_not_permitted": {
+      "retryable": false,
+      "planes": [
+        "submit"
+      ],
+      "description": "The named tier is cloud, and the job's privacy or urgency forbids cloud."
+    },
+    "cloud_budget_exhausted": {
+      "retryable": false,
+      "planes": [
+        "submit"
+      ],
+      "description": "The named tier is cloud, and the cloud budget does not allow it."
+    },
+    "reservation_invalid": {
+      "retryable": false,
+      "planes": [
+        "submit"
+      ],
+      "description": "The named reservation is unknown or not confirmed."
+    },
+    "conflict": {
+      "retryable": false,
+      "planes": [
+        "submit"
+      ],
+      "description": "The request conflicts with the resource's current state."
+    },
+    "model_server_unreachable": {
+      "retryable": true,
+      "planes": [
+        "sync",
+        "job"
+      ],
+      "description": "The model server could not be connected to."
+    },
+    "model_server_timeout": {
+      "retryable": true,
+      "planes": [
+        "sync",
+        "job"
+      ],
+      "description": "The model server did not answer in time."
+    },
+    "model_server_error": {
+      "retryable": true,
+      "planes": [
+        "sync",
+        "job"
+      ],
+      "description": "The model server answered with a server error or a malformed response."
+    },
+    "model_request_rejected": {
+      "retryable": false,
+      "planes": [
+        "sync",
+        "job"
+      ],
+      "description": "The model server refused the request itself, e.g. it exceeds the context window."
+    },
+    "artifact_not_installed": {
+      "retryable": false,
+      "planes": [
+        "job"
+      ],
+      "description": "The node that claimed the job does not have the artifact it was pinned to."
+    },
+    "model_substituted": {
+      "retryable": false,
+      "planes": [
+        "job"
+      ],
+      "description": "The model server answered with a different model than the one pinned."
+    },
+    "job_expired": {
+      "retryable": false,
+      "planes": [
+        "job"
+      ],
+      "description": "The job passed its deadline or the maximum queue age unserved."
+    },
+    "job_cancelled": {
+      "retryable": false,
+      "planes": [
+        "job"
+      ],
+      "description": "The job was withdrawn by DELETE /jobs/{id}."
+    },
+    "job_orphaned": {
+      "retryable": false,
+      "planes": [
+        "job"
+      ],
+      "description": "The job's queue entry is gone and cannot be recovered. Resubmit under a fresh key."
+    },
+    "job_abandoned": {
+      "retryable": true,
+      "planes": [
+        "job"
+      ],
+      "description": "Workers repeatedly abandoned the job until the reaper gave up."
+    },
+    "worker_failed": {
+      "retryable": false,
+      "planes": [
+        "job"
+      ],
+      "description": "The job failed without a classified cause (an older worker, or an unexpected error)."
+    },
+    "internal_error": {
+      "retryable": false,
+      "planes": [
+        "sync",
+        "submit"
+      ],
+      "description": "The coordinator itself failed."
+    }
+  }
+}

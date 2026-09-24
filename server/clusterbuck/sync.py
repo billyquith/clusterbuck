@@ -18,9 +18,10 @@ from __future__ import annotations
 import logging
 
 import litellm
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from litellm import Router
 
+from .errors import CbkError, classify_upstream
 from .fleet import Fleet, resolve_api_key
 
 _log = logging.getLogger("clusterbuck.sync")
@@ -88,7 +89,12 @@ def build_router(fleet: Fleet, cloud_fallback_model: str | None = None) -> Route
 
     if not model_list:
         return None
-    kwargs: dict = {}
+    # No hidden retries. LiteLLM retried a failed call twice by default, so a dead model
+    # server cost an interactive client three connection attempts before it heard anything
+    # — and then heard nothing it could act on. The refusal now says `retryable`, and
+    # whether to retry is the client's decision, made with a person waiting. Fallbacks are
+    # a separate mechanism and still apply.
+    kwargs: dict = {"num_retries": 0}
     if fallbacks:
         kwargs["fallbacks"] = fallbacks
     return Router(model_list=model_list, **kwargs)
@@ -100,20 +106,44 @@ sync_routes = APIRouter()
 @sync_routes.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> dict:
     router: Router | None = getattr(request.app.state, "sync_router", None)
-    if router is None:
-        raise HTTPException(status_code=503, detail="sync plane not configured (no fleet.yaml)")
+    fleet: Fleet | None = getattr(request.app.state, "fleet", None)
+    if router is None or fleet is None:
+        raise CbkError("fleet_not_configured",
+                       "sync plane not configured (no fleet.yaml, or nothing in it servable)",
+                       503)
 
     body = await request.json()
     model = body.get("model")
     messages = body.get("messages")
     if not model or messages is None:
-        raise HTTPException(status_code=422, detail="`model` and `messages` are required")
+        raise CbkError("invalid_request", "`model` and `messages` are required", 422,
+                       param="model" if not model else "messages")
+
+    # Answered here rather than left to LiteLLM, which reports an unknown name as a
+    # BadRequestError about "healthy deployments" — indistinguishable, from outside, from
+    # an outage. A typo is the client's mistake and should read as one.
+    spec = fleet.capabilities.get(model)
+    if spec is None:
+        raise CbkError("capability_not_found",
+                       f"no capability {model!r} in the fleet registry; "
+                       f"available: {sorted(fleet.capabilities)}", 404,
+                       param="model", capability=model)
+    if model not in router.get_model_names():
+        # Registered, but build_router left it out: a provider account with no key.
+        raise CbkError("capability_misconfigured",
+                       f"capability {model!r} is registered but cannot be served "
+                       f"(see the coordinator log)", 503, capability=model)
 
     kwargs = {k: v for k, v in body.items() if k in _PASSTHROUGH}
     try:
         resp = await router.acompletion(model=model, messages=messages, **kwargs)
-    except Exception as e:  # unknown capability, or upstream/model-server failure
-        raise HTTPException(status_code=502, detail=f"sync completion failed: {e}") from e
+    except Exception as e:  # an upstream / model-server failure
+        code = classify_upstream(e)
+        status = {"model_server_timeout": 504, "model_request_rejected": 400}.get(code, 502)
+        # The upstream text is kept in the message for a person to read; the code is what
+        # a client acts on, so the message can change without breaking anyone.
+        raise CbkError(code, f"sync completion failed: {e}", status,
+                       capability=model, model=spec.model) from e
     return resp.model_dump()
 
 

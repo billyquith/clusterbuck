@@ -1,0 +1,11 @@
+{
+  "error": {
+    "message": "no capability 'x' in the fleet registry",
+    "type": "invalid_request_error",
+    "code": "capability_not_found",
+    "retryable": false,
+    "param": "model",
+    "capability": "x"
+  },
+  "detail": "no capability 'x' in the fleet registry"
+}

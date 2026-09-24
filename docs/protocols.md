@@ -18,7 +18,13 @@ POST /v1/chat/completions
 ```
 
 The `model` alias maps to a capability tier in the gateway config. Response is the
-standard OpenAI shape. Any OpenAI-compatible SDK works unmodified.
+standard OpenAI shape. Any OpenAI-compatible SDK works unmodified — including its errors,
+which arrive in OpenAI's envelope with a stable `code` (§1c).
+
+A failed call is **not retried behind the client's back**. LiteLLM's default of two
+silent retries meant a dead model server cost an interactive caller three connection
+attempts before it heard anything; the refusal now says whether it is `retryable`, and the
+client — which knows whether a person is waiting — decides.
 
 ### 1b. Async (patient) — job API
 Submit a job:
@@ -296,6 +302,59 @@ job's terminal status and timing, but `result` is `null` — `finished_at` is wh
 distinguishes "it ran and the result expired" from "it never ran". Prompts and completions
 are deliberately not kept in the coordinator's durable store (metering is metadata-only),
 so a client that needs a result beyond the TTL must persist it on first successful poll.
+
+### 1c. Errors — the envelope, and codes to branch on
+
+Every client-facing error is sent in one shape, OpenAI's, so the stock SDK surfaces the
+code as `.code` on the exception it raises:
+
+```
+{ "error": { "message": "…",               // for a person; may change freely
+             "type": "invalid_request_error", // | authentication_error | api_error
+             "code": "capability_not_found",  // what a client branches on
+             "retryable": false,              // the identical request may succeed soon
+             "param": "model",                // the field at fault, when there is one
+             "capability": "…", "model": "…"  // the alias sent / the artifact resolved
+           },
+  "detail": "…" }                             // DEPRECATED: the message again
+```
+
+**Branch on `code`.** The HTTP status is coarse — a `502` is both "the model server is not
+there" and "it answered with an error", which call for different messages to a user — and
+the message is prose that will be reworded. `code` is the contract.
+[`contract/error.schema.json`](../contract/error.schema.json) pins the envelope and
+[`contract/error-codes.json`](../contract/error-codes.json) the full vocabulary, each code
+with its meaning and whether it is retryable.
+
+**`retryable` means the identical request may succeed if simply retried soon.** It is
+about transient conditions — a server restarting, a connection dropped. It never means
+"could succeed once an operator changes the fleet": an ability miss is `retryable: false`
+even though adding a model would fix it.
+
+`detail` carries what it always did (the message, or pydantic's list for a validation
+error), so a client written before the envelope keeps working. New clients should not read
+it.
+
+What the coordinator raises today:
+
+| Code | Status | Retryable | When |
+|---|---|---|---|
+| `invalid_request` | 400 / 422 | no | A malformed body, header or field; `param` names it. |
+| `unauthorized` | 401 | no | Missing or wrong API key. |
+| `not_found` | 404 | no | An unknown job or reservation id. |
+| `fleet_not_configured` | 503 | no | No fleet registry, so nothing can be routed. |
+| `capability_not_found` | 404 (sync) | no | The alias is not in the registry — a typo, not an outage. |
+| `capability_misconfigured` | 503 | no | The alias is registered but cannot be served, e.g. a provider account whose key is unset. An operator fix. |
+| `reservation_invalid` | 400 | no | The named reservation is unknown or unconfirmed. |
+| `model_server_unreachable` | 502 | yes | The model server could not be connected to. |
+| `model_server_timeout` | 504 | yes | It did not answer in time. |
+| `model_server_error` | 502 | yes | It answered with a server error or a malformed response. |
+| `model_request_rejected` | 400 | no | It refused the request itself, e.g. the prompt exceeds its context window. |
+
+`model_server_*` is decided from the failure's **type**, never its text — and not from the
+outermost type alone, because LiteLLM reports a refused connection as an
+`InternalServerError` wrapping the `ConnectError` that actually happened. Read naïvely,
+every dead server would be a broken one.
 
 ## 2. clusterbuck server ↔ worker (Redis queue contract)
 

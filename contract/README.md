@@ -12,6 +12,8 @@ Change a schema and both sides update, or their tests fail.
 | `enroll-request` / `enroll-response` | A worker joining the fleet, and what it is told back. |
 | `heartbeat-request` / `heartbeat-response` | The periodic worker report, and the instructions returned on it. |
 | `update-manifest.schema.json` | The signed manifest a worker verifies before replacing itself. |
+| `error.schema.json` | The client-facing HTTP error envelope (OpenAI-shaped), with its `code` enum. |
+| `error-codes.json` | Every stable error code: meaning, planes, and whether it is retryable. `validate.py` checks it against each schema that enumerates codes. |
 | `examples/*.valid.json` | Golden fixtures both conformance suites must accept. |
 | `examples/*.invalid.json` | Fixtures both must reject, so the constraints are proven to fire. |
 

@@ -32,6 +32,7 @@ from .catalog import (
 )
 from .cloud_executor import CloudExecutor, cloud_capabilities
 from .config import JOIN_PASSWORD_MIN_LEN, settings
+from .errors import CbkError, install_error_handlers
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import (
     SCALE_VERSION,
@@ -92,17 +93,17 @@ def _validated_idempotency_key(raw: str | None) -> str | None:
         return None
     key = raw.strip()
     if not key:
-        raise HTTPException(status_code=400, detail="Idempotency-Key must not be empty")
+        raise CbkError("invalid_request", "Idempotency-Key must not be empty", 400,
+                       param="Idempotency-Key")
     if len(key) > _IDEMPOTENCY_KEY_MAX:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Idempotency-Key must be at most {_IDEMPOTENCY_KEY_MAX} characters",
+        raise CbkError(
+            "invalid_request",
+            f"Idempotency-Key must be at most {_IDEMPOTENCY_KEY_MAX} characters", 400,
+            param="Idempotency-Key",
         )
     if not key.isascii() or not key.isprintable():
-        raise HTTPException(
-            status_code=400,
-            detail="Idempotency-Key must be printable ASCII",
-        )
+        raise CbkError("invalid_request", "Idempotency-Key must be printable ASCII", 400,
+                       param="Idempotency-Key")
     return key
 
 
@@ -349,6 +350,7 @@ def create_app(
     app = FastAPI(title="clusterbuck server", version="0.0.1", lifespan=lifespan)
     # Attach auth before the routes so it gates every one of them (DESIGN.md → Security).
     install_auth(app, api_key if api_key is not None else settings.api_key)
+    install_error_handlers(app)
     app.include_router(sync_routes)
     app.include_router(web_routes)
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
@@ -549,9 +551,8 @@ def create_app(
         if body.reservation is not None:
             rsv = app.state.store.get_reservation(body.reservation)
             if rsv is None or rsv.status != "confirmed":
-                raise HTTPException(
-                    status_code=400, detail="unknown or unconfirmed reservation"
-                )
+                raise CbkError("reservation_invalid", "unknown or unconfirmed reservation",
+                               400, param="reservation")
 
         try:
             selection = resolve(
@@ -645,9 +646,10 @@ def create_app(
                 # told it nothing, so the mistake was undiscoverable from the outside.
                 # Consistent with how both addressing forms already 422 at submit rather
                 # than queueing work nothing will honour.
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"deadline is not an RFC 3339 timestamp: {body.deadline!r}",
+                raise CbkError(
+                    "invalid_request",
+                    f"deadline is not an RFC 3339 timestamp: {body.deadline!r}", 422,
+                    param="deadline",
                 ) from e
 
         sub = body.submitter

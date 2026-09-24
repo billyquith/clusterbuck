@@ -44,10 +44,12 @@ Content-Type: application/json
 The `model` is a Clusterbuck capability alias, not necessarily the underlying model
 name. Discover currently registered aliases with `GET /v1/models`, or `GET /fleet` for
 each alias's configured model, `cloud` flag and a human-readable `description`. A
-successful response is a normal OpenAI-style chat completion. A `502` means the
-coordinator could not complete the request through the synchronous model-server route; do
-not assume that means the async worker route is unavailable. A `503` means no fleet is
-configured for the sync plane.
+successful response is a normal OpenAI-style chat completion. A failed call is not
+retried for you, and its error carries a stable `code` (see *Errors* below):
+`capability_not_found` (404) for an alias that does not exist, `model_server_unreachable`,
+`model_server_timeout` or `model_server_error` when the alias exists but its model server
+failed, `fleet_not_configured` (503) when there is no fleet. A sync failure does not mean
+the async worker route is unavailable.
 
 The sync path forwards straight to a capability's model server: it does not route by
 ability, apply `requires`, meter usage, or wake a sleeping machine. Anything that needs
@@ -153,13 +155,32 @@ and the existing job's `id`, and enqueues nothing. A submit rejected with `400` 
 does not consume its key, so the same key can be retried once the fleet can serve it.
 `submitter.request_id` is diagnostic provenance only, not a deduplication key.
 
-Handle `400` and `422` as invalid requests or unsatisfied routing requirements rather
-than retrying unchanged; the `detail` says which. Handle `401` as missing or invalid
-authentication, and `404` on `GET /jobs/{id}` as an unknown job id. For async
-work, retry transport failures with the same idempotency key, then poll the returned job.
+Branch on `error.code`, not on the HTTP status or the message (see *Errors*). Do not
+retry a request whose error has `retryable: false` unchanged. For async work, retry
+transport failures with the same idempotency key, then poll the returned job.
 
 Never send prompts, completions, or credentials to Redis directly. Clients communicate
 only with the coordinator HTTP API; workers pull queued jobs themselves.
+
+## Errors
+
+Every error is OpenAI's envelope, so the stock SDK exposes the code as `.code`:
+
+```json
+{"error": {"message": "…", "type": "invalid_request_error", "code": "capability_not_found",
+           "retryable": false, "param": "model", "capability": "…"},
+ "detail": "…"}
+```
+
+- `code` is the contract; the message is for people and may change. `detail` repeats the
+  message for older clients and is deprecated.
+- `retryable: true` means the identical request may succeed if retried soon (a transient
+  model-server failure). It never means "retry until the fleet changes".
+- Codes in use: `invalid_request`, `unauthorized`, `not_found`, `fleet_not_configured`,
+  `capability_not_found`, `capability_misconfigured`, `reservation_invalid`,
+  `model_server_unreachable`, `model_server_timeout`, `model_server_error`,
+  `model_request_rejected`. The full vocabulary, with meanings, is
+  [contract/error-codes.json](contract/error-codes.json).
 
 ## Further reading
 
@@ -167,3 +188,4 @@ only with the coordinator HTTP API; workers pull queued jobs themselves.
 - [Urgency and privacy semantics](docs/design.md)
 - [Job JSON schema](contract/job.schema.json)
 - [Result JSON schema](contract/result.schema.json)
+- [Error envelope](contract/error.schema.json) and [codes](contract/error-codes.json)

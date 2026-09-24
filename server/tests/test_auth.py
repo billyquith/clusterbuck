@@ -141,3 +141,13 @@ def test_no_key_configured_leaves_everything_open(open_app):
     assert open_app.get("/fleet").status_code == 200
     assert open_app.post("/nodes/tokens").status_code == 201
     assert open_app.get("/").status_code == 200
+
+
+def test_a_refused_key_answers_in_the_error_envelope(authed):
+    """The middleware runs outside the app's exception handlers, so it builds its own."""
+    resp = authed.post("/v1/chat/completions", headers={"Authorization": "Bearer nope"},
+                       json={"model": "x", "messages": []})
+    assert resp.status_code == 401
+    err = resp.json()["error"]
+    assert (err["code"], err["type"], err["retryable"]) == (
+        "unauthorized", "authentication_error", False)
