@@ -332,8 +332,8 @@ def test_an_artifact_that_does_not_declare_a_required_feature_is_excluded(seeded
 
 
 def test_undeclared_reads_as_no(seeded):
-    """Deliberately the opposite of the min_tps rule. An unmeasured SPEED is genuinely
-    unknown and self-corrects — the node checks again and refuses. An undeclared FEATURE
+    """Deliberately the opposite of how speed is treated. An unmeasured SPEED costs at
+    most a slower answer and self-corrects as measurements arrive. An undeclared FEATURE
     has no backstop: it fails at the model server, where it reads as a model bug rather
     than a routing one, or succeeds while quietly ignoring the request."""
     _catalogued(seeded, "llama3.2:3b")  # in the catalog, declares nothing

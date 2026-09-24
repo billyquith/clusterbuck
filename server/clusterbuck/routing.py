@@ -178,9 +178,8 @@ class MissingCapability(Exception):
     """No artifact DECLARES a required capability (ADR 37).
 
     Separate from `NoCapableArtifact` because the two call for completely different
-    fixes, in the same way a speed miss is reported separately from an ability miss: this
-    one usually means the catalog does not describe a model that can in fact do the
-    thing, and the answer is one `POST /catalog` away — not a better model.
+    fixes: this one usually means the catalog does not describe a model that can in fact
+    do the thing, and the answer is one `POST /catalog` away — not a better model.
     """
 
 
@@ -206,9 +205,9 @@ def _declared(artifact: str, spec, catalog: dict) -> dict:
 def _unmet(asked: dict, declared: dict) -> str | None:
     """Which requirement this artifact fails, or None if it meets them all.
 
-    **Undeclared reads as "no"**, and that is the opposite of the `min_tps` rule — on
-    purpose. An unmeasured *speed* is genuinely unknown and self-corrects, because the
-    node checks again and refuses if it turns out too slow. An undeclared *feature* has
+    **Undeclared reads as "no"**, and that is the opposite of how speed is treated — on
+    purpose. An unmeasured *speed* costs at most a slower answer and self-corrects as the
+    node reports what it measured; nothing refuses a job for it. An undeclared *feature* has
     no such backstop: serving a tool-calling job on a model nobody has checked either
     fails at the model server, where it reads as a model bug rather than a routing one,
     or succeeds while quietly ignoring the tools.

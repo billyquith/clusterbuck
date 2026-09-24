@@ -70,11 +70,11 @@ nothing will ever serve: `task_class`/`min_ability` when no artifact clears the 
 typo'd capability would otherwise sit on a stream no worker consumes, with no error and no
 expiry short of `deadline`.
 
-A speed miss is reported **separately** from an ability miss: "your fleet is not good enough"
-and "your fleet is not fast enough" call for completely different fixes, and a caller told
-only the first would go hunting for a better model it already has. A capability whose nodes
-have measured *nothing* is never excluded — unknown is not slow, and a fresh fleet has
-finished no jobs.
+Speed is never a reason to refuse. It **orders** the tiers that clear the bar — local
+first, then the soonest answer, then the cheapest (design.md §4) — but a job is never
+rejected, and a node never turns one down, for being slow. A tier whose nodes have measured
+*nothing* is ordered on price alone: unknown is not slow, and a fresh fleet has finished no
+jobs.
 
 **What a model CAN DO is a filter, not a score (`requires`).** Ability is a graded 1–10
 judgement of how *well* a model does a task class. These are not that shape: a context
@@ -88,9 +88,9 @@ unrelated number.
 It applies to **both** addressing forms. Naming a `capability` explicitly is the advanced
 form, not a bypass — the same reason privacy and budget are enforced there.
 
-**Undeclared reads as "no"**, and that is deliberately the opposite of the speed rule. An
-unmeasured *speed* is genuinely unknown and self-corrects, because the node checks again
-and refuses if it turns out too slow. An undeclared *feature* has no such backstop:
+**Undeclared reads as "no"**, and that is deliberately the opposite of how speed is
+treated. An unmeasured *speed* costs at most a slower answer, and corrects itself as the
+node finishes jobs and reports what it measured. An undeclared *feature* has no such backstop:
 serving a tool-calling job on a model nobody has checked either fails at the model server,
 where it reads as a model bug rather than a routing one, or succeeds while quietly
 ignoring the tools. A local artifact declares these in the **model catalog**; a provider

@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHARED=(
   run queue-and-wait waiting abandon idempotency cancel sync escalation urgency
   reservation usage enroll join ability requires pinning cloud discovery install eval perf auth
-  version
+  version client
 )
 
 failed=()

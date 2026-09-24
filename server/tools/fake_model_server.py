@@ -12,7 +12,14 @@ coordinator recover the job. Nothing else can produce that state: against an ins
 stub, claim and ack happen between two ticks and there is no mid-run window to
 interrupt.
 
-Usage:  python fake_model_server.py [--port 11434] [--stall-s 0]
+`--fail-chat 500` answers every completion with that HTTP status instead, which is how a
+test gets a model server that is reachable but broken — a different failure from one that
+is not there at all, and one a client should be told about differently.
+
+A request carrying `response_format` gets a JSON object as its content, so a client that
+validates structured output has something to validate.
+
+Usage:  python fake_model_server.py [--port 11434] [--stall-s 0] [--fail-chat 0]
 """
 
 from __future__ import annotations
@@ -39,6 +46,8 @@ class Handler(BaseHTTPRequestHandler):
     # generation, so a job can be caught mid-run. Only affects completions; discovery
     # and the native endpoints stay instant so a worker's heartbeat is unaffected.
     stall_s: float = 0.0
+    # HTTP status to answer every completion with, instead of answering it (0 = off).
+    fail_chat: int = 0
 
     def _json(self, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -109,6 +118,9 @@ class Handler(BaseHTTPRequestHandler):
 
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or "{}")
+        if self.fail_chat:
+            self.send_error(self.fail_chat, "simulated model server failure")
+            return
         model = body.get("model", "fake-model")
         messages = body.get("messages", [])
         last_user = next(
@@ -132,7 +144,11 @@ class Handler(BaseHTTPRequestHandler):
                     "finish_reason": "stop",
                     "message": {
                         "role": "assistant",
-                        "content": f"[fake:{model}] echo: {last_user}",
+                        "content": (
+                            json.dumps({"model": model, "echo": last_user})
+                            if body.get("response_format")
+                            else f"[fake:{model}] echo: {last_user}"
+                        ),
                     },
                 }
             ],
@@ -163,11 +179,14 @@ def main() -> None:
     ap.add_argument("--stall-s", type=float, default=0.0,
                     help="hold each completion open this long, so a job can be caught "
                          "mid-run and its worker killed under it")
+    ap.add_argument("--fail-chat", type=int, default=0,
+                    help="answer every completion with this HTTP status (e.g. 500)")
     args = ap.parse_args()
     Handler.models = [m for m in args.models.split(",") if m]
     Handler.loaded_models = [m for m in args.loaded.split(",") if m]
     FAIL_PULLS.update(m for m in args.fail_pulls.split(",") if m)
     Handler.stall_s = args.stall_s
+    Handler.fail_chat = args.fail_chat
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"fake model server on http://{args.host}:{args.port}/v1/chat/completions")
     server.serve_forever()
