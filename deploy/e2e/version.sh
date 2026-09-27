@@ -30,7 +30,9 @@ n=next((n for n in json.load(sys.stdin)['nodes'] if n['node_id']=='$1'),{})
 print(n.get('$2') or '')"; }
 
 redis_cli -n 0 FLUSHDB >/dev/null
-python3 "$REPO/server/tools/fake_model_server.py" --port "$MODEL_PORT" >/dev/null 2>&1 & PIDS+=($!)
+# Discovery answers slowly on purpose: see stage 3.
+python3 "$REPO/server/tools/fake_model_server.py" --port "$MODEL_PORT" \
+  --discovery-delay-s 0.3 >/dev/null 2>&1 & PIDS+=($!)
 wait_for "http://127.0.0.1:$MODEL_PORT/healthz" "model server"
 
 # The version the worker was actually built with — read it from the binary, don't assume.
@@ -94,13 +96,19 @@ grep -q "QUARANTINED" "$WORKDIR/worker.log" || fail "worker did not report being
 log "block-listed version ⇒ quarantined; worker acknowledged it ✓"
 
 # A quarantined worker must not drain jobs, so a submitted job stays queued.
-curl -fsS -X POST "$URL/jobs" -H 'content-type: application/json' -d "{
+#
+# The worker once dropped its quarantine for the duration of every heartbeat and restored
+# it from the reply, so it could claim mid-beat. Against an instant model server that gap
+# was a few milliseconds, and a 200ms poll only sometimes landed in it: green in
+# isolation, red under a loaded full-suite run. The model server's slow discovery (above)
+# holds every beat open for longer than one poll interval, so a worker that claims during
+# a beat does so on every beat — and the 3s here spans several.
+JOB=$(curl -fsS -X POST "$URL/jobs" -H 'content-type: application/json' -d "{
   \"capability\": \"$CAP\", \"messages\": [{\"role\":\"user\",\"content\":\"should not run\"}],
-  \"urgency\": \"necessary\"}" | jqpy '["id"]' > "$WORKDIR/jobid"
-JOB=$(cat "$WORKDIR/jobid")
+  \"urgency\": \"necessary\"}" | jqpy '["id"]')
 sleep 3
-ST=$(curl -fsS "$URL/jobs/$JOB" | jqpy '["status"]')
-[[ "$ST" == "queued" ]] || fail "quarantined worker still ran the job (status=$ST)"
-log "job submitted while quarantined stayed '$ST' — not claimed ✓"
+V=$(job_verdict "$URL" "$JOB")
+[[ "$V" == "queued" ]] || fail "quarantined worker still ran the job ($V)"
+log "job submitted while quarantined stayed queued — not claimed ✓"
 
 printf '\033[32m[version] PASS — coordinator judges build fitness; unfit workers stand down\033[0m\n'

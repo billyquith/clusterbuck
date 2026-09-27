@@ -178,12 +178,18 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
     pending_result: ActionResult | None = None
     previous_mode: str | None = None
     beat_ok = True
+    # The coordinator's last verdict on this build, carried ACROSS beats. It arrives on the
+    # heartbeat reply, so recomputing `paused` from the ladder alone at the top of the next
+    # beat un-quarantined the node for that beat's whole inventory-and-heartbeat round trip —
+    # long enough for the work loop to claim, every beat. Untouched by a beat that fails: a
+    # coordinator that cannot be reached has not declared a blocked build fit.
+    quarantined = False
     while not stop.is_set():
         try:
             state = load_state(state_path)
             if state is not None:
                 effective = ladder.update(state.mode)
-                loop.paused = effective == "paused"
+                loop.paused = quarantined or effective == "paused"
                 # How much of this machine the loop may take at once. The effective mode
                 # rather than the desired one, so the presence ladder's hysteresis damps
                 # this decision too — a coffee break must not make the node greedy, and
