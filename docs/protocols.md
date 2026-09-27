@@ -7,7 +7,26 @@ authoritative and this document is its prose companion.
 
 ## 1. Client ↔ clusterbuck
 
-Two entry points, both HTTP; a client picks one per request.
+Two entry points, both HTTP; a client picks one per request, by whether a person is
+waiting — not by what the work is. The two are addressed differently on purpose:
+
+- **Sync targets a ready capability.** `model` is a capability alias, and it binds the
+  deployment behind that alias as it stands now. `model: "30b-reason"` means "that tier",
+  not "give me reasoning". Nothing is routed by ability, filtered by `requires`, queued or
+  woken; a client choosing an alias reads `/fleet`'s `features` and `health` (§9).
+- **Async declares an intended outcome.** `task_class` + `min_ability` + `requires` say
+  what the work needs, and the coordinator chooses the tier, waits for it, and wakes it.
+
+A request is four separate things, and keeping them apart is what lets routing stay
+domain-agnostic: **intent** (`task_class`, `min_ability`, `urgency`, `privacy`,
+`deadline` — what service the work needs), **requirements** (`requires` — hard technical
+facts a model must have), **params** (generation settings), and **messages** (the task and
+its data). Why the client is asking, and how the answer should be framed, belong in the
+messages; clusterbuck routes on the first two and never reads the last.
+
+A reference client that does all of this — including the durable-job lifecycle below —
+is [`examples/client/cbk_client.py`](../examples/client/cbk_client.py). It is run by the
+end-to-end suite, so it cannot drift from what the coordinator does.
 
 ### 1a. Sync (interactive) — OpenAI-compatible
 Standard OpenAI Chat Completions, served by the LiteLLM gateway:
@@ -120,6 +139,14 @@ coordinator does not estimate how many tokens a submission will occupy: a charac
 guess would start refusing valid work on a heuristic, and a real tokenizer is per-model
 and not a dependency this project carries. A client that knows its document is large says
 so. Auto-deriving a floor is a reasonable future addition; guessing one silently is not.
+
+**`requires.tools` selects a model; it does not run tools.** It filters routing to models
+declared able to emit tool calls, and `params.tools` / `tool_choice` are forwarded to the
+model server. That is all. A job is one completion: any `tool_calls` the model emits come
+back in `result` exactly as returned, and nothing resumes the job with tool results. A
+tool loop is the client's — run the tool, then submit a *new* job whose `messages` carry
+the call and its result. Routing a job to a tool-capable model grants that model no
+authority to do anything; the client decides which calls to honour.
 
 `requires: {"vision": false}` is not a requirement — it means "I do not need vision", and
 must not exclude a model that happens to have it. Only truthy values filter.
@@ -325,6 +352,18 @@ LAN-only single-operator infrastructure. Accepted limitation, stated rather than
 
 So with the default configuration **the only bounds on a job are the ones its client
 sets** — which is exactly what `expires_at: null` reports.
+
+**The client's half of the lifecycle**, in order — `examples/client/cbk_client.py` is this,
+runnable:
+
+1. Mint one `Idempotency-Key` per *logical* call, and persist it with the request before
+   sending.
+2. On `202`/`200`, persist `{id, result_key}` against that key before doing anything else.
+3. A transport failure on submit is ambiguous: retry with the **same** key.
+4. Poll `GET /jobs/{id}` until a terminal status; persist `result` and `error_code` the
+   first time you see them.
+5. Branch on `error_code`. To run the work again, submit under a **fresh** key.
+6. Stop waiting with `DELETE /jobs/{id}`.
 
 **Collecting a result later.** A completed result lives in the result store for
 `CBK_RESULT_TTL_S` (default 24h). After that, `GET /jobs/{id}` still answers with the
