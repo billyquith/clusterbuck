@@ -328,3 +328,62 @@ async def test_a_node_cut_off_from_the_broker_reports_no_queues(tmp_path):
         "it is not paused and must not claim to be — the owner has not taken it, "
         "it simply cannot reach the broker"
     )
+
+
+# --- a quarantine holds between beats ------------------------------------------------
+
+
+class _WatchingInventory(_FakeInventory):
+    """Records `loop.paused` at the one point in a beat where the loop is waiting on I/O
+    before the heartbeat reply — which is exactly when the work loop gets to poll."""
+
+    def __init__(self, loop) -> None:
+        super().__init__([])
+        self._loop = loop
+        self.paused_seen: list[bool] = []
+
+    async def installed(self) -> list[str]:
+        self.paused_seen.append(self._loop.paused)
+        return await super().installed()
+
+
+class _QuarantiningRegistry(_FakeRegistry):
+    async def heartbeat(self, node_id, node_key, req):
+        from cbk_worker.models import Fitness
+        self.beats += 1
+        if self.beats >= 3:
+            self._stop.set()
+        resp = _FakeResponse()
+        resp.fitness = Fitness(status="quarantine", reason="blocked")
+        return resp
+
+
+async def test_a_quarantined_worker_stays_paused_through_the_next_beat(tmp_path):
+    """The verdict arrives on the heartbeat REPLY, so it must survive the start of the next
+    beat. Recomputing `paused` from the ladder alone there un-quarantined the node for the
+    whole inventory-and-heartbeat round trip, every beat — long enough for the work loop to
+    claim, which e2e version.sh caught as a block-listed build still draining its queue."""
+    import asyncio
+
+    from cbk_worker.commands import _heartbeat_loop
+    from cbk_worker.config import WorkerConfig
+    from cbk_worker.presence import PresenceLadder
+    from cbk_worker.registry import NodeState, save_state
+
+    state_path = tmp_path / "node.json"
+    save_state(state_path, NodeState(
+        node_id="node-a", node_key="k", server="http://127.0.0.1:1",
+        capabilities=["8b-extract"], ladder=None, mode="active", profile="shared",
+    ))
+    cfg = WorkerConfig(worker_id="node-a", consumer_group="cbk-workers",
+                       capabilities=("8b-extract",), heartbeat_s=0.01)
+    loop = _FakeLoop()
+    inventory = _WatchingInventory(loop)
+    stop = asyncio.Event()
+    await _heartbeat_loop(_QuarantiningRegistry(stop), loop,
+                          PresenceLadder(None, ["8b-extract"]), inventory, _FakeManager(),
+                          None, state_path, cfg, stop)
+
+    # Beat 1 has not heard a verdict yet; every beat after it has.
+    assert inventory.paused_seen[1:] == [True, True]
+    assert loop.paused is True

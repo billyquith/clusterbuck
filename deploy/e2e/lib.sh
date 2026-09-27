@@ -13,7 +13,7 @@
 #   E2E_NAME=cloud
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
-# Provides: REPO WORKDIR PIDS  log fail pass  wait_for jqpy redis_cli flush_redis
+# Provides: REPO WORKDIR PIDS  log fail pass  wait_for jqpy job_verdict redis_cli flush_redis
 # and installs the EXIT trap that kills PIDS and removes WORKDIR.
 
 : "${E2E_NAME:?set E2E_NAME before sourcing lib.sh}"
@@ -38,6 +38,16 @@ wait_for() {
 
 # Read JSON on stdin and print one expression off it, e.g. jqpy '["id"]'.
 jqpy() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
+
+# base-url, job-id — one line: `status [worker] [error]`. For a failure message, so a job
+# that ended up somewhere it should not have says WHO took it and why it stopped, rather
+# than just the status, which on its own cannot tell a leaked consumer from the one under test.
+job_verdict() {
+  curl -fsS "$1/jobs/$2" | python3 -c "
+import sys,json
+j=json.load(sys.stdin)
+print(' '.join(str(x) for x in (j['status'], j.get('worker'), j.get('error')) if x))"
+}
 
 # THE one definition. CI sets CBK_REDIS_CLI because a GitHub service container has no
 # `docker exec` to reach; everything else uses the dev container.

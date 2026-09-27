@@ -16,10 +16,16 @@ interrupt.
 test gets a model server that is reachable but broken — a different failure from one that
 is not there at all, and one a client should be told about differently.
 
+`--discovery-delay-s` answers `GET /v1/models` that much later — a model server slow to
+list what it has. The worker takes that inventory mid-heartbeat, so this holds each beat
+open long enough that anything the worker does *during* a beat, rather than after it,
+happens on every beat instead of by luck.
+
 A request carrying `response_format` gets a JSON object as its content, so a client that
 validates structured output has something to validate.
 
 Usage:  python fake_model_server.py [--port 11434] [--stall-s 0] [--fail-chat 0]
+                                   [--discovery-delay-s 0]
 """
 
 from __future__ import annotations
@@ -48,6 +54,8 @@ class Handler(BaseHTTPRequestHandler):
     stall_s: float = 0.0
     # HTTP status to answer every completion with, instead of answering it (0 = off).
     fail_chat: int = 0
+    # Seconds to hold `GET /v1/models` before answering (0 = instant).
+    discovery_delay_s: float = 0.0
 
     def _json(self, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -61,6 +69,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.rstrip("/")
         # Generic OpenAI discovery endpoint — the portable way a worker learns what's here.
         if path == "/v1/models":
+            if self.discovery_delay_s:
+                time.sleep(self.discovery_delay_s)
             self._json({"object": "list", "data": [
                 {"id": m, "object": "model", "owned_by": "fake"} for m in self.models]})
             return
@@ -181,12 +191,16 @@ def main() -> None:
                          "mid-run and its worker killed under it")
     ap.add_argument("--fail-chat", type=int, default=0,
                     help="answer every completion with this HTTP status (e.g. 500)")
+    ap.add_argument("--discovery-delay-s", type=float, default=0.0,
+                    help="hold GET /v1/models this long, so each worker heartbeat is "
+                         "held open mid-beat")
     args = ap.parse_args()
     Handler.models = [m for m in args.models.split(",") if m]
     Handler.loaded_models = [m for m in args.loaded.split(",") if m]
     FAIL_PULLS.update(m for m in args.fail_pulls.split(",") if m)
     Handler.stall_s = args.stall_s
     Handler.fail_chat = args.fail_chat
+    Handler.discovery_delay_s = args.discovery_delay_s
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"fake model server on http://{args.host}:{args.port}/v1/chat/completions")
     server.serve_forever()
