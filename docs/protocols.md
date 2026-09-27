@@ -201,7 +201,9 @@ status but `done`:
 | `job_abandoned` | failed | Workers kept dying on it until the reaper gave up. | Resubmit (fresh key), perhaps later. |
 | `capability_misconfigured` | failed | A provider account with no usable key. | Operator fix. |
 | `model_server_*`, `model_request_rejected` | failed | The executor's model server failed, as on the sync plane. | Per `retryable`. |
-| `worker_failed` | failed | Failed without a classified cause — an older worker, or an unexpected error. | Treat as not retryable. |
+| `artifact_not_installed` | failed | The node that claimed it lacks the artifact routing pinned. | Operator fix; resubmit (fresh key) once fixed. |
+| `model_substituted` | failed | The model server answered with a different model than the one pinned. | Operator fix (usually an LM Studio load). |
+| `worker_failed` | failed | Failed without a classified cause — a worker that predates error codes, or an unexpected error. | Treat as not retryable. |
 
 A resubmit always takes a **fresh** idempotency key: a key has no TTL, so the old one
 returns the old, terminal job forever. The same key is only for a submit whose response
@@ -510,6 +512,13 @@ account is reached (§5): those keys live only on the coordinator, which calls t
 provider itself rather than ever handing a worker that key. A job's own `params` can never
 supply or override `api_key`/`api_base` (§2's envelope rule, same as
 `stream`/`messages`).
+
+A failed call becomes a `failed` result whose `error_code` is classified by exception
+type (`worker/src/cbk_worker/failure.py`): no connection → `model_server_unreachable`, no
+answer in time → `model_server_timeout`, a 5xx or a body that is not JSON →
+`model_server_error`, a 4xx → `model_request_rejected`. A 4xx is the server refusing
+*this* request — a context window, a parameter it does not support — which a user should
+be told differently from the server being broken.
 
 ## 4. Coordinator ↔ node (Wake-on-LAN)
 
