@@ -87,6 +87,50 @@ async def test_a_queued_job_is_claimed_run_acked_and_its_result_stored(redis_cli
     await http.aclose()
 
 
+def _raises(exc_type):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise exc_type("simulated", request=request)
+    return handler
+
+
+@pytest.mark.parametrize("handler, code", [
+    (_raises(httpx.ConnectError), "model_server_unreachable"),
+    (_raises(httpx.ReadTimeout), "model_server_timeout"),
+    (lambda r: httpx.Response(500, text="exploded"), "model_server_error"),
+    (lambda r: httpx.Response(200, text="<html>not json</html>"), "model_server_error"),
+    (lambda r: httpx.Response(400, json={"error": "context length exceeded"}),
+     "model_request_rejected"),
+    (lambda r: httpx.Response(200, json={**_OK, "model": "some-other-model"}),
+     "model_substituted"),
+])
+async def test_a_failed_job_says_why_as_a_code(redis_client, handler, code):
+    """The client must be able to tell a dead server from a broken one from a wrong
+    model without reading the message — each is a different thing to tell a user."""
+    http, model = _model(handler)
+    loop = WorkLoop(redis_client, model, _cfg(), log=lambda _: None)
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {
+        "job": _job_wire("job_code", params={"model": "llama3.2:3b"})})
+    await _claim(loop)
+    stored = json.loads(await redis_client.get("res:job_code"))
+    assert stored["status"] == "failed"
+    assert stored["error_code"] == code, stored["error"]
+    await http.aclose()
+
+
+async def test_a_pin_this_node_lacks_fails_as_artifact_not_installed(redis_client):
+    http, model = _model()
+    loop = WorkLoop(redis_client, model, _cfg(), log=lambda _: None)
+    loop.set_installed(["llama3.2:3b"])
+    await loop.ensure_groups()
+    await redis_client.xadd(stream_key("8b-extract"), {
+        "job": _job_wire("job_pin", params={"model": "qwen2.5:32b"})})
+    await _claim(loop)
+    stored = json.loads(await redis_client.get("res:job_pin"))
+    assert stored["error_code"] == "artifact_not_installed"
+    await http.aclose()
+
+
 async def test_a_failed_job_still_gets_a_terminal_result_and_is_acked(redis_client):
     """A failure is terminal, not a redelivery: the caller must learn it failed, and the
     reaper must not hand the same doomed job round the fleet."""

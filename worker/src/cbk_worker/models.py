@@ -83,6 +83,8 @@ class Result:
     finished_at: str
     completion: dict[str, Any] | None = None
     error: str | None = None
+    # The stable code for `error` (failure.py); None on success.
+    error_code: str | None = None
     usage: dict[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -99,6 +101,7 @@ class Result:
             "completed_at": self.started_at,
             "completion": self.completion,
             "error": self.error,
+            "error_code": self.error_code,
             "usage": self.usage,
         })
 

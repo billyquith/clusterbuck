@@ -29,9 +29,8 @@ KEY="client-e2e-key"
 REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}"
 LIVE=11471 BROKEN=11472 DEAD=11473   # nothing listens on $DEAD
 
-PENDING=(
-  worker-server-dead worker-server-error
-)
+# Empty now: every case holds. Kept, because the next thing a client needs starts here.
+PENDING=()
 
 flush_redis
 
@@ -75,7 +74,7 @@ start_worker dead-extract "$DEAD"
 start_worker broken-extract "$BROKEN"
 log "coordinator, model servers and three workers up"
 
-is_pending() { local c; for c in "${PENDING[@]}"; do [[ "$c" == "$1" ]] && return 0; done; return 1; }
+is_pending() { local c; for c in "${PENDING[@]:-}"; do [[ "$c" == "$1" ]] && return 0; done; return 1; }
 
 CASES=$(cd "$REPO/examples/client" && "$REPO/server/.venv/bin/python" - <<'PY'
 from use_cases import CASES

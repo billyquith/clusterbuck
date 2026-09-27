@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .config import WorkerConfig, model_server_api_key
+from .failure import JobFailure
 from .models import Job
 from .naming import artifact_aliases
 
@@ -119,7 +120,8 @@ def _refuse_substituted_model(requested: str, body: Any) -> None:
         return
     if artifact_aliases(served) & artifact_aliases(requested):
         return
-    raise RuntimeError(
+    raise JobFailure(
+        "model_substituted",
         f"model server answered with {served!r} but the job pinned {requested!r}. "
         f"Refusing a result measured against, or attributed to, the wrong model."
     )

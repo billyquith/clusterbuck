@@ -22,6 +22,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError, ResponseError
 
 from .config import WorkerConfig
+from .failure import JobFailure, code_for
 from .model_client import ModelClient
 from .models import Job, Result
 from .naming import artifact_aliases
@@ -521,7 +522,7 @@ class WorkLoop:
         try:
             refusal = self._refuse_reason(job)
             if refusal is not None:
-                raise RuntimeError(refusal)
+                raise JobFailure("artifact_not_installed", refusal)
             completion, usage = await self._complete(job)
             elapsed = time.monotonic() - t0
             solo = solo_at_start and len(self._running) <= 1
@@ -564,7 +565,8 @@ class WorkLoop:
         except Exception as e:
             result = Result(job_id=job.id, status="failed", worker=self._cfg.worker_id,
                             started_at=started_at, finished_at=_now_iso(),
-                            error=str(e) or e.__class__.__name__)
+                            error=str(e) or e.__class__.__name__,
+                            error_code=code_for(e))
             self._log(f"fail  {job.id} [{capability}]: {e}")
 
         # Result first, ack second. Acking first would let a crash in between drop the job

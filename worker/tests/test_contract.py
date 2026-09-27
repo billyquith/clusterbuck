@@ -90,6 +90,26 @@ def test_failed_result_conforms_and_carries_no_completion():
     assert "completion" not in wire and "usage" not in wire
 
 
+def test_a_classified_failure_conforms():
+    wire = Result(job_id="job_1", status="failed", worker="node-a",
+                  started_at="2026-07-28T10:00:00Z", finished_at="2026-07-28T10:00:01Z",
+                  error="All connection attempts failed",
+                  error_code="model_server_unreachable").to_wire()
+    _assert_valid("result", wire)
+    assert "error_code" not in Result(
+        job_id="j", status="done", worker="w", started_at="t", finished_at="t",
+        completion={}).to_wire(), "success carries no code"
+
+
+def test_the_worker_emits_only_job_plane_codes_the_contract_defines():
+    """failure.CODES is a copy — the zipapp does not ship contract/ — so check it."""
+    from cbk_worker.failure import CODES
+
+    table = json.loads((CONTRACT / "error-codes.json").read_text())["codes"]
+    job_plane = {code for code, spec in table.items() if "job" in spec["planes"]}
+    assert CODES <= job_plane, sorted(CODES - job_plane)
+
+
 def test_enroll_request_conforms():
     wire = EnrollRequest(
         join_token="jt_abc", hostname="node-x", os="linux", arch="arm64",
