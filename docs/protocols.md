@@ -76,6 +76,12 @@ nothing will ever serve: `task_class`/`min_ability` when no artifact clears the 
 typo'd capability would otherwise sit on a stream no worker consumes, with no error and no
 expiry short of `deadline`.
 
+Every refusal here is a `422`, told apart by its `error.code` (§1c): `ability_unsatisfied`,
+`requirements_unsatisfied`, `capability_not_found`, `cloud_not_permitted` (the job's
+privacy or urgency forbids the named cloud tier; `reason` says which) and
+`cloud_budget_exhausted`. The status is deliberately the same for all of them — the code
+is what names the fix.
+
 Speed is never a reason to refuse. It **orders** the tiers that clear the bar — local
 first, then the soonest answer, then the cheapest (design.md §4) — but a job is never
 rejected, and a node never turns one down, for being slow. A tier whose nodes have measured
@@ -175,12 +181,34 @@ GET /jobs/{id}
  "expires_at": "…" | null, // effective give-up time; NULL = nothing ever gives up
  "queue_position": 0 | null, // unclaimed jobs ahead of you; null unless queued
  "result": { … OpenAI-style completion … } | null,
- "error": null, "attempts": 0, "worker": "<opaque-node-id>" | null,
+ "error": null, "error_code": null, // why it did not complete — see below
+ "attempts": 0, "worker": "<opaque-node-id>" | null,
  "submitter": { "app","instance","request_id","submitted_at",
  "observed_ip" } | null } // provenance as recorded; null if none
 ```
 
 The client never learns which machine ran the job beyond an opaque id (diagnostics only).
+
+**Why a job did not complete: `error_code`.** `error` is free text for a person;
+`error_code` is the stable code a client branches on (§1c). It is set on every terminal
+status but `done`:
+
+| `error_code` | Status | Meaning | What a client does |
+|---|---|---|---|
+| `job_expired` | expired | Its `deadline`, or the maximum queue age, passed unserved. | Report it; resubmit (fresh key) only if still wanted. |
+| `job_cancelled` | cancelled | Withdrawn by `DELETE`. | Nothing. |
+| `job_orphaned` | failed | Its queue entry is gone and cannot be rebuilt. | Resubmit under a **fresh** key. |
+| `job_abandoned` | failed | Workers kept dying on it until the reaper gave up. | Resubmit (fresh key), perhaps later. |
+| `capability_misconfigured` | failed | A provider account with no usable key. | Operator fix. |
+| `model_server_*`, `model_request_rejected` | failed | The executor's model server failed, as on the sync plane. | Per `retryable`. |
+| `worker_failed` | failed | Failed without a classified cause — an older worker, or an unexpected error. | Treat as not retryable. |
+
+A resubmit always takes a **fresh** idempotency key: a key has no TTL, so the old one
+returns the old, terminal job forever. The same key is only for a submit whose response
+was lost. Like `result`, a `failed` job's `error_code` is `null` once its result has
+passed `CBK_RESULT_TTL_S` — persist both on first sight. A `null` on `expired` or
+`cancelled` never happens: those are the coordinator's own decisions and are derived from
+the status.
 
 **Reading the wait state.** Four fields are easy to misread, so each is stated exactly:
 
@@ -335,7 +363,8 @@ even though adding a model would fix it.
 error), so a client written before the envelope keeps working. New clients should not read
 it.
 
-What the coordinator raises today:
+What the coordinator raises on HTTP (a job's terminal codes are in §1b, *Why a job did
+not complete*):
 
 | Code | Status | Retryable | When |
 |---|---|---|---|
@@ -346,10 +375,20 @@ What the coordinator raises today:
 | `capability_not_found` | 404 (sync) | no | The alias is not in the registry — a typo, not an outage. |
 | `capability_misconfigured` | 503 | no | The alias is registered but cannot be served, e.g. a provider account whose key is unset. An operator fix. |
 | `reservation_invalid` | 400 | no | The named reservation is unknown or unconfirmed. |
+| `capability_not_found` | 422 (submit) | no | `POST /jobs` named a capability that is not registered. |
+| `ability_unsatisfied` | 422 | no | Nothing clears `min_ability` for the task class. A better model, or a lower bar. |
+| `requirements_unsatisfied` | 422 | no | Nothing declares what `requires` asks for — usually one `POST /catalog` away. |
+| `cloud_not_permitted` | 422 | no | The named cloud tier is forbidden by the job's own privacy or urgency (`reason`). |
+| `cloud_budget_exhausted` | 422 | no | The named cloud tier is over budget. |
 | `model_server_unreachable` | 502 | yes | The model server could not be connected to. |
 | `model_server_timeout` | 504 | yes | It did not answer in time. |
 | `model_server_error` | 502 | yes | It answered with a server error or a malformed response. |
 | `model_request_rejected` | 400 | no | It refused the request itself, e.g. the prompt exceeds its context window. |
+
+On `model_server_unreachable` and `model_server_timeout`, `use_async: true` says the async
+plane could still serve the capability: a worker is consuming its queue — a worker can
+reach its own model server when the coordinator cannot — or a registered node serving it
+can be woken. Absent or false, a `POST /jobs` would be waiting on nothing in particular.
 
 `model_server_*` is decided from the failure's **type**, never its text — and not from the
 outermost type alone, because LiteLLM reports a refused connection as an
@@ -440,7 +479,10 @@ semantics natively.
  (`CBK_RESULT_TTL_S`). Authoritative schema:
  [`contract/result.schema.json`](../contract/result.schema.json) — it *requires*
  `{job_id, status, worker, completed_at}` and nests the OpenAI-shaped body under
- **`completion`**, with optional `usage`. `status` is `done | failed | expired`.
+ **`completion`**, with optional `usage`. `status` is `done | failed | expired`. A
+ non-`done` result carries `error` (text) and, from any writer that knows it, `error_code`
+ — a job-plane code from [`contract/error-codes.json`](../contract/error-codes.json),
+ which the schema enforces.
 - **Idempotency: FIRST WRITER WINS.** Delivery is at-least-once, so a job may legitimately
  run twice — and the two copies can overlap by hours, because a node that sleeps
  mid-inference is not dead: the reaper hands the work on, and the sleeper still finishes
@@ -694,7 +736,7 @@ the operator shared secret except where noted.
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Liveness. **Unauthenticated** (probe). |
-| `GET /fleet` | The static registry as loaded from `fleet.yaml` (§5). |
+| `GET /fleet` | The registry as loaded from `fleet.yaml` (§5), plus two things per capability that a sync client needs to choose an alias: `features` — what its model is declared able to do, from the same lookup `requires` is filtered against (§1b), `null` = undeclared — and `health` — `{state: ready \| degraded \| unreachable \| unknown, checked_at, last_ok_at, last_error}`, the coordinator's own probe of `GET {model_server}/models` every `CBK_MODEL_PROBE_S`. `health` is advisory: the sync plane never refuses on it. A provider account is not probed and reads `unknown`. |
 | `GET /queues` | Per-capability **backlog** (queued, never delivered — the real backlog), `pending` (claimed-unacked, i.e. in flight), `depth` (`XLEN`: retained history incl. acked, bounded by `CBK_STREAM_MAXLEN`), live worker `consumers`, and `executors` (live coordinator-side cloud executors). A client does not need this endpoint to know its own place in line — `queue_position` is on the job body (§1b) — which matters because this one sits behind the operator secret. |
 | `GET /nodes` | Enrolled nodes: profile, mode, probed hardware, installed/loaded models, last heartbeat. Never exposes `node_key`. |
 | `POST /nodes/tokens` | Mint a one-time join token for §6 enrollment. |

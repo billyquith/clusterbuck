@@ -110,6 +110,10 @@ class Settings:
     wake_cooldown_s: float = float(os.environ.get("CBK_WAKE_COOLDOWN_S", "60"))
     # How often the escalation engine scans for due waitable jobs.
     escalation_interval_s: float = float(os.environ.get("CBK_ESCALATION_INTERVAL_S", "10"))
+    # How often the coordinator probes each capability's model server for `/fleet`'s
+    # `health` (model_health.py). It is the sync path's own reachability, which no
+    # heartbeat can report. Rounded to whole coordinator ticks, and never faster than one.
+    model_probe_s: float = float(os.environ.get("CBK_MODEL_PROBE_S", "30"))
     wol_broadcast: str = os.environ.get("CBK_WOL_BROADCAST", "255.255.255.255")
     wol_port: int = int(os.environ.get("CBK_WOL_PORT", "9"))
     # Reservations: how long before a window opens to wake and pre-load (ADR 17).

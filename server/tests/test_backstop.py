@@ -71,6 +71,7 @@ async def test_a_job_that_was_never_enqueued_is_failed(store, queue):
     assert result["status"] == "failed"
     assert result["worker"] == COORDINATOR
     assert "never enqueued" in result["error"]
+    assert result["error_code"] == "job_orphaned"
 
 
 async def test_an_orphan_is_answered_not_resubmitted(store, queue):
@@ -145,6 +146,7 @@ async def test_max_queue_age_expires_an_unclaimed_job_when_configured(store, que
     assert store.get("job_aged").status == "expired"
     result = await queue.read_result("res_aged")
     assert result["status"] == "expired" and "maximum queue age" in result["error"]
+    assert result["error_code"] == "job_expired"
 
 
 async def test_the_entry_is_withdrawn_so_it_cannot_run_after_being_failed(

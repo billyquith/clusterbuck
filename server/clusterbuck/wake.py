@@ -189,6 +189,16 @@ class WakeCoordinator:
                 return True
         return False
 
+    def wakeable_nodes(self, capability: str) -> list:
+        """Registered nodes serving this capability that a magic packet could reach.
+
+        A node reachable only over a tunnel has no MAC to give, so it serves when it is up
+        and cannot be woken when it is not.
+        """
+        if self._fleet is None:
+            return []
+        return [n for n in self._fleet.nodes_for(capability) if n.mac]
+
     async def maybe_wake(self, capability: str, *, reason: str) -> list[str]:
         """Wake capable sleeping nodes for a capability. Returns the node ids woken."""
         if self._fleet is None:
@@ -202,9 +212,7 @@ class WakeCoordinator:
             return []  # coalesce: already woke this capability recently
 
         woken: list[str] = []
-        for node in self._fleet.nodes_for(capability):
-            if not node.mac:
-                continue
+        for node in self.wakeable_nodes(capability):
             try:
                 self._send(node.mac, broadcast=self._broadcast, port=self._port)
                 woken.append(node.id)

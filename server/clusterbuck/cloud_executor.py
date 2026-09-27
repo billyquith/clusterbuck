@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 
 import litellm
 
+from .errors import classify_upstream
 from .fleet import Fleet, resolve_api_key
 from .models import JobRecord
 from .queue import TIER_ORDER, Queue
@@ -82,6 +83,11 @@ def provider_of(model: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+
+class _MissingKey(RuntimeError):
+    """The account has no usable key: an operator fix, not a provider failure to retry."""
 
 
 class CloudExecutor:
@@ -152,7 +158,7 @@ class CloudExecutor:
         try:
             api_key = resolve_api_key(spec)
             if not api_key:
-                raise RuntimeError(
+                raise _MissingKey(
                     f"no API key configured for {capability!r} "
                     f"(set {spec.api_key_env or '?'})"
                 )
@@ -182,6 +188,10 @@ class CloudExecutor:
                 "started_at": started_at, "finished_at": _now_iso(),
                 "completed_at": started_at,  # deprecated alias, see result.schema.json
                 "error": str(e) or e.__class__.__name__,
+                # The provider is this executor's model server, so the same
+                # classification as the sync plane applies.
+                "error_code": ("capability_misconfigured" if isinstance(e, _MissingKey)
+                               else classify_upstream(e)),
             }
             self._log(f"cloud fail {job.id} [{capability}]: {e}")
 

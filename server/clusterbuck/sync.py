@@ -143,8 +143,33 @@ async def chat_completions(request: Request) -> dict:
         # The upstream text is kept in the message for a person to read; the code is what
         # a client acts on, so the message can change without breaking anyone.
         raise CbkError(code, f"sync completion failed: {e}", status,
-                       capability=model, model=spec.model) from e
+                       capability=model, model=spec.model,
+                       use_async=await _async_could_serve(request, model, code)) from e
     return resp.model_dump()
+
+
+async def _async_could_serve(request: Request, capability: str, code: str) -> bool | None:
+    """On a sync failure the server may be down, but is the capability?
+
+    Only for "the server is not there" failures: a server that answered with an error or
+    refused the request will answer the async plane the same way. It is worth saying when
+    something is consuming the capability's queue — the case where a worker reaches its
+    own model server and the coordinator cannot — or when a node could be woken to. A
+    client then knows a `POST /jobs` is not the same dead end. None when unknowable.
+    """
+    if code not in ("model_server_unreachable", "model_server_timeout"):
+        return None
+    wake = getattr(request.app.state, "wake", None)
+    if wake is None:
+        return None
+    if wake.wakeable_nodes(capability):
+        return True
+    try:
+        return await wake.has_live_consumer(capability)
+    except Exception:  # Redis down: the refusal must still go out
+        _log.warning("could not read %s's consumers for use_async", capability,
+                     exc_info=True)
+        return None
 
 
 @sync_routes.get("/v1/models")

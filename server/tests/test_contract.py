@@ -190,7 +190,19 @@ def test_coordinator_written_result_conforms_without_inference_timestamps(contra
         "job_id": "job_1", "status": "failed", "worker": "cbk-reaper",
         "completed_at": "2026-09-02T00:00:00Z",
         "error": "abandoned by its worker and retried 3 times (max_attempts=3)",
+        "error_code": "job_abandoned",
     })
+
+
+def test_error_code_is_limited_to_the_job_plane(contract_dir):
+    """A submit-time code has no business in a result, and a made-up one is refused."""
+    v = _validator(contract_dir, "result.schema.json")
+    base = {"job_id": "j", "status": "failed", "worker": "w",
+            "completed_at": "2026-09-02T00:00:00Z", "error": "x"}
+    v.validate({**base, "error_code": "model_server_unreachable"})
+    v.validate({**base, "error_code": None})
+    for bad in ("ability_unsatisfied", "server_down"):
+        assert list(v.iter_errors({**base, "error_code": bad})), bad
 
 
 def test_an_executor_result_carries_both_inference_timestamps(contract_dir):

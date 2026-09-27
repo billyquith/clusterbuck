@@ -42,6 +42,7 @@ from .evaluation import (
 )
 from .fleet import load_fleet, unservable_capabilities
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
+from .model_health import ModelHealth
 from .models import (
     RESULT_STATUSES,
     TERMINAL_STATUSES,
@@ -58,7 +59,7 @@ from .models import (
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
 from .queue import Queue, stream_key, tier_for, tier_of
 from .reservations import admit, iso
-from .routing import MissingCapability, NoCapableArtifact, resolve
+from .routing import RoutingRefusal, declared_features, resolve
 from .signing import build_manifest, load_private_pem, public_pem, sign_bootstrap
 from .store import Store
 from .sync import build_router, sync_routes
@@ -302,6 +303,10 @@ def create_app(
             silent_s=settings.node_silent_s,
         )
 
+        # The sync path's reachability, measured from here (model_health.py). Created even
+        # without the scheduler, so /fleet always has something to report — `unknown`.
+        app.state.model_health = ModelHealth(app.state.fleet)
+
         # Escalation engine: background scan promoting due waitable jobs.
         stop = asyncio.Event()
         task: asyncio.Task | None = None
@@ -310,6 +315,9 @@ def create_app(
                 coordinator_loop(
                     app.state.store, app.state.queue, app.state.wake, app.state.fleet,
                     interval_s=settings.escalation_interval_s, stop=stop,
+                    model_health=app.state.model_health,
+                    probe_every=max(1, round(
+                        settings.model_probe_s / settings.escalation_interval_s)),
                 )
             )
 
@@ -404,11 +412,24 @@ def create_app(
         fleet = app.state.fleet
         if fleet is None:
             return {"capabilities": {}, "nodes": []}
+        catalog = {c.artifact: c for c in app.state.store.list_catalog()}
         return {
             "capabilities": {
                 name: {"queue": stream_key(name), "model": c.model,
                        "model_server": c.model_server,
-                       "cloud": c.cloud, "description": c.description}
+                       "cloud": c.cloud, "description": c.description,
+                       # What the model is DECLARED able to do — the facts `requires`
+                       # filters on for a job. The sync plane applies no `requires`, so
+                       # a sync client choosing an alias for structured output has to be
+                       # able to read them; joining `model` to /catalog itself would mean
+                       # reproducing the alias matching and the catalog-then-fleet.yaml
+                       # precedence that routing uses. null = not declared, which
+                       # routing reads as "no".
+                       "features": declared_features(c.model, c, catalog),
+                       # Whether the coordinator can reach the model server right now,
+                       # and when it last checked (model_health.py). Advisory: sync
+                       # never refuses on it.
+                       "health": app.state.model_health.view(name)}
                 for name, c in fleet.capabilities.items()
             },
             "nodes": [
@@ -566,13 +587,17 @@ def create_app(
                 cloud_budget_monthly=settings.cloud_budget_monthly,
                 cloud_budget_reserve_fraction=settings.cloud_budget_reserve_fraction,
             )
-        except (MissingCapability, NoCapableArtifact) as e:
+        except RoutingRefusal as e:
             # Explicit failure beats silently serving below the requested ability floor,
             # or on a model that cannot do the thing at all. Both are 422 — the request
             # is well-formed and unservable — but they are raised separately so the
             # message names the right fix: a missing DECLARATION is usually one
             # `POST /catalog` away, whereas a missing ability needs a better model.
-            raise HTTPException(status_code=422, detail=str(e)) from e
+            #
+            # The status stays 422 for every refusal here, as documented; the code is
+            # what tells them apart.
+            raise CbkError(e.code, str(e), 422, reason=e.reason,
+                           capability=body.capability) from e
         capability = selection.capability
         if selection.eta_s is not None:
             # Speed and idleness now decide between tiers that all clear the bar; without
@@ -813,6 +838,28 @@ def create_app(
         )
         return ahead
 
+    def _error_code(status: str, result: dict | None) -> str | None:
+        """Why a job did not complete, as a code a client can branch on (protocols §1c).
+
+        `error` stays the free-text string it always was, so no poller breaks; this sits
+        beside it. The code comes from the result when its writer set one. Otherwise it is
+        derived: the coordinator's own terminal states (a deadline expiry, a cancellation)
+        write no result at all, and a worker too old to classify its failure still failed.
+
+        A `failed` job whose result has passed CBK_RESULT_TTL_S answers null, like its
+        `result`: the reason lived in the blob. Keeping it in SQLite would need a column
+        for something a client must persist on first sight anyway.
+        """
+        if result is not None and result.get("error_code"):
+            return result["error_code"]
+        if status == "expired":
+            return "job_expired"
+        if status == "cancelled":
+            return "job_cancelled"
+        if status == "failed" and result is not None:
+            return "worker_failed"
+        return None
+
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str) -> dict:
         row = app.state.store.get(job_id)
@@ -840,6 +887,7 @@ def create_app(
                 "result": None,
                 "usage": None,
                 "error": None,
+                "error_code": _error_code(row.status, None),
                 "attempts": row.attempts,
                 # From the pending list, so a running job finally has an answer to "has
                 # anything picked this up" — the result blob cannot say until it is over.
@@ -863,6 +911,7 @@ def create_app(
             "result": result.get("completion"),
             "usage": result.get("usage"),
             "error": result.get("error"),
+            "error_code": _error_code(status, result),
             "attempts": row.attempts,
             "worker": result.get("worker") or row.claimed_by,
             "submitter": _submitter_view(row),

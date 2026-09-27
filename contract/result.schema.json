@@ -108,6 +108,28 @@
       ],
       "description": "Failure detail when status != done; null on success."
     },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "capability_misconfigured",
+        "model_server_unreachable",
+        "model_server_timeout",
+        "model_server_error",
+        "model_request_rejected",
+        "artifact_not_installed",
+        "model_substituted",
+        "job_expired",
+        "job_cancelled",
+        "job_orphaned",
+        "job_abandoned",
+        "worker_failed",
+        null
+      ],
+      "description": "Stable code for why the job did not complete (contract/error-codes.json, job plane). Clients branch on this, never on `error`. Absent from results written by workers that predate it."
+    },
     "usage": {
       "type": [
         "object",

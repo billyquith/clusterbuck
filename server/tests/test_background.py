@@ -197,3 +197,25 @@ def test_a_failing_wake_reconcile_does_not_cost_its_siblings_their_turn(calls, t
     assert seen["reaper_scan"] == 2, "the reaper must still run when the reconciler fails"
     assert seen["observe_tick"] == 2
     assert any("'wake-reconcile' failed" in m for m in tick_errors), tick_errors
+
+
+def test_the_model_probe_runs_at_once_then_on_its_cadence_and_is_isolated(calls, tick_errors):
+    """First tick too — `/fleet` saying `unknown` for a whole interval after every restart is
+    the gap the probe exists to close — and a failing probe costs the tick nothing else."""
+    for name in ("escalation_scan", "reservation_tick", "usage_scan", "observe_tick",
+                 "eval_tick", "reaper_scan", "backstop_scan", "wake_reconcile_scan"):
+        calls(name)
+    calls("scan_all", sync=True)
+    probes = {"n": 0}
+
+    class _Health:
+        async def probe_all(self):
+            probes["n"] += 1
+            raise RuntimeError("probe blew up")
+
+    _run(stop_after=6, planner_every=100, eval_every=100, reaper_every=100,
+         model_health=_Health(), probe_every=3)
+
+    assert probes["n"] == 3, "ticks 1, 3 and 6"
+    assert calls.seen["observe_tick"] == 6
+    assert any("'model-probe' failed" in m for m in tick_errors), tick_errors
