@@ -353,6 +353,16 @@ wherever the coordinator reads enrolled nodes — urgency tiering, for one. The 
 panel's worker count is a separate and stricter signal: live stream consumers,
 idle-filtered.
 
+**Model-server health is a measurement, and it is the coordinator's own.** `/fleet`
+reports, per capability, whether the coordinator can reach that capability's
+`model_server` right now (`model_health.py`, a `GET /models` every `CBK_MODEL_PROBE_S`).
+It is not derived from heartbeats and could not be: the sync plane calls the model server
+from the coordinator, with no worker in the path, so a heartbeat — which proves the worker
+can reach *its* server — says nothing about the sync path. A model server bound to its own
+loopback is the case that proved it: the node heartbeats, jobs complete, and every sync
+request fails. The probe is advisory by design; the sync plane still attempts every call,
+because a server that recovered since the last probe must not be refused for an interval.
+
 ### How much of a machine to take at once
 
 A worker ran **one job at a time**, and not per capability — strictly serial across every

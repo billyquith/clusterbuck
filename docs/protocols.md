@@ -385,6 +385,11 @@ not complete*):
 | `model_server_error` | 502 | yes | It answered with a server error or a malformed response. |
 | `model_request_rejected` | 400 | no | It refused the request itself, e.g. the prompt exceeds its context window. |
 
+On `model_server_unreachable` and `model_server_timeout`, `use_async: true` says the async
+plane could still serve the capability: a worker is consuming its queue — a worker can
+reach its own model server when the coordinator cannot — or a registered node serving it
+can be woken. Absent or false, a `POST /jobs` would be waiting on nothing in particular.
+
 `model_server_*` is decided from the failure's **type**, never its text — and not from the
 outermost type alone, because LiteLLM reports a refused connection as an
 `InternalServerError` wrapping the `ConnectError` that actually happened. Read naïvely,
@@ -731,7 +736,7 @@ the operator shared secret except where noted.
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Liveness. **Unauthenticated** (probe). |
-| `GET /fleet` | The static registry as loaded from `fleet.yaml` (§5). |
+| `GET /fleet` | The registry as loaded from `fleet.yaml` (§5), plus two things per capability that a sync client needs to choose an alias: `features` — what its model is declared able to do, from the same lookup `requires` is filtered against (§1b), `null` = undeclared — and `health` — `{state: ready \| degraded \| unreachable \| unknown, checked_at, last_ok_at, last_error}`, the coordinator's own probe of `GET {model_server}/models` every `CBK_MODEL_PROBE_S`. `health` is advisory: the sync plane never refuses on it. A provider account is not probed and reads `unknown`. |
 | `GET /queues` | Per-capability **backlog** (queued, never delivered — the real backlog), `pending` (claimed-unacked, i.e. in flight), `depth` (`XLEN`: retained history incl. acked, bounded by `CBK_STREAM_MAXLEN`), live worker `consumers`, and `executors` (live coordinator-side cloud executors). A client does not need this endpoint to know its own place in line — `queue_position` is on the job body (§1b) — which matters because this one sits behind the operator secret. |
 | `GET /nodes` | Enrolled nodes: profile, mode, probed hardware, installed/loaded models, last heartbeat. Never exposes `node_key`. |
 | `POST /nodes/tokens` | Mint a one-time join token for §6 enrollment. |

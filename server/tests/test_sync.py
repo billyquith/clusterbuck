@@ -128,6 +128,27 @@ def test_a_dead_model_server_reads_as_unreachable_not_as_an_error(tmp_path):
     assert (err["capability"], err["model"]) == ("gone", "fake")
 
 
+def test_a_dead_server_says_whether_async_is_worth_trying(tmp_path):
+    """A node that can be woken makes `POST /jobs` a real alternative; no node, no hint."""
+    dead = f"http://127.0.0.1:{_free_port()}/v1"
+    app = _app_with(tmp_path, f"  gone:\n    queue: 'q:gone'\n    model_server: '{dead}'\n"
+                              f"    model: 'fake'\n"
+                              f"  lone:\n    queue: 'q:lone'\n    model_server: '{dead}'\n"
+                              f"    model: 'fake'\n")
+    app_text = (tmp_path / "fleet.yaml").read_text().replace(
+        "nodes: []", "nodes:\n  - {id: sleeper, mac: 'aa:bb:cc:dd:ee:ff', "
+                     "capabilities: [gone]}")
+    (tmp_path / "fleet.yaml").write_text(app_text)
+    app = create_app(redis_url="redis://localhost:6379/15", db_path=str(tmp_path / "u.db"),
+                     fleet_path=str(tmp_path / "fleet.yaml"), start_scheduler=False)
+    msg = [{"role": "user", "content": "x"}]
+    with TestClient(app) as c:
+        woken = c.post("/v1/chat/completions", json={"model": "gone", "messages": msg})
+        alone = c.post("/v1/chat/completions", json={"model": "lone", "messages": msg})
+    assert woken.json()["error"]["use_async"] is True
+    assert alone.json()["error"].get("use_async") is not True
+
+
 def test_a_failing_model_server_reads_as_an_error(tmp_path):
     port = _free_port()
     proc = subprocess.Popen([sys.executable, str(FAKE_SERVER), "--port", str(port),

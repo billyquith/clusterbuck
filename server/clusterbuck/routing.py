@@ -222,6 +222,11 @@ def _declared(artifact: str, spec, catalog: dict) -> dict:
     return out
 
 
+# The public name for what `/fleet` shows: the same lookup the filter runs, so what a
+# client reads and what routing enforces cannot disagree.
+declared_features = _declared
+
+
 def _unmet(asked: dict, declared: dict) -> str | None:
     """Which requirement this artifact fails, or None if it meets them all.
 

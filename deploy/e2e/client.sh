@@ -30,7 +30,6 @@ REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}"
 LIVE=11471 BROKEN=11472 DEAD=11473   # nothing listens on $DEAD
 
 PENDING=(
-  sync-structured discovery-health
   worker-server-dead worker-server-error
 )
 
@@ -50,11 +49,13 @@ capabilities:
   idle-extract:   {queue: "q:idle-extract",   model: fake, model_server: "http://127.0.0.1:$LIVE/v1"}
 YAML
 
-# Fast ticks and a short orphan grace, so expiry and the orphan sweep answer within a
-# case's patience. Grace must exceed the reaper's min-idle (config.validate()).
+# Fast ticks, a short orphan grace and a quick model probe, so expiry, the orphan sweep
+# and /fleet health all answer within a case's patience. Grace must exceed the reaper's
+# min-idle (config.validate()).
 ( cd "$REPO/server" && exec env CBK_REDIS_URL="$REDIS_URL" CBK_DB_PATH="$WORKDIR/cbk.db" \
   CBK_PORT="$PORT" CBK_FLEET_PATH="$WORKDIR/fleet.yaml" CBK_API_KEY="$KEY" \
   CBK_ESCALATION_INTERVAL_S=0.5 CBK_ORPHAN_GRACE_S=3 CBK_REAPER_MIN_IDLE_MS=2000 \
+  CBK_MODEL_PROBE_S=1 \
   .venv/bin/python -m clusterbuck >"$WORKDIR/server.log" 2>&1 ) & PIDS+=($!)
 wait_for "$URL/healthz" "server"
 

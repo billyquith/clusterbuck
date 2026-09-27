@@ -42,6 +42,7 @@ from .evaluation import (
 )
 from .fleet import load_fleet, unservable_capabilities
 from .ids import new_ids, new_join_token, new_node_id, new_node_key, new_reservation_id
+from .model_health import ModelHealth
 from .models import (
     RESULT_STATUSES,
     TERMINAL_STATUSES,
@@ -58,7 +59,7 @@ from .models import (
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
 from .queue import Queue, stream_key, tier_for, tier_of
 from .reservations import admit, iso
-from .routing import RoutingRefusal, resolve
+from .routing import RoutingRefusal, declared_features, resolve
 from .signing import build_manifest, load_private_pem, public_pem, sign_bootstrap
 from .store import Store
 from .sync import build_router, sync_routes
@@ -302,6 +303,10 @@ def create_app(
             silent_s=settings.node_silent_s,
         )
 
+        # The sync path's reachability, measured from here (model_health.py). Created even
+        # without the scheduler, so /fleet always has something to report — `unknown`.
+        app.state.model_health = ModelHealth(app.state.fleet)
+
         # Escalation engine: background scan promoting due waitable jobs.
         stop = asyncio.Event()
         task: asyncio.Task | None = None
@@ -310,6 +315,9 @@ def create_app(
                 coordinator_loop(
                     app.state.store, app.state.queue, app.state.wake, app.state.fleet,
                     interval_s=settings.escalation_interval_s, stop=stop,
+                    model_health=app.state.model_health,
+                    probe_every=max(1, round(
+                        settings.model_probe_s / settings.escalation_interval_s)),
                 )
             )
 
@@ -404,11 +412,24 @@ def create_app(
         fleet = app.state.fleet
         if fleet is None:
             return {"capabilities": {}, "nodes": []}
+        catalog = {c.artifact: c for c in app.state.store.list_catalog()}
         return {
             "capabilities": {
                 name: {"queue": stream_key(name), "model": c.model,
                        "model_server": c.model_server,
-                       "cloud": c.cloud, "description": c.description}
+                       "cloud": c.cloud, "description": c.description,
+                       # What the model is DECLARED able to do — the facts `requires`
+                       # filters on for a job. The sync plane applies no `requires`, so
+                       # a sync client choosing an alias for structured output has to be
+                       # able to read them; joining `model` to /catalog itself would mean
+                       # reproducing the alias matching and the catalog-then-fleet.yaml
+                       # precedence that routing uses. null = not declared, which
+                       # routing reads as "no".
+                       "features": declared_features(c.model, c, catalog),
+                       # Whether the coordinator can reach the model server right now,
+                       # and when it last checked (model_health.py). Advisory: sync
+                       # never refuses on it.
+                       "health": app.state.model_health.view(name)}
                 for name, c in fleet.capabilities.items()
             },
             "nodes": [

@@ -36,6 +36,7 @@ from .config import settings
 from .escalation import escalation_scan
 from .eval_runner import eval_tick
 from .fleet import Fleet
+from .model_health import ModelHealth
 from .observe import observe_tick
 from .queue import Queue
 from .reaper import reaper_scan
@@ -72,6 +73,8 @@ async def coordinator_loop(
     eval_every: int = 5,
     reaper_every: int = 6,
     wake_every: int = 6,
+    model_health: ModelHealth | None = None,
+    probe_every: int = 3,
 ) -> None:
     """Tick escalation + reservations + usage + observation + evals + the planner."""
     ticks = 0
@@ -122,6 +125,12 @@ async def coordinator_loop(
         if ticks % planner_every == 0:
             with _isolated("planner"):
                 scan_all(store, now=_now())
+
+        if model_health is not None and (ticks == 1 or ticks % probe_every == 0):
+            # On the first tick too: `/fleet` answering `unknown` for a whole interval
+            # after every restart is exactly the gap this measurement exists to close.
+            with _isolated("model-probe"):
+                await model_health.probe_all()
 
         # Purely observational — nothing routes on it — so it runs last.
         with _isolated("observe"):
