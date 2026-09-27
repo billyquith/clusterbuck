@@ -1051,6 +1051,25 @@ Short list, because reversing one of these quietly breaks something.
   hardest-working node as gone. Both mistakes are silent, and both cost exactly what a
   cold-by-default fleet is trying to save.
 - **Adopt LiteLLM.** The sync plane is a solved problem; rebuilding it buys nothing.
+- **Clients branch on `code`, never on text.** Every client-facing error is OpenAI's
+  envelope with a code from `contract/error-codes.json`, and every job that did not
+  complete carries `error_code`. Before this, a typo'd alias, a dead model server and a
+  worker failure were all prose, and a client could not tell "your request is wrong" from
+  "we are down". Two things keep it true. Codes are decided by exception *type*, and not
+  the outermost one alone: LiteLLM reports a refused connection as an
+  `InternalServerError`, so reading only the outer class calls every dead server a broken
+  one. And `error` stays the string it always was, with `error_code` beside it — turning
+  `error` into an object would break every existing poller for a tidier shape.
+- **The sync plane does not retry for the client, or refuse on a probe.** A failed call
+  answers at once with `retryable`, because the client knows whether a person is waiting
+  and LiteLLM's silent retries tripled the time to a useless answer. `/fleet`'s `health`
+  is the coordinator's own measurement and only ever advisory: gating on it would turn
+  away a server that recovered since the last probe.
+- **The reference client is an acceptance test.** `deploy/e2e/client.sh` runs
+  `examples/client/use_cases.py` against real processes; a case the coordinator does not
+  yet meet is PENDING and must fail on its expectation, and one that passes early fails
+  the run. A change a client needs is proven from the client's side, which is how the
+  LiteLLM misclassification above was found — the plan had it wrong.
 - **Address by capability or need, never by machine.** Adding or removing hardware must
   not touch a client.
 - **Domain-agnostic, always.** Clients depend on clusterbuck; clusterbuck never names a
@@ -1062,9 +1081,9 @@ Short list, because reversing one of these quietly breaks something.
 - **What a model CAN DO is a filter, not a score.** Context window, tools, schema output
   and vision are yes/no facts no 1–10 judgement can express, so they gate candidates
   *before* ability is compared — the other order lets an unrelated number decide a hard
-  requirement. Undeclared reads as "no", which is the opposite of the speed rule and
-  deliberately so: an unmeasured speed self-corrects at the node, an unchecked feature
-  has no backstop. This was specified, migrated and rendered for a long time while
+  requirement. Undeclared reads as "no", which is the opposite of how speed is treated
+  and deliberately so: an unmeasured speed costs at most a slower answer and corrects
+  itself as measurements arrive, while an unchecked feature has no backstop. This was specified, migrated and rendered for a long time while
   `routing.py` referenced none of it; the storage half of a feature is not the feature.
 - **Measure, never assume.** A fresh install or a changed digest inherits no score. Seeds
   are placeholders and are labelled as such.

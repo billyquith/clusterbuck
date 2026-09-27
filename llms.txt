@@ -9,7 +9,8 @@
 - [README](README.md): deployment overview, the two execution paths, and reachability rules.
 - [Protocol contract](docs/protocols.md): authoritative prose contract for every request, response, state, and retry rule.
 - [System design](docs/design.md): routing, privacy, capability scoring, waking, and cloud-fallback design.
-- [JSON schemas](contract/): machine-readable contracts for async jobs and worker results.
+- [JSON schemas](contract/): machine-readable contracts for async jobs, worker results and errors.
+- [Reference client](examples/client/cbk_client.py): the durable-job lifecycle written out once — idempotent submit, persist, poll, fresh-key rerun, cancel — run by the end-to-end suite.
 
 ## Connection and authentication
 
@@ -25,6 +26,13 @@ or `Authorization: Bearer <key>`. Treat this as an operator credential: it is
 authentication, not per-client authorisation. Do not put it in a URL.
 
 ## Choose an execution path
+
+The two paths are addressed differently. Sync **targets a ready capability**: you name an
+alias, and it binds that deployment as it stands now. Async **declares an intended
+outcome**: you describe the need (`task_class`, `min_ability`, `requires`) and Clusterbuck
+chooses, waits and wakes. Pick the path by whether a person is waiting, not by what the
+work is. Keep product context — why you are asking, how the answer should be framed — in
+`messages`; Clusterbuck routes on intent and requirements and never reads it.
 
 Use the synchronous path only when a person is waiting and a reachable model server
 is expected to answer immediately. It is OpenAI Chat Completions compatible:
@@ -127,6 +135,10 @@ addressing forms:
   the submit fails with `422`, code `requirements_unsatisfied`, naming the model and the
   missing feature. That is a different fix from an ability miss (`ability_unsatisfied`):
   usually an operator catalog entry, not a better model.
+- `requires.tools` only selects a model declared able to emit tool calls; `params.tools`
+  is forwarded. A job is one completion: `tool_calls` come back in `result`, and nothing
+  resumes the job. Run the tool yourself and submit a new job carrying its result. A
+  tool-capable model is given no authority by Clusterbuck — you decide which calls to honour.
 - For structured output, set both `requires.json_schema: true` and
   `params.response_format` (e.g. `{"type": "json_object"}`). Without the requirement,
   `response_format` is dropped on the async path, because routing has not checked the

@@ -13,7 +13,8 @@
 #   E2E_NAME=cloud
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
-# Provides: REPO WORKDIR PIDS  log fail pass  wait_for jqpy job_verdict redis_cli flush_redis
+# Provides: REPO WORKDIR PIDS  log fail pass  wait_for wait_port_free stop_pid jqpy job_verdict
+#           redis_cli flush_redis
 # and installs the EXIT trap that kills PIDS and removes WORKDIR.
 
 : "${E2E_NAME:?set E2E_NAME before sourcing lib.sh}"
@@ -34,6 +35,33 @@ wait_for() {
   local tries="${3:-50}"
   for _ in $(seq 1 "$tries"); do curl -fsS "$1" >/dev/null 2>&1 && return 0; sleep 0.2; done
   fail "$2 not ready"
+}
+
+# port, [tries] — wait until nothing is listening on 127.0.0.1:port, or FAIL.
+#
+# Call it before starting a server on a fixed port. `wait_for` only asks whether SOMETHING
+# answers on the port, so a server that lost the bind — to a previous run's coordinator
+# still shutting down, or to another session running the same script — exits quietly and
+# the whole test then runs against the stranger. version.sh failed that way at "expected
+# fitness ok with no policy": its checks were answered by a coordinator with a different
+# version policy. Refusing to start is the honest outcome, since nothing proven against
+# someone else's server is proven about ours.
+wait_port_free() {
+  local tries="${2:-50}"
+  for _ in $(seq 1 "$tries"); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || return 0
+    sleep 0.2
+  done
+  fail "port $1 is already in use — another e2e run, or a server that never stopped?"
+}
+
+# pid, [tries] — SIGTERM, wait until the process has actually gone, SIGKILL if it will not.
+# A fixed sleep after `kill` is a guess about shutdown time; this is not.
+stop_pid() {
+  local tries="${2:-50}"
+  kill "$1" 2>/dev/null || return 0
+  for _ in $(seq 1 "$tries"); do kill -0 "$1" 2>/dev/null || return 0; sleep 0.2; done
+  kill -9 "$1" 2>/dev/null || true
 }
 
 # Read JSON on stdin and print one expression off it, e.g. jqpy '["id"]'.

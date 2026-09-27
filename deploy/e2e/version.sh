@@ -32,6 +32,7 @@ print(n.get('$2') or '')"; }
 
 redis_cli -n 0 FLUSHDB >/dev/null
 # Discovery answers slowly on purpose: see stage 3.
+wait_port_free "$MODEL_PORT"
 python3 "$REPO/server/tools/fake_model_server.py" --port "$MODEL_PORT" \
   --discovery-delay-s 0.3 >/dev/null 2>&1 & PIDS+=($!)
 wait_for "http://127.0.0.1:$MODEL_PORT/healthz" "model server"
@@ -42,6 +43,7 @@ BUILT=$(cbk_worker --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 
 log "worker binary is version $BUILT"
 
 start_server(){   # $1 = extra env assignments
+  wait_port_free "$PORT"
   ( cd "$REPO/server" && exec env \
     CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" CBK_DB_PATH="$WORKDIR/cbk.db" CBK_PORT="$PORT" \
     CBK_FLEET_PATH="$REPO/server/fleet.yaml" CBK_WOL_BROADCAST=127.0.0.1 \
@@ -49,7 +51,7 @@ start_server(){   # $1 = extra env assignments
   SERVER_PID=$!; PIDS+=($SERVER_PID)
   wait_for "$URL/healthz" "server"
 }
-stop_server(){ kill "$SERVER_PID" 2>/dev/null || true; sleep 1; }
+stop_server(){ stop_pid "$SERVER_PID"; }
 
 # --- 1. no policy: the version is reported and recorded -----------------------------------
 start_server ""
@@ -73,7 +75,7 @@ done
 [[ "$V" == "$BUILT" ]] || fail "coordinator recorded version '$V', expected '$BUILT'"
 [[ "$(node_field "$NODE" fitness)" == "ok" ]] || fail "expected fitness ok with no policy"
 log "coordinator recorded agent_version=$V, fitness=ok ✓"
-kill "$WORKER_PID" 2>/dev/null || true; sleep 0.5; stop_server
+stop_pid "$WORKER_PID"; stop_server
 
 # --- 2. behind `current` ⇒ stale, still working -------------------------------------------
 start_server "CBK_WORKER_CURRENT_VERSION=99.0.0"
@@ -84,7 +86,7 @@ done
 [[ "$F" == "stale" ]] || fail "expected stale against current=99.0.0, got '$F'"
 grep -q "is behind" "$WORKDIR/worker.log" || fail "worker did not log the staleness warning"
 log "behind current ⇒ stale, and the worker says so ✓"
-kill "$WORKER_PID" 2>/dev/null || true; sleep 0.5; stop_server
+stop_pid "$WORKER_PID"; stop_server
 
 # --- 3. block-listed ⇒ quarantined, and it STOPS CLAIMING ---------------------------------
 start_server "CBK_WORKER_BLOCKED_VERSIONS=$BUILT"
@@ -108,8 +110,18 @@ JOB=$(curl -fsS -X POST "$URL/jobs" -H 'content-type: application/json' -d "{
   \"capability\": \"$CAP\", \"messages\": [{\"role\":\"user\",\"content\":\"should not run\"}],
   \"urgency\": \"necessary\"}" | jqpy '["id"]')
 sleep 3
-V=$(job_verdict "$URL" "$JOB")
-[[ "$V" == "queued" ]] || fail "quarantined worker still ran the job ($V)"
+# $1 = what our worker was doing when it should not have claimed.
+assert_still_queued(){
+  local V; V=$(job_verdict "$URL" "$JOB")
+  [[ "$V" == "queued" ]] && return 0
+  # Redis db 0 and the consumer group are shared by every e2e run on this machine, so a
+  # worker from ANOTHER run (another session, another checkout) can take this job. That is
+  # not the defect this stage tests for, and blaming our worker for it cost a diagnosis once.
+  [[ "$V" == *"$NODE"* ]] ||
+    fail "job claimed by a worker that is not this run's ($V; ours is $NODE) — another e2e run sharing Redis?"
+  fail "$1 ($V)"
+}
+assert_still_queued "quarantined worker still ran the job"
 log "job submitted while quarantined stayed queued — not claimed ✓"
 
 # ...and the same build RESTARTED, with that job already waiting for it. The verdict only
@@ -117,11 +129,10 @@ log "job submitted while quarantined stayed queued — not claimed ✓"
 # very first poll, while beat 1 was still held open by slow discovery — deterministically,
 # not by luck, because the job is queued before the process exists. An enrolled worker now
 # holds claims until its first verdict (CBK_VERDICT_WAIT_S, default 60s, well past the 3s).
-kill "$WORKER_PID" 2>/dev/null || true; sleep 0.5
+stop_pid "$WORKER_PID"
 run_worker
 sleep 3
-V=$(job_verdict "$URL" "$JOB")
-[[ "$V" == "queued" ]] || fail "restarted quarantined worker claimed before its first verdict ($V)"
+assert_still_queued "restarted quarantined worker claimed before its first verdict"
 grep -q "QUARANTINED" "$WORKDIR/worker.log" || fail "restarted worker never heard its verdict"
 log "restarted block-listed worker claimed nothing before or after its verdict ✓"
 
