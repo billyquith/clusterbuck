@@ -34,6 +34,13 @@ PENDING=()
 
 flush_redis
 
+# Every fixed port must be free BEFORE anything starts (lib.sh: wait_port_free). A server
+# that loses the bind exits quietly and `wait_for` is then answered by a stranger — and
+# $DEAD matters just as much: if anything listens there, the "dead model server" cases
+# are testing a live one. The capability names are unique to this script, so a leaked
+# consumer from another script on the shared Redis cannot drain these queues.
+for p in "$LIVE" "$BROKEN" "$DEAD" "$PORT"; do wait_port_free "$p"; done
+
 python3 "$REPO/server/tools/fake_model_server.py" --port "$LIVE" & PIDS+=($!)
 python3 "$REPO/server/tools/fake_model_server.py" --port "$BROKEN" --fail-chat 500 & PIDS+=($!)
 wait_for "http://127.0.0.1:$LIVE/healthz" "live model server"
