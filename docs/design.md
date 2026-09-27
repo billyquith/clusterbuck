@@ -1008,6 +1008,19 @@ Short list, because reversing one of these quietly breaks something.
   SIGKILLs a worker mid-generation and watches the job come back. Unit tests can only
   simulate an abandoned entry; nothing else in the suite ever leaves one behind, because
   every other script's jobs complete.
+- **An enrolled worker claims nothing until its build has been judged — or the wait
+  runs out.** The fitness verdict (ADR 27) only arrives on a heartbeat reply, so a worker
+  that started out claiming handed a block-listed build its whole first beat every time
+  it started: a restart with a job already queued took that job on the first poll. It
+  now holds until the first reply, whatever the reply says, and serves anyway after
+  `CBK_VERDICT_WAIT_S` (60s). The bound matters as much as the hold. Waiting with no
+  bound idles the node through a coordinator outage, which is precisely when the backlog
+  already in Redis is all there is to serve. The cost is small because new work arrives
+  *through* the coordinator, so while it is down only that backlog waits. The hold is its
+  own gate, not `paused`, because every beat rewrites `paused` from the ladder and the
+  last verdict, so beat 1 would clear the hold before its own reply had arrived.
+  Unenrolled workers have no heartbeat and never hold. `deploy/e2e/version.sh` stage 3
+  restarts a quarantined worker onto a queued job to prove it.
 - **An interrupted job is not a failed one.** Eviction leaves no result and no ack, so
   the job returns through the visibility timeout like any abandoned one. Answering it
   would hand a client a permanent error because somebody sat down at a laptop.

@@ -10,6 +10,7 @@
 #   2. a version behind `current` is `stale` — flagged, still working
 #   3. a version on the BLOCK-LIST is quarantined and STOPS CLAIMING JOBS
 #      (the block-list is the knob a floor cannot express: bugs are not monotonic)
+#      — including in the moments after it starts, before its first verdict arrives
 #   4. a quarantined worker is handed no model-management action
 set -euo pipefail
 
@@ -110,5 +111,18 @@ sleep 3
 V=$(job_verdict "$URL" "$JOB")
 [[ "$V" == "queued" ]] || fail "quarantined worker still ran the job ($V)"
 log "job submitted while quarantined stayed queued — not claimed ✓"
+
+# ...and the same build RESTARTED, with that job already waiting for it. The verdict only
+# arrives on a heartbeat reply, and a worker that started out claiming took this job on its
+# very first poll, while beat 1 was still held open by slow discovery — deterministically,
+# not by luck, because the job is queued before the process exists. An enrolled worker now
+# holds claims until its first verdict (CBK_VERDICT_WAIT_S, default 60s, well past the 3s).
+kill "$WORKER_PID" 2>/dev/null || true; sleep 0.5
+run_worker
+sleep 3
+V=$(job_verdict "$URL" "$JOB")
+[[ "$V" == "queued" ]] || fail "restarted quarantined worker claimed before its first verdict ($V)"
+grep -q "QUARANTINED" "$WORKDIR/worker.log" || fail "restarted worker never heard its verdict"
+log "restarted block-listed worker claimed nothing before or after its verdict ✓"
 
 printf '\033[32m[version] PASS — coordinator judges build fitness; unfit workers stand down\033[0m\n'

@@ -76,7 +76,13 @@ class WorkLoop:
         self._capabilities: tuple[str, ...] = tuple(cfg.capabilities)
         # Set by the heartbeat task when the owner is present or the coordinator quarantines
         # this build. In-flight jobs already claimed still finish; nothing new is claimed.
+        # Rewritten on every beat, which is why the start-up hold below is NOT this flag.
         self.paused = False
+        # Monotonic deadline of the start-up hold for the coordinator's first verdict, or
+        # None when not holding (`hold_for_verdict`). Kept apart from `paused` because
+        # every beat recomputes that from the ladder and the last verdict, and the first
+        # beat would clear a hold stored there before its own reply had arrived.
+        self._verdict_deadline: float | None = None
         # What the local model server actually has, refreshed by the heartbeat task from
         # the same inventory it reports. Empty means UNKNOWN (the server did not answer),
         # not empty — so a pin is only ever refused on positive evidence.
@@ -351,6 +357,32 @@ class WorkLoop:
             return ceiling
         return ceiling if self._mode == "away" else 1
 
+    def hold_for_verdict(self, timeout_s: float) -> None:
+        """Claim nothing until `verdict_heard`, or until `timeout_s` passes.
+
+        For an enrolled worker only, armed before the loop starts: the coordinator's fitness
+        verdict arrives on a heartbeat REPLY, so until the first one comes back this node
+        does not know whether its own build is block-listed (ADR 27). Bounded, so a
+        coordinator outage at start-up costs `timeout_s` of idleness rather than the node.
+        """
+        self._verdict_deadline = time.monotonic() + timeout_s
+        self._log(f"holding claims until the coordinator's first verdict "
+                  f"(at most {timeout_s:g}s)")
+
+    def verdict_heard(self) -> None:
+        """The first heartbeat reply is in; `paused` now carries its verdict."""
+        self._verdict_deadline = None
+
+    def _awaiting_verdict(self) -> bool:
+        if self._verdict_deadline is None:
+            return False
+        if time.monotonic() < self._verdict_deadline:
+            return True
+        self._verdict_deadline = None
+        self._log("no verdict from the coordinator in time — serving without one; "
+                  "the next heartbeat that gets through still applies it")
+        return False
+
     @property
     def free_slots(self) -> int:
         """How many more jobs this node may take right now."""
@@ -376,7 +408,7 @@ class WorkLoop:
         the one node that was awake. At `max_concurrent_jobs = 1` the behaviour is
         unchanged, because `run` waits for the slot before polling again.
         """
-        if self.paused or self.effective_limit <= 0:
+        if self.paused or self._awaiting_verdict() or self.effective_limit <= 0:
             return False
         did_work = False
         # One job per capability per pass, rather than draining a stream before looking at

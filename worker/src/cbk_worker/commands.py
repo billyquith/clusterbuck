@@ -256,6 +256,11 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 # plausible-looking wrong results is worse than an idle node.
                 quarantined = _apply_fitness(resp.fitness)
                 loop.paused = quarantined or effective == "paused"
+                # Any reply ends the start-up hold, whatever it says — fit, stale, quarantine,
+                # or no fitness at all from an older coordinator. Only AFTER `paused` holds
+                # the verdict, and with no await between the two: releasing first would let
+                # the work loop poll in the gap.
+                loop.verdict_heard()
 
                 # A signed update, if offered and this node opted in. Applying replaces the
                 # process image, so nothing after this runs on success.
@@ -329,6 +334,12 @@ async def run_work(args: argparse.Namespace) -> int:
                                flavour=inventory.flavour)
         applier = UpdateApplier(mgr_http, update_public_key_pem(), log=Out.info)
 
+        # An enrolled worker does not know whether the coordinator has block-listed this
+        # build until its first heartbeat is answered, so it claims nothing until then —
+        # armed before the work loop's task exists, so there is no first poll to race.
+        # Unenrolled workers have no heartbeat to wait for and never hold.
+        if state is not None and ladder is not None:
+            loop.hold_for_verdict(cfg.verdict_wait_s)
         tasks = [asyncio.create_task(loop.run(stop))]
         if state is not None and ladder is not None:
             tasks.append(asyncio.create_task(_heartbeat_loop(

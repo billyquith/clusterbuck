@@ -80,6 +80,18 @@ class WorkerConfig:
     # How long the owner must be stably away before the ladder climbs to the big models
     # (ADR 10). Cold loads are expensive, so this is damped by default.
     ladder_hysteresis_s: float = 120.0
+    # How long an ENROLLED worker holds off claiming at start-up while it waits for the
+    # coordinator's first fitness verdict (ADR 27). The verdict only arrives on a heartbeat
+    # reply, so without the hold a block-listed build claims from its queues for the whole
+    # first beat — inventory plus round trip — every time it starts.
+    #
+    # Bounded because the alternative is worse: a worker that waited for ever would sit
+    # idle through a coordinator outage, with a backlog in Redis it could have served.
+    # Past this, it serves without a verdict and takes the next one when it comes. Long
+    # enough to outlast a slow first beat (a model server slow to list its models, a
+    # coordinator still starting after the same power cut); short enough that a real outage
+    # costs a minute, not the backlog. Unenrolled workers have no heartbeat and never hold.
+    verdict_wait_s: float = 60.0
 
     @staticmethod
     def from_environment() -> WorkerConfig:
@@ -100,6 +112,7 @@ class WorkerConfig:
             max_concurrent_jobs=max(1, _int_env("CBK_MAX_CONCURRENT_JOBS", 1)),
             model_manager=os.environ.get("CBK_MODEL_MANAGER") or "auto",
             ladder_hysteresis_s=_float_env("CBK_LADDER_HYSTERESIS_S", 120.0),
+            verdict_wait_s=_float_env("CBK_VERDICT_WAIT_S", 60.0),
         )
 
     def with_overrides(self, *, capabilities: str | None = None,

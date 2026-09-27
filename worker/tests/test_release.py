@@ -387,3 +387,168 @@ async def test_a_quarantined_worker_stays_paused_through_the_next_beat(tmp_path)
     # Beat 1 has not heard a verdict yet; every beat after it has.
     assert inventory.paused_seen[1:] == [True, True]
     assert loop.paused is True
+
+
+# --- a verdict before the first claim -------------------------------------------------
+#
+# The verdict arrives on a heartbeat REPLY, so a freshly started worker knows nothing about
+# its own build until the first beat comes back. These drive a real WorkLoop concurrently
+# with the heartbeat loop, as `run_work` does, and watch what reaches the broker.
+
+
+class _RecordingRedis:
+    """Just enough broker for the work loop: every claim attempt is recorded, none finds a
+    job. A claim attempt is what matters — a quarantined build must not even ask."""
+
+    def __init__(self) -> None:
+        self.reads: list[float] = []
+
+    async def xgroup_create(self, *args, **kwargs) -> None: ...
+
+    async def xreadgroup(self, *args, **kwargs):
+        import time
+        self.reads.append(time.monotonic())
+        return []
+
+
+class _SlowInventory(_FakeInventory):
+    """A model server slow to list its models, which holds each beat open mid-flight —
+    the window a work loop polling alongside it would otherwise claim in."""
+
+    async def installed(self) -> list[str]:
+        import asyncio
+        await asyncio.sleep(0.05)
+        return await super().installed()
+
+
+class _VerdictRegistry(_FakeRegistry):
+    """Answers every beat with one fitness verdict (None ⇒ an older coordinator that sends
+    none), noting how many claim attempts had already happened when the first reply left."""
+
+    def __init__(self, stop, redis, fitness) -> None:
+        super().__init__(stop)
+        self._redis = redis
+        self._fitness = fitness
+        self.reads_before_first_reply: int | None = None
+
+    async def heartbeat(self, node_id, node_key, req):
+        self.beats += 1
+        if self.reads_before_first_reply is None:
+            self.reads_before_first_reply = len(self._redis.reads)
+        if self.beats >= 4:
+            self._stop.set()
+        resp = _FakeResponse()
+        resp.fitness = self._fitness
+        return resp
+
+
+class _UnreachableRegistry(_FakeRegistry):
+    async def heartbeat(self, node_id, node_key, req):
+        raise ConnectionError("coordinator is down")
+
+
+async def _start_enrolled(tmp_path, registry_for, *, verdict_wait_s=60.0, run_for=None):
+    """Start an enrolled worker the way `run_work` does and return its broker's record."""
+    import asyncio
+
+    from cbk_worker.commands import _heartbeat_loop
+    from cbk_worker.config import WorkerConfig
+    from cbk_worker.presence import PresenceLadder
+    from cbk_worker.registry import NodeState, save_state
+    from cbk_worker.work_loop import WorkLoop
+
+    state_path = tmp_path / "node.json"
+    save_state(state_path, NodeState(
+        node_id="node-a", node_key="k", server="http://127.0.0.1:1",
+        capabilities=["8b-extract"], ladder=None, mode="active", profile="dedicated",
+    ))
+    cfg = WorkerConfig(worker_id="node-a", consumer_group="cbk-workers",
+                       capabilities=("8b-extract",), heartbeat_s=0.01, poll_s=0.005,
+                       verdict_wait_s=verdict_wait_s)
+    redis, stop = _RecordingRedis(), asyncio.Event()
+    registry = registry_for(stop, redis)
+    loop = WorkLoop(redis, None, cfg, log=lambda _: None)
+    t0 = asyncio.get_running_loop().time()      # before arming, so the bound is >= t0 + wait
+    loop.hold_for_verdict(cfg.verdict_wait_s)
+    if run_for is not None:
+        asyncio.get_running_loop().call_later(run_for, stop.set)
+    await asyncio.gather(
+        loop.run(stop),
+        _heartbeat_loop(registry, loop, PresenceLadder(None, ["8b-extract"]),
+                        _SlowInventory([]), _FakeManager(), None, state_path, cfg, stop))
+    return redis, registry, t0
+
+
+async def test_a_quarantined_build_never_claims_not_even_before_its_first_verdict(tmp_path):
+    """Starting unpaused and learning the verdict from the first reply let a block-listed
+    build claim for that whole first beat — every time it started. Now it asks for nothing
+    until the coordinator has answered, and the answer is no."""
+    from cbk_worker.models import Fitness
+
+    redis, registry, _ = await _start_enrolled(
+        tmp_path, lambda stop, r: _VerdictRegistry(
+            stop, r, Fitness(status="quarantine", reason="blocked")))
+    assert registry.beats >= 4
+    assert redis.reads == []
+
+
+async def test_a_fit_build_starts_claiming_once_it_has_been_answered(tmp_path):
+    """The hold ends on any reply — here one with no fitness at all, as an older
+    coordinator sends — and the node then serves as it always did."""
+    redis, registry, _ = await _start_enrolled(
+        tmp_path, lambda stop, r: _VerdictRegistry(stop, r, None))
+    assert registry.reads_before_first_reply == 0
+    assert redis.reads, "the hold never ended — a fit node would sit idle for ever"
+
+
+async def test_a_coordinator_outage_at_start_up_costs_the_wait_not_the_node(tmp_path):
+    """No reply ever comes. Waiting for one without a bound would idle the node through the
+    outage with a backlog in Redis it could serve; past the bound it serves without one."""
+    redis, _, t0 = await _start_enrolled(
+        tmp_path, lambda stop, r: _UnreachableRegistry(stop),
+        verdict_wait_s=0.15, run_for=0.4)
+    assert redis.reads, "a coordinator outage idled the node for good"
+    assert redis.reads[0] - t0 >= 0.15
+
+
+class _ClosableRedis(_RecordingRedis):
+    async def aclose(self) -> None: ...
+
+
+async def _holds_armed_by_run_work(monkeypatch, state_path) -> list[float]:
+    """Run the real `run_work` wiring with the two long-running tasks stubbed out, and
+    report whether it armed the start-up hold."""
+    import argparse
+
+    from cbk_worker import commands
+    from cbk_worker.work_loop import WorkLoop
+
+    armed: list[float] = []
+
+    async def returns_at_once(*args, **kwargs) -> None: ...
+
+    monkeypatch.setattr(commands.broker, "connect", lambda url: _ClosableRedis())
+    monkeypatch.setattr(WorkLoop, "hold_for_verdict", lambda self, t: armed.append(t))
+    monkeypatch.setattr(WorkLoop, "run", returns_at_once)
+    monkeypatch.setattr(commands, "_heartbeat_loop", returns_at_once)
+    await commands.run_work(argparse.Namespace(capabilities=None, model=None,
+                                               state=str(state_path)))
+    return armed
+
+
+async def test_an_unenrolled_worker_never_holds(tmp_path, monkeypatch):
+    """No node identity means no heartbeat, so no verdict will ever come to end a hold —
+    an env-configured worker must serve from its first poll, as it always has."""
+    assert await _holds_armed_by_run_work(monkeypatch, tmp_path / "absent.json") == []
+
+
+async def test_an_enrolled_worker_holds_from_the_start(tmp_path, monkeypatch):
+    from cbk_worker.registry import NodeState, save_state
+
+    state_path = tmp_path / "node.json"
+    save_state(state_path, NodeState(
+        node_id="node-a", node_key="k", server="http://127.0.0.1:1",
+        capabilities=["8b-extract"], ladder=None, mode="active", profile="dedicated",
+    ))
+    monkeypatch.setenv("CBK_VERDICT_WAIT_S", "7")
+    assert await _holds_armed_by_run_work(monkeypatch, state_path) == [7.0]

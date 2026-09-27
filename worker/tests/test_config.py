@@ -17,6 +17,7 @@ from cbk_worker.config import (
 _ENV = ["CBK_REDIS_URL", "CBK_CONSUMER_GROUP", "CBK_WORKER_ID", "CBK_MODEL_SERVER_URL",
         "CBK_MODEL", "CBK_CAPABILITIES", "CBK_POLL_MS", "CBK_RESULT_TTL_S",
         "CBK_HEARTBEAT_MS", "CBK_MODEL_MANAGER", "CBK_LADDER_HYSTERESIS_S",
+        "CBK_VERDICT_WAIT_S",
         "CBK_UPDATE_PUBKEY", "CBK_API_KEY", "CBK_SERVER_URL", "CBK_NODE_STATE"]
 
 
@@ -36,6 +37,7 @@ def test_worker_defaults(monkeypatch):
     assert cfg.result_ttl_s == 86400
     assert cfg.model_manager == "auto"
     assert cfg.ladder_hysteresis_s == 120.0
+    assert cfg.verdict_wait_s == 60.0
     assert cfg.worker_id.startswith("node-")
 
 
@@ -52,6 +54,7 @@ def test_every_setting_is_readable_from_the_environment(monkeypatch):
     monkeypatch.setenv("CBK_HEARTBEAT_MS", "2000")
     monkeypatch.setenv("CBK_MODEL_MANAGER", "none")
     monkeypatch.setenv("CBK_LADDER_HYSTERESIS_S", "0")
+    monkeypatch.setenv("CBK_VERDICT_WAIT_S", "5")
 
     cfg = WorkerConfig.from_environment()
     assert cfg.redis_url == "redis://broker:6380/3"
@@ -66,6 +69,7 @@ def test_every_setting_is_readable_from_the_environment(monkeypatch):
     assert cfg.result_ttl_s == 60
     assert cfg.model_manager == "none"
     assert cfg.ladder_hysteresis_s == 0.0
+    assert cfg.verdict_wait_s == 5.0
 
 
 def test_a_junk_numeric_setting_falls_back_instead_of_crashing_the_worker(monkeypatch):
