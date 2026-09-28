@@ -9,12 +9,15 @@ and, just as importantly, pin the case where it legitimately cannot be.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from clusterbuck.observe import observe_tick
-from clusterbuck.queue import REAPER_CONSUMER, Queue, stream_key
+from clusterbuck.queue import URGENT_TIER, REAPER_CONSUMER, Queue, stream_key
 from clusterbuck.store import Store
 
 CAP = "8b-extract"
+CAP2 = "32b-reason"
 GROUP = "cbk-workers"
 
 
@@ -116,6 +119,71 @@ async def test_observation_never_overwrites_a_terminal_status(store, queue):
     assert row.status == "done"
     # The claim itself is still recorded — it did happen.
     assert row.claimed_by == "node-alpha"
+
+
+async def test_a_claim_on_the_urgent_tier_is_observed(store, queue):
+    """Reading only the base stream left every urgent/necessary job reporting `queued`
+    with `worker: null` for its whole run, whenever the urgent tier is in use — its claim
+    lives on `q:<cap>:urgent`, which the tick never looked at."""
+    store.insert(id="job_urgent", result_key="res_job_urgent", capability=CAP,
+                created_at="2026-09-02T00:00:00Z")
+    entry_id = await queue.enqueue({
+        "id": "job_urgent", "created_at": "2026-09-02T00:00:00Z", "capability": CAP,
+        "prompt": "work", "params": {}, "urgency": "urgent", "privacy": "local_only",
+        "result_key": "res_job_urgent", "attempts": 0, "max_attempts": 3,
+    }, tier=URGENT_TIER)
+    store.record_delivery("job_urgent", stream=stream_key(CAP, URGENT_TIER),
+                          entry_id=entry_id)
+    await queue.client.xreadgroup(GROUP, "node-alpha",
+                                  {stream_key(CAP, URGENT_TIER): ">"}, count=10)
+
+    assert await observe_tick(store, queue, group=GROUP) == {"observed": 1}
+
+    row = store.get("job_urgent")
+    assert row.status == "running"
+    assert row.claimed_by == "node-alpha"
+    assert row.started_at is not None
+
+
+async def test_identical_entry_ids_on_different_streams_do_not_collide(store, queue):
+    """Stream ids are `<ms>-<seq>`, minted independently per stream, so two DIFFERENT
+    streams can and do mint the identical id — most easily, a capability's base and
+    urgent tiers, or two capabilities enqueued in the same millisecond. Matching a claim
+    back to a job by entry_id alone let one job's row overwrite another's, reporting a
+    job NOBODY claimed as `running` on whichever node held the other stream's
+    identically-numbered entry. Forced here by writing the same explicit id to two
+    unrelated capabilities' streams directly."""
+    entry_id = "500000000000-1"  # a value neither stream has produced natively yet
+
+    async def _submit_with_forced_id(job_id: str, cap: str) -> None:
+        store.insert(id=job_id, result_key=f"res_{job_id}", capability=cap,
+                    created_at="2026-09-02T00:00:00Z")
+        await queue.ensure_group(cap)
+        await queue.client.xadd(stream_key(cap), {"job": json.dumps({
+            "id": job_id, "created_at": "2026-09-02T00:00:00Z", "capability": cap,
+            "prompt": "work", "params": {}, "urgency": "waitable",
+            "privacy": "local_only", "result_key": f"res_{job_id}",
+            "attempts": 0, "max_attempts": 3,
+        })}, id=entry_id)
+        store.record_delivery(job_id, stream=stream_key(cap), entry_id=entry_id)
+
+    await _submit_with_forced_id("job_claimed", CAP)
+    await _submit_with_forced_id("job_untouched", CAP2)
+
+    # Only the FIRST capability's identically-numbered entry is ever claimed.
+    await queue.client.xreadgroup(GROUP, "node-alpha", {stream_key(CAP): ">"}, count=10)
+
+    assert await observe_tick(store, queue, group=GROUP,
+                              capabilities=[CAP, CAP2]) == {"observed": 1}
+
+    claimed = store.get("job_claimed")
+    assert claimed.status == "running"
+    assert claimed.claimed_by == "node-alpha"
+
+    untouched = store.get("job_untouched")
+    assert untouched.status == "queued", "nobody claimed this job"
+    assert untouched.claimed_by is None
+    assert untouched.started_at is None
 
 
 async def test_a_stale_entry_id_is_skipped(store, queue):

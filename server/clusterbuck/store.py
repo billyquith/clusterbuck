@@ -281,8 +281,15 @@ class Store:
                 s.add(job)
                 s.commit()
 
-    def jobs_by_entry_ids(self, entry_ids: list[str]) -> dict[str, Job]:
-        """entry_id → job, for the ids currently held in a stream's pending list.
+    def jobs_by_entry_ids(self, entry_ids: list[str]) -> dict[tuple[str | None, str], Job]:
+        """(stream, entry_id) → job, for the ids currently held in a stream's pending list.
+
+        Keyed on the PAIR, not the entry id alone. Stream ids are `<ms>-<seq>`, minted
+        independently per stream, so two different streams — two capabilities, or one
+        capability's base and urgent tiers — routinely mint the identical id. A caller
+        that indexed by entry_id alone let one job's row silently overwrite another's in
+        the dict this built, which then reported a job NOBODY had claimed as `running`,
+        on whichever node actually held the other stream's identically-numbered entry.
 
         One query per tick rather than one per claimed entry. Only rows whose recorded
         delivery still matches are returned, so a stale entry id (the reaper requeued the
@@ -292,7 +299,7 @@ class Store:
             return {}
         with self._session() as s:
             rows = s.exec(select(Job).where(Job.entry_id.in_(entry_ids))).all()
-            return {r.entry_id: r for r in rows if r.entry_id is not None}
+            return {(r.stream, r.entry_id): r for r in rows if r.entry_id is not None}
 
     def mark_started(self, id: str, *, at: str, claimed_by: str) -> bool:
         """Record an observed claim: `started_at` + `claimed_by`, and queued → running.

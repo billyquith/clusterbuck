@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 
-from .queue import REAPER_CONSUMER, Queue
+from .queue import REAPER_CONSUMER, TIER_ORDER, Queue, stream_key
 from .store import Store
 
 _log = logging.getLogger("clusterbuck.observe")
@@ -42,21 +42,27 @@ async def observe_tick(
     caps = capabilities if capabilities is not None else await queue.known_capabilities()
 
     for capability in caps:
-        claims = await queue.claims(capability, group)
-        # The reaper's own claims are bookkeeping, not work starting: XAUTOCLAIM takes an
-        # entry so it can requeue or dead-letter it within the same scan.
-        claims = [c for c in claims if c["consumer"] != REAPER_CONSUMER]
-        if not claims:
-            continue
+        # Both urgency tiers (ADR 34). Reading only the base stream left an urgent or
+        # necessary job reporting `queued` with `worker: null` for its ENTIRE run
+        # whenever the urgent tier is active — a claim on `q:<cap>:urgent` was simply
+        # never looked at.
+        for tier in TIER_ORDER:
+            claims = await queue.claims(capability, group, tier=tier)
+            # The reaper's own claims are bookkeeping, not work starting: XAUTOCLAIM
+            # takes an entry so it can requeue or dead-letter it within the same scan.
+            claims = [c for c in claims if c["consumer"] != REAPER_CONSUMER]
+            if not claims:
+                continue
 
-        rows = store.jobs_by_entry_ids([c["entry_id"] for c in claims])
-        for claim in claims:
-            row = rows.get(claim["entry_id"])
-            if row is None:
-                continue  # not ours, or requeued under a new entry id since
-            at = _delivered_at(claim["idle_ms"])
-            if store.mark_started(row.id, at=at, claimed_by=claim["consumer"]):
-                observed += 1
+            stream = stream_key(capability, tier)
+            rows = store.jobs_by_entry_ids([c["entry_id"] for c in claims])
+            for claim in claims:
+                row = rows.get((stream, claim["entry_id"]))
+                if row is None:
+                    continue  # not ours, or requeued under a new entry id since
+                at = _delivered_at(claim["idle_ms"])
+                if store.mark_started(row.id, at=at, claimed_by=claim["consumer"]):
+                    observed += 1
 
     if observed:
         _log.info("observed %d claim(s)", observed)
