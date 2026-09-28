@@ -118,6 +118,69 @@ async def test_a_failed_job_says_why_as_a_code(redis_client, handler, code):
     await http.aclose()
 
 
+async def test_a_dead_model_server_cools_the_capability_down(redis_client):
+    """Without this, a node whose model server is down drains its whole backlog on that
+    capability in milliseconds per job — thousands of terminal `failed` results an hour —
+    before a healthy sibling node ever gets a look at any of them. Reaching
+    `server_down_threshold` consecutive `model_server_unreachable` results must stop this
+    node claiming from the capability until the cooldown elapses, without touching a
+    DIFFERENT capability it also serves."""
+    cfg = _cfg(capabilities=("8b-extract", "32b-reason"),
+              server_down_threshold=2, server_down_cooldown_s=1000.0)
+    http, model = _model(_raises(httpx.ConnectError))
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+
+    for i in range(2):
+        await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire(f"dead_{i}")})
+        await _claim(loop)
+    for i in range(2):
+        stored = json.loads(await redis_client.get(f"res:dead_{i}"))
+        assert stored["error_code"] == "model_server_unreachable"
+
+    # The threshold is now reached: a THIRD job on the same capability must not even be
+    # claimed, let alone failed.
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("dead_2")})
+    took = await _claim(loop)
+    assert took is False, "the capability should be on cooldown, not claiming"
+    assert await redis_client.get("res:dead_2") is None, "left queued, not failed"
+
+    # A different capability this same node serves is entirely unaffected.
+    await redis_client.xadd(stream_key("32b-reason"),
+                            {"job": _job_wire("other", capability="32b-reason")})
+    await _claim(loop)
+    stored = json.loads(await redis_client.get("res:other"))
+    assert stored["error_code"] == "model_server_unreachable", "still served, just also down"
+    await http.aclose()
+
+
+async def test_a_success_resets_the_down_streak(redis_client):
+    """A single good answer after some failures must not count towards the threshold —
+    a flaky-but-alive server is not the scenario the cooldown exists for."""
+    calls = {"n": 0}
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("simulated", request=request)
+        return httpx.Response(200, json=_OK)
+
+    cfg = _cfg(server_down_threshold=2, server_down_cooldown_s=1000.0)
+    http, model = _model(flaky)
+    loop = WorkLoop(redis_client, model, cfg, log=lambda _: None)
+    await loop.ensure_groups()
+
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("mix_0")})
+    await _claim(loop)  # fails: streak 1
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("mix_1")})
+    await _claim(loop)  # succeeds: streak reset to 0
+
+    await redis_client.xadd(stream_key("8b-extract"), {"job": _job_wire("mix_2")})
+    took = await _claim(loop)
+    assert took is True, "one prior failure must not have armed the cooldown"
+    await http.aclose()
+
+
 async def test_a_pin_this_node_lacks_fails_as_artifact_not_installed(redis_client):
     http, model = _model()
     loop = WorkLoop(redis_client, model, _cfg(), log=lambda _: None)

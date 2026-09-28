@@ -8,7 +8,11 @@ import httpx
 import pytest
 
 from cbk_worker.config import WorkerConfig
-from cbk_worker.model_client import ModelClient, _refuse_substituted_model
+from cbk_worker.model_client import (
+    ModelClient,
+    _refuse_malformed_completion,
+    _refuse_substituted_model,
+)
 from cbk_worker.models import Job
 
 _OK = {
@@ -225,6 +229,41 @@ async def test_job_params_cannot_supply_or_override_the_key_or_base(monkeypatch)
 
 
 # --- the model server itself substituting (found live) ----------------------------------
+
+
+@pytest.mark.parametrize("body", [
+    {},
+    [],
+    {"choices": []},
+    {"error": "model not loaded"},
+    {"choices": [{"index": 0}]},  # a choice with no `message` at all
+    "not even a dict",
+])
+def test_a_response_with_no_usable_completion_is_refused(body):
+    """`raise_for_status()` only catches a non-2xx status. A proxy answering an error as
+    200, or a server not fully warm, previously had its `{}`/`{"choices": []}` recorded
+    as a SUCCESSFUL `done` result — one that fails `contract/result.schema.json` and
+    crashes any client indexing `choices[0]` on a job it was told had completed."""
+    with pytest.raises(RuntimeError, match="no usable completion"):
+        _refuse_malformed_completion(body)
+
+
+def test_a_well_formed_completion_passes():
+    _refuse_malformed_completion({"choices": [{"message": {"content": "hi"}}]})
+
+
+async def test_a_malformed_200_fails_the_job_rather_than_recording_done():
+    """End to end through the client: the reply parses fine and says 200, and is still
+    refused, because there is nothing in it a client could read as an answer."""
+    cfg = WorkerConfig(redis_url="redis://x", model_name="m:1b",
+                       model_server_url="http://ms/v1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(RuntimeError, match="no usable completion"):
+            await ModelClient(http, cfg).complete(_job(prompt="hi"))
 
 
 def _body(model):

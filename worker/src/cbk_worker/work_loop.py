@@ -126,6 +126,15 @@ class WorkLoop:
         # Defaults are the cautious pair: unknown profile, owner present.
         self._mode: str = "active"
         self._profile: str | None = None
+        # Consecutive `model_server_unreachable`/`model_server_timeout` results, per
+        # capability — the two codes that unambiguously mean THIS node cannot reach its
+        # own model server, as opposed to a content refusal or one bad response. At
+        # `server_down_threshold` the capability is put on a cooldown (`_cooldown_until`,
+        # a monotonic deadline) rather than continuing to claim and terminally fail its
+        # whole backlog in milliseconds per job. Reset to 0 by a claim that succeeds OR
+        # fails for any other reason: a mixed run of results is not a dead server.
+        self._down_streak: dict[str, int] = {}
+        self._cooldown_until: dict[str, float] = {}
 
     @property
     def tps(self) -> float | None:
@@ -416,6 +425,12 @@ class WorkLoop:
         # the next: that ordering is what keeps a busy small-model queue from starving the
         # big-model queue this node also serves.
         for cap in self._capabilities:
+            cooldown = self._cooldown_until.get(cap)
+            if cooldown is not None:
+                if time.monotonic() < cooldown:
+                    continue  # this capability's model server is presumed still down
+                del self._cooldown_until[cap]
+                self._log(f"resuming claims for {cap}: cooldown elapsed")
             # Out of slots, but capabilities still unvisited: WAIT for one rather than
             # abandoning the pass. Breaking here instead would quietly undo the fairness
             # the loop above exists for — at a limit of 1 the first capability would take
@@ -584,6 +599,7 @@ class WorkLoop:
             else:
                 self._record_tps(usage, elapsed)
             self._log(f"done  {job.id} [{capability}]")
+            self._down_streak[capability] = 0
         # Evicted FIRST, and it is not an `Exception` at all, so the handler below cannot
         # reach it however this is later edited. Nothing is written and nothing is acked:
         # the entry stays in the pending list and the coordinator's reaper requeues it,
@@ -595,11 +611,25 @@ class WorkLoop:
         # Any failure becomes a terminal `failed` result rather than an exception that kills
         # the loop: the caller is waiting on a result key and deserves an answer either way.
         except Exception as e:
+            code = code_for(e)
             result = Result(job_id=job.id, status="failed", worker=self._cfg.worker_id,
                             started_at=started_at, finished_at=_now_iso(),
                             error=str(e) or e.__class__.__name__,
-                            error_code=code_for(e))
+                            error_code=code)
             self._log(f"fail  {job.id} [{capability}]: {e}")
+            if code in ("model_server_unreachable", "model_server_timeout"):
+                self._down_streak[capability] = self._down_streak.get(capability, 0) + 1
+                if self._down_streak[capability] >= self._cfg.server_down_threshold:
+                    self._down_streak[capability] = 0
+                    until = time.monotonic() + self._cfg.server_down_cooldown_s
+                    self._cooldown_until[capability] = until
+                    self._log(
+                        f"{capability}'s model server unreachable "
+                        f"{self._cfg.server_down_threshold} times in a row — pausing "
+                        f"claims for {self._cfg.server_down_cooldown_s:.0f}s rather than "
+                        f"failing its whole backlog")
+            else:
+                self._down_streak[capability] = 0
 
         # Result first, ack second. Acking first would let a crash in between drop the job
         # from the pending list with no result anywhere — invisible to the reaper.

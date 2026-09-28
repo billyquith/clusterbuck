@@ -92,6 +92,21 @@ class WorkerConfig:
     # coordinator still starting after the same power cut); short enough that a real outage
     # costs a minute, not the backlog. Unenrolled workers have no heartbeat and never hold.
     verdict_wait_s: float = 60.0
+    # After this many CONSECUTIVE `model_server_unreachable`/`model_server_timeout`
+    # results on one capability, this node stops claiming from it for
+    # `server_down_cooldown_s` rather than continuing to poll it every pass.
+    #
+    # Without this, a node whose own model server is down (a closed port, a crashed
+    # process) drains its whole backlog on that capability as fast as Redis can hand
+    # entries over — each one failing in milliseconds — before a healthy sibling node
+    # ever gets a look at any of them. This is not the visibility-timeout recovery path
+    # (ADR 20): those jobs get a real, terminal `failed` result, correctly, per §3; the
+    # problem is purely the RATE, and only for the ONE signal that unambiguously means
+    # "I personally cannot reach my own model server" — not a content refusal, not one
+    # bad response. Other capabilities this node serves are unaffected: the cooldown is
+    # per capability, not global.
+    server_down_threshold: int = 3
+    server_down_cooldown_s: float = 30.0
 
     @staticmethod
     def from_environment() -> WorkerConfig:
@@ -113,6 +128,8 @@ class WorkerConfig:
             model_manager=os.environ.get("CBK_MODEL_MANAGER") or "auto",
             ladder_hysteresis_s=_float_env("CBK_LADDER_HYSTERESIS_S", 120.0),
             verdict_wait_s=_float_env("CBK_VERDICT_WAIT_S", 60.0),
+            server_down_threshold=max(1, _int_env("CBK_SERVER_DOWN_THRESHOLD", 3)),
+            server_down_cooldown_s=_float_env("CBK_SERVER_DOWN_COOLDOWN_S", 30.0),
         )
 
     def with_overrides(self, *, capabilities: str | None = None,

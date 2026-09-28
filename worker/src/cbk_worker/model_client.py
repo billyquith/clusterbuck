@@ -90,9 +90,32 @@ class ModelClient:
         resp = await self._client.post(url, json=request, headers=headers)
         resp.raise_for_status()
         body = resp.json()
+        _refuse_malformed_completion(body)
         _refuse_substituted_model(request["model"], body)
         usage = body.get("usage") if isinstance(body, dict) else None
         return body, usage
+
+
+def _refuse_malformed_completion(body: Any) -> None:
+    """Fail rather than record `done` for a 200 that is not a completion at all.
+
+    `raise_for_status()` above only catches a non-2xx status; a model server can answer
+    200 with `{}`, `[]`, `{"choices": []}`, or `{"error": "..."}` — a proxy returning an
+    error as a 200, a server not fully warm yet, a route that exists but is not this one
+    — and every one of those was written as a SUCCESSFUL result. `completion` is
+    required to satisfy `contract/result.schema.json`, so a client indexing
+    `choices[0]` crashed on a job the coordinator had told it was `done`. This is exactly
+    the case §3 already has a code for: the server answered with a malformed response.
+    """
+    if (isinstance(body, dict) and isinstance(body.get("choices"), list)
+        and len(body["choices"]) >= 1
+        and all(isinstance(c, dict) and "message" in c for c in body["choices"])):
+        return
+    raise JobFailure(
+        "model_server_error",
+        f"model server answered 200 with no usable completion "
+        f"(missing/empty/malformed `choices`): {body!r:.200}"
+    )
 
 
 def _refuse_substituted_model(requested: str, body: Any) -> None:
