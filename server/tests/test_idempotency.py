@@ -95,6 +95,35 @@ def test_concurrent_submits_under_one_key_produce_one_job(client, redis_url):
 # --- what it must NOT do ------------------------------------------------------------
 
 
+def test_a_retry_repairs_a_row_committed_but_never_enqueued(client, redis_url):
+    """The submit path writes the SQLite row before the XADD. If the coordinator (or
+    Redis) dies in exactly that gap, the documented recovery — a same-key retry — used
+    to hand back the same stranded `queued` job forever: nothing re-enqueues it, so it
+    could only ever become `job_orphaned` once `CBK_ORPHAN_GRACE_S` passed, even though
+    the retry carries the exact payload needed to finish the job properly. Simulated by
+    inserting the row directly and never calling enqueue — the same state a crash in
+    that gap leaves behind."""
+    from clusterbuck.ids import new_ids
+
+    job_id, result_key = new_ids()
+    client.app.state.store.insert(
+        id=job_id, result_key=result_key, capability="8b-extract",
+        created_at="2026-09-02T00:00:00Z", urgency="waitable", idempotency_key=KEY,
+    )
+    assert client.app.state.store.get(job_id).entry_id is None
+    assert _stream_len(redis_url) == 0
+
+    retried = _submit(client, key=KEY)
+
+    assert retried.status_code == 200
+    assert retried.headers["Idempotency-Replayed"] == "true"
+    assert retried.json()["id"] == job_id
+    assert retried.json()["status"] == "queued"
+    row = client.app.state.store.get(job_id)
+    assert row.entry_id is not None, "the retry must actually deliver it this time"
+    assert _stream_len(redis_url) == 1
+
+
 def test_different_keys_are_different_jobs(client, redis_url):
     a = _submit(client, key="key-a")
     b = _submit(client, key="key-b")

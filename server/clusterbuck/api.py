@@ -552,6 +552,33 @@ def create_app(
             out.append({"capability": cap, "queue": f"q:{cap}", **stats})
         return {"queues": out}
 
+    async def _enqueue_and_deliver(record: JobRecord, *, capability: str,
+                                   urgency: str) -> None:
+        """The shared second half of accepting a job: pick the tier, XADD, and record the
+        delivery. Used both by a first-time submit and by repairing one that was
+        committed but never reached the queue (see `submit_job`).
+
+        Guarded (`record_delivery_if_absent`), not an unconditional overwrite: this row's
+        id is freshly minted on a first-time submit, so nothing else could be racing it
+        THERE — but a repair can be racing the very request whose crash it is repairing,
+        which is concurrency, not a crash, and looks identical from the row alone. An
+        unconditional write here would let that repair's delivery silently replace the
+        original request's own, orphaning the original's entry rather than the repair's.
+        Whichever call loses the guarded write withdraws its own (redundant) entry, so
+        exactly one delivery is ever left standing for a worker to claim.
+        """
+        tier = None
+        if tiering_ready(app.state.store, app.state.fleet, capability,
+                         mode=settings.urgent_streams):
+            tier = tier_for(urgency)
+        stream = stream_key(capability, tier)
+        entry_id = await app.state.queue.enqueue(record.to_wire(), tier=tier)
+        if not app.state.store.record_delivery_if_absent(
+            record.id, stream=stream, entry_id=entry_id
+        ):
+            await app.state.queue.withdraw_if_unclaimed(
+                stream, entry_id, group=settings.consumer_group)
+
     @app.post("/jobs", status_code=202)
     async def submit_job(
         body: JobSubmit,
@@ -559,6 +586,87 @@ def create_app(
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
         key = _validated_idempotency_key(idempotency_key)
+
+        if key is not None:
+            existing = app.state.store.job_by_idempotency_key(key)
+            if existing is not None:
+                # This key has been seen before addressing or reservation are even
+                # looked at — otherwise a legitimate retry of a job that is alive and
+                # well could be answered with a 422 that says "no job exists" (the
+                # documented meaning of that status), purely because the FLEET changed
+                # between the original submit and the retry: an ability re-measurement,
+                # a catalog edit, a reservation expiring. A repeat must return the
+                # existing job regardless of what routing would decide right now.
+                if existing.entry_id is not None or existing.status in TERMINAL_STATUSES:
+                    return JSONResponse(
+                        status_code=200,
+                        content={"id": existing.id, "result_key": existing.result_key,
+                                "status": existing.status},
+                        headers={"Idempotency-Replayed": "true"},
+                    )
+                # The row was committed but never reached the queue: the coordinator (or
+                # Redis) died between `store.insert` and `queue.enqueue` on the ORIGINAL
+                # submit. Previously this replay just handed back the same stranded
+                # "queued" job forever, which could only ever become `job_orphaned` once
+                # `CBK_ORPHAN_GRACE_S` passed — even though the client is, right now,
+                # retrying with the exact payload needed to finish the job properly.
+                # Repair it: address directly by the capability ALREADY recorded on the
+                # row (not by re-running task_class/min_ability/`requires`, which could
+                # resolve differently on a fleet that has since changed) so the repaired
+                # delivery lands on the same queue the client was already told about.
+                try:
+                    selection = resolve(
+                        app.state.fleet, app.state.store, capability=existing.capability,
+                        task_class=None, min_ability=None, privacy=body.privacy.value,
+                        urgency=existing.urgency,
+                    )
+                except RoutingRefusal:
+                    # The capability itself is gone from the registry — rare, and not
+                    # something a resubmit can fix. Fall back to the old behaviour
+                    # (hand back the stranded job) rather than fail the request outright;
+                    # the orphan sweep still terminalises it eventually.
+                    _log.warning(
+                        "job %s [idempotency %s] has no queue entry and %s no longer "
+                        "resolves — leaving it for the orphan sweep",
+                        existing.id, key, existing.capability)
+                    return JSONResponse(
+                        status_code=200,
+                        content={"id": existing.id, "result_key": existing.result_key,
+                                "status": existing.status},
+                        headers={"Idempotency-Replayed": "true"},
+                    )
+                params = dict(body.params or {})
+                params["model"] = selection.artifact
+                record = JobRecord(
+                    id=existing.id, created_at=existing.created_at,
+                    capability=existing.capability, messages=body.messages,
+                    prompt=body.prompt, params=params,
+                    urgency=Urgency(existing.urgency),
+                    escalate_after_min=body.escalate_after_min, privacy=body.privacy,
+                    deadline=body.deadline, requires=body.requires,
+                    result_key=existing.result_key, submitter=body.submitter,
+                )
+                # Guarded, via the same helper the first-time path uses: THIS row can be
+                # racing the original request's OWN in-flight enqueue, which is
+                # concurrency, not a crash, and the row having no `entry_id` yet looks
+                # identical from here. Of two concurrent deliveries exactly one may stand.
+                await _enqueue_and_deliver(record, capability=existing.capability,
+                                          urgency=existing.urgency)
+                current = app.state.store.get(existing.id) or existing
+                if current.entry_id is not None and existing.urgency in {
+                    u.value for u in _WAKE_RIGHTS
+                }:
+                    await app.state.wake.maybe_wake(
+                        existing.capability, reason=f"submit-repair:{existing.urgency}")
+                _log.info("repair attempt for %s [idempotency %s]: now has a queue "
+                         "entry (%s)", existing.id, key,
+                         "this call's" if current.entry_id else "unresolved")
+                return JSONResponse(
+                    status_code=200,
+                    content={"id": current.id, "result_key": current.result_key,
+                            "status": current.status},
+                    headers={"Idempotency-Replayed": "true"},
+                )
 
         # A reservation, if named, must exist and be confirmed. It does NOT override
         # addressing (the job addresses normally); it's recorded as the linkage (§8).
@@ -717,16 +825,7 @@ def create_app(
         # worker reads the base stream only, and an urgent-tier write would strand the
         # job. The gate is a scan of a table with a handful of rows; if it ever shows up
         # in a profile, recompute it on heartbeat rather than caching it here.
-        tier = None
-        if tiering_ready(app.state.store, app.state.fleet, capability,
-                         mode=settings.urgent_streams):
-            tier = tier_for(body.urgency.value)
-        entry_id = await app.state.queue.enqueue(record.to_wire(), tier=tier)
-        # The row was inserted before the XADD, so the delivery is recorded here. This is
-        # what makes queue position exact rather than a stream scan.
-        app.state.store.record_delivery(
-            job_id, stream=stream_key(capability, tier), entry_id=entry_id
-        )
+        await _enqueue_and_deliver(record, capability=capability, urgency=body.urgency.value)
 
         # Wake rights: urgent/necessary jobs may create capacity on submit.
         if body.urgency in _WAKE_RIGHTS:

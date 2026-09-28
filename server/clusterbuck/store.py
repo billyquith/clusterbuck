@@ -356,6 +356,11 @@ class Store:
         not exist yet. Every enqueue must call this — including the reaper's requeue,
         which mints a *new* entry id, and would otherwise leave queue position and
         withdrawal pointing at an entry that no longer exists.
+
+        Unconditional deliberately: the reaper's requeue is the one caller that MUST
+        overwrite a delivery already recorded (the old entry is being retired). A caller
+        that must not clobber a delivery already claimed by someone else racing it wants
+        `record_delivery_if_absent` instead.
         """
         with self._session() as s:
             job = s.get(Job, id)
@@ -364,6 +369,26 @@ class Store:
                 job.stream = stream
                 s.add(job)
                 s.commit()
+
+    def record_delivery_if_absent(self, id: str, *, stream: str, entry_id: str) -> bool:
+        """Like `record_delivery`, but refuses to overwrite a delivery already recorded.
+
+        For repairing a job whose row was committed but never enqueued (submit died
+        between the two): a same-key retry racing the ORIGINAL request's own in-flight
+        enqueue — not a crash, just concurrency — must not let both deliveries stand,
+        or a worker could claim and run the same job from two different stream entries.
+        Guarded by a single UPDATE scoped to `entry_id IS NULL`, so of two concurrent
+        callers exactly one wins; the loser's own (now redundant) stream entry is the
+        caller's to clean up.
+        """
+        with self._session() as s:
+            result = s.exec(
+                update(Job)
+                .where(Job.id == id, Job.entry_id.is_(None))
+                .values(entry_id=entry_id, stream=stream)
+            )
+            s.commit()
+            return bool(result.rowcount)
 
     def set_attempts(self, id: str, attempts: int) -> None:
         """Record a delivery attempt (the reaper's requeue count) so it is observable."""
