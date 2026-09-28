@@ -71,6 +71,18 @@ def test_an_upstream_4xx_is_the_request_and_a_5xx_is_the_server():
     assert classify_upstream(RuntimeError("anything else")) == "model_server_error"
 
 
+def test_a_4xx_that_is_not_about_the_jobs_own_content_is_not_rejected():
+    """None of these says the JOB's content is malformed, so `model_request_rejected`
+    (retryable: false) told a client to give up on work a rate limit clearing, or an
+    operator fixing a key, could still serve. `litellm.Timeout` carries status_code 408
+    but is caught earlier, as an actual timeout — checked here to pin that it never
+    reaches the status-code fallback this test is about."""
+    assert classify_upstream(_litellm(litellm.RateLimitError)) == "model_server_error"
+    assert classify_upstream(_litellm(litellm.AuthenticationError)) == "model_server_error"
+    assert classify_upstream(_litellm(litellm.NotFoundError)) == "model_server_error"
+    assert classify_upstream(_litellm(litellm.Timeout)) == "model_server_timeout"
+
+
 def test_an_unhandled_exception_still_answers_in_the_envelope(client, monkeypatch):
     """Nothing upstream of `install_error_handlers` catches a plain `Exception` — Redis
     unreachable inside a route, a programming error — so without a catch-all it fell all

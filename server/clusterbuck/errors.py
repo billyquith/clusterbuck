@@ -161,8 +161,23 @@ def classify_upstream(exc: BaseException) -> str:
             return "model_server_unreachable"
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and 400 <= status < 500:
-        return "model_request_rejected"
+        return _STATUS_OVERRIDE.get(status, "model_request_rejected")
     return "model_server_error"
+
+
+# Every 4xx used to become `model_request_rejected`, `retryable: false` — right for a
+# genuine content refusal (a context window, a malformed parameter: retrying the SAME
+# request just fails again), wrong for these: none of them says the JOB's own content is
+# bad, so a client blamed for it would fix nothing by changing the request. 408 is
+# literally a timeout the status line names outright. 429 is the server's own capacity,
+# not the request's shape. 401/403/404 are the model server refusing to answer AT ALL —
+# a bad node-local key, a model it does not have loaded — an operator problem, the same
+# bucket a malformed or unreachable response already falls into. Anything not listed
+# here (400, 413, 422, …) keeps the original, correct meaning.
+_STATUS_OVERRIDE: dict[int, str] = {
+    401: "model_server_error", 403: "model_server_error", 404: "model_server_error",
+    408: "model_server_timeout", 429: "model_server_error",
+}
 
 
 def _chain(exc: BaseException):

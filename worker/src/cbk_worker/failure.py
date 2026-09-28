@@ -51,9 +51,23 @@ def code_for(exc: BaseException) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         # A 4xx is the model server refusing THIS request (a context window, an unknown
-        # parameter); a 5xx is the server failing. Different messages to a user.
-        return "model_request_rejected" if 400 <= status < 500 else "model_server_error"
+        # parameter); a 5xx is the server failing. Different messages to a user. But not
+        # every 4xx says the job's own content is at fault — none of `_STATUS_OVERRIDE`
+        # does, so retrying the SAME request may still succeed, unlike a genuine content
+        # refusal. 408 is a timeout by name; 429 is the server's own capacity; 401/403/404
+        # are the server refusing to answer at all — an operator problem (a bad node-local
+        # key, a model it does not have loaded), the same bucket an unreachable or
+        # malformed response already falls into.
+        if status < 500:
+            return _STATUS_OVERRIDE.get(status, "model_request_rejected")
+        return "model_server_error"
     if isinstance(exc, json.JSONDecodeError):
         # It answered 2xx with a body that is not JSON: the server is misbehaving.
         return "model_server_error"
     return "worker_failed"
+
+
+_STATUS_OVERRIDE = {
+    401: "model_server_error", 403: "model_server_error", 404: "model_server_error",
+    408: "model_server_timeout", 429: "model_server_error",
+}
