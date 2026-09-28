@@ -34,14 +34,16 @@ logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
 # Params we forward from the client body to the model server.
 _PASSTHROUGH = {
-    "temperature", "max_tokens", "top_p", "stop", "presence_penalty",
-    "frequency_penalty", "response_format", "n", "seed", "tools", "tool_choice", "user",
+    "temperature", "max_tokens", "max_completion_tokens", "top_p", "stop",
+    "presence_penalty", "frequency_penalty", "response_format", "n", "seed", "tools",
+    "tool_choice", "user", "logprobs", "parallel_tool_calls",
 }
 
 _NOOP_KEY = "sk-noop"  # local servers ignore the key; LiteLLM requires one present
 
 
-def build_router(fleet: Fleet, cloud_fallback_model: str | None = None) -> Router | None:
+def build_router(fleet: Fleet, cloud_fallback_model: str | None = None,
+                 timeout_s: float | None = None) -> Router | None:
     """Build a LiteLLM Router from the fleet's capabilities. None if there's nothing to serve.
 
     ADR 23 stands: this stays config-level for the sync plane. A no-host provider account
@@ -97,6 +99,13 @@ def build_router(fleet: Fleet, cloud_fallback_model: str | None = None) -> Route
     kwargs: dict = {"num_retries": 0}
     if fallbacks:
         kwargs["fallbacks"] = fallbacks
+    # LiteLLM's own default is 6000s — long enough that a hung upstream reads as the
+    # coordinator itself having stopped answering, to a person who is waiting right now.
+    # This is what actually makes `model_server_timeout` reachable on the sync plane at
+    # all; without it, the client's own (or a browser's) timeout fires first, with
+    # nothing in `code`/`retryable` for it to act on.
+    if timeout_s is not None:
+        kwargs["timeout"] = timeout_s
     return Router(model_list=model_list, **kwargs)
 
 
@@ -112,12 +121,44 @@ async def chat_completions(request: Request) -> dict:
                        "sync plane not configured (no fleet.yaml, or nothing in it servable)",
                        503)
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except ValueError as e:
+        # Starlette/json.loads raising a plain `ValueError` on invalid JSON reached no
+        # handler in errors.py (neither an `HTTPException` nor `RequestValidationError`),
+        # so it fell through as a bare 500 — the one thing every OTHER malformed-request
+        # path here already avoids.
+        raise CbkError("invalid_request", f"request body is not valid JSON: {e}", 422) \
+            from e
+    if not isinstance(body, dict):
+        raise CbkError("invalid_request", "request body must be a JSON object", 422)
+
+    if body.get("stream"):
+        # Silently ignored otherwise: `_PASSTHROUGH` has no `stream`, so a client asking
+        # for one got a normal 200 JSON body back instead — the stock SDK's streaming
+        # iterator then yields zero chunks and raises nothing, which is a silently WRONG
+        # answer, not a refusal. M1 is genuinely non-streaming (module docstring); this
+        # is that limitation stated to the caller instead of hidden from them.
+        raise CbkError("invalid_request",
+                       "streaming is not supported by this endpoint (non-streaming only)",
+                       422, param="stream")
+
     model = body.get("model")
     messages = body.get("messages")
-    if not model or messages is None:
-        raise CbkError("invalid_request", "`model` and `messages` are required", 422,
-                       param="model" if not model else "messages")
+    if not isinstance(model, str) or not model:
+        raise CbkError("invalid_request", "`model` is required and must be a string", 422,
+                       param="model")
+    if not _looks_like_messages(messages):
+        raise CbkError(
+            "invalid_request",
+            "`messages` is required and must be a list of {role, content} objects", 422,
+            param="messages",
+        )
+    if "response_format" in body and not isinstance(body["response_format"], dict):
+        raise CbkError("invalid_request", "`response_format` must be an object", 422,
+                       param="response_format")
+    if "tools" in body and not isinstance(body["tools"], list):
+        raise CbkError("invalid_request", "`tools` must be an array", 422, param="tools")
 
     # Answered here rather than left to LiteLLM, which reports an unknown name as a
     # BadRequestError about "healthy deployments" — indistinguishable, from outside, from
@@ -146,6 +187,21 @@ async def chat_completions(request: Request) -> dict:
                        capability=model, model=spec.model,
                        use_async=await _async_could_serve(request, model, code)) from e
     return resp.model_dump()
+
+
+def _looks_like_messages(messages: object) -> bool:
+    """A shallow shape check, not full validation: LiteLLM/the model server are still the
+    authority on what a valid message contains. This exists to stop a WRONGLY-shaped
+    body — a string, a list of integers — from ever reaching `router.acompletion`, where
+    LiteLLM's own internal `TypeError`/`AttributeError` gets wrapped as an
+    `APIConnectionError` and misclassified by `classify_upstream` as the model server
+    being unreachable: a client obeying `retryable` then retries a request that was
+    always going to fail, forever, believing an outage is happening on the LAN when the
+    request itself is malformed.
+    """
+    return (isinstance(messages, list) and len(messages) > 0
+            and all(isinstance(m, dict) and "role" in m and "content" in m
+                   for m in messages))
 
 
 async def _async_could_serve(request: Request, capability: str, code: str) -> bool | None:

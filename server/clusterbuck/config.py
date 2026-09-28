@@ -92,6 +92,12 @@ class Settings:
     fleet_path: str = os.environ.get("CBK_FLEET_PATH", "fleet.yaml")
     # Opt-in cloud fallback for the sync plane; unset ⇒ sync plane is local-only.
     cloud_fallback_model: str | None = os.environ.get("CBK_CLOUD_FALLBACK_MODEL") or None
+    # How long the sync plane waits on a model server for one completion, before
+    # LiteLLM's own default of 6000s does. A person is waiting on this call — the whole
+    # reason a sync request exists rather than a job — so a hung upstream should read as
+    # `model_server_timeout` (§1c) well before a browser tab, or the client's own
+    # timeout, gives up first with nothing to act on.
+    sync_timeout_s: float = float(os.environ.get("CBK_SYNC_TIMEOUT_S", "120"))
 
     # --- availability / wake (M2) ---
     # A consumer idle longer than this is treated as gone; must exceed the longest

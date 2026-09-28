@@ -236,7 +236,8 @@ def create_app(
         if path.exists():
             app.state.fleet = load_fleet(path)
             app.state.sync_router = build_router(
-                app.state.fleet, settings.cloud_fallback_model
+                app.state.fleet, settings.cloud_fallback_model,
+                timeout_s=settings.sync_timeout_s,
             )
             _log.info(
                 "sync plane up: %d capabilities from %s",

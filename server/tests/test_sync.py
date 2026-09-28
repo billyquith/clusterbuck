@@ -236,6 +236,86 @@ def test_build_router_includes_keyed_provider_account(monkeypatch):
     assert params.get("api_base") is None
 
 
+@pytest.mark.parametrize("bad_messages", ["hello", [1, 2], [{"role": "user"}], [], None])
+def test_a_malformed_messages_body_is_the_clients_mistake_not_an_outage(
+    sync_client, bad_messages
+):
+    """LiteLLM's own internal TypeError/AttributeError on a wrongly-shaped body got
+    wrapped as an APIConnectionError and misclassified as the model server being
+    unreachable — 502, `retryable: true` — so a client obeying `retryable` retried a
+    request that was always going to fail, believing an outage was happening on the LAN
+    when the request itself was malformed. This never reaches the model server at all
+    now: the fake server would answer 200 to anything, so a non-422 here would mean the
+    request got through."""
+    resp = sync_client.post("/v1/chat/completions",
+                            json={"model": "8b-extract", "messages": bad_messages})
+    assert resp.status_code == 422, resp.text
+    err = resp.json()["error"]
+    assert err["code"] == "invalid_request"
+    assert err["retryable"] is False
+    assert err["param"] == "messages"
+
+
+def test_response_format_and_tools_of_the_wrong_type_are_rejected(sync_client):
+    msgs = [{"role": "user", "content": "x"}]
+    for bad_body in (
+        {"model": "8b-extract", "messages": msgs, "response_format": 5},
+        {"model": "8b-extract", "messages": msgs, "tools": "not-a-list"},
+    ):
+        resp = sync_client.post("/v1/chat/completions", json=bad_body)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["error"]["code"] == "invalid_request"
+
+
+def test_invalid_json_answers_in_the_envelope_not_a_bare_500(sync_client):
+    resp = sync_client.post(
+        "/v1/chat/completions",
+        content=b"{not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "invalid_request"
+
+
+def test_streaming_is_refused_rather_than_silently_answered_wrong(sync_client):
+    """M1 is non-streaming. Silently ignoring `stream: true` and answering with a normal
+    JSON body meant the stock SDK's streaming iterator yielded zero chunks and raised
+    nothing — a silently wrong answer, not a refusal."""
+    resp = sync_client.post(
+        "/v1/chat/completions",
+        json={"model": "8b-extract", "messages": [{"role": "user", "content": "x"}],
+              "stream": True},
+    )
+    assert resp.status_code == 422, resp.text
+    err = resp.json()["error"]
+    assert err["code"] == "invalid_request"
+    assert err["param"] == "stream"
+
+
+def test_max_completion_tokens_is_forwarded(sync_client):
+    """Newer SDKs send this in place of `max_tokens`; dropped, output length was
+    unbounded rather than honouring what the client actually asked for."""
+    router = sync_client.app.state.sync_router
+    seen = {}
+    real = router.acompletion
+
+    async def capture(*args, **kwargs):
+        seen.update(kwargs)
+        return await real(*args, **kwargs)
+
+    router.acompletion = capture
+    try:
+        resp = sync_client.post(
+            "/v1/chat/completions",
+            json={"model": "8b-extract", "messages": [{"role": "user", "content": "x"}],
+                  "max_completion_tokens": 5},
+        )
+    finally:
+        router.acompletion = real
+    assert resp.status_code == 200, resp.text
+    assert seen.get("max_completion_tokens") == 5
+
+
 def test_sync_disabled_without_fleet(tmp_path):
     app = create_app(
         redis_url="redis://localhost:6379/15",
