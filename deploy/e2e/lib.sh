@@ -14,7 +14,7 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # Provides: REPO WORKDIR PIDS  log fail pass  wait_for wait_port_free stop_pid jqpy job_verdict
-#           wait_terminal deadline_in db_row  redis_cli flush_redis
+#           wait_terminal deadline_in db_row  python311 redis_cli flush_redis
 # and installs the EXIT trap that kills PIDS and removes WORKDIR.
 
 : "${E2E_NAME:?set E2E_NAME before sourcing lib.sh}"
@@ -66,6 +66,24 @@ stop_pid() {
 
 # Read JSON on stdin and print one expression off it, e.g. jqpy '["id"]'.
 jqpy() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
+
+# Print a Python 3.11+ interpreter, or FAIL naming what to install.
+#
+# For code the harness runs that ships to a node and so declares its own floor (join.py
+# refuses anything below 3.11). A bare `python3` is Apple's 3.9 on a stock Mac, so that
+# check fires and the test fails for a reason unrelated to what it proves. The server venv
+# comes first because every script already needs it and pyproject pins it to 3.12+; the
+# version is still checked, since a venv is only as new as whatever interpreter built it.
+python311() {
+  local py
+  for py in "$REPO/server/.venv/bin/python" "$REPO/worker/.venv/bin/python" \
+            python3.13 python3.12 python3.11 python3; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null \
+      && { printf '%s\n' "$py"; return 0; }
+  done
+  fail "no Python 3.11+ found — create the server venv: (cd $REPO/server && uv venv && uv pip install -e '.[dev]'), or install python3.12 (e.g. brew install python@3.12)"
+}
 
 # base-url, job-id — one line: `status [worker] [error]`. For a failure message, so a job
 # that ended up somewhere it should not have says WHO took it and why it stopped, rather
