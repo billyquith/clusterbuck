@@ -447,3 +447,25 @@ def test_a_fallback_answer_is_metered_to_the_tier_that_answered(fake_model, tmp_
         assert (row.capability, row.venue, row.node, row.cost_source) == (
             "claude", "cloud", "cloud:anthropic", "litellm")
         assert row.cost > 0
+
+
+def test_json_mode_is_sent_as_the_equivalent_schema(sync_client):
+    """LM Studio 400s `{"type": "json_object"}`; the same meaning goes out as a schema,
+    exactly as the worker sends it on the async plane."""
+    router = sync_client.app.state.sync_router
+    seen, real = {}, router.acompletion
+
+    async def capture(*args, **kwargs):
+        seen.update(kwargs)
+        return await real(*args, **kwargs)
+
+    router.acompletion = capture
+    try:
+        resp = sync_client.post("/v1/chat/completions", json={
+            "model": "8b-extract", "messages": [{"role": "user", "content": "x"}],
+            "response_format": {"type": "json_object"}})
+    finally:
+        router.acompletion = real
+    assert resp.status_code == 200, resp.text
+    assert seen["response_format"]["type"] == "json_schema"
+    assert seen["response_format"]["json_schema"]["schema"] == {"type": "object"}

@@ -52,6 +52,22 @@ _PASSTHROUGH = {
 
 _NOOP_KEY = "sk-noop"  # local servers ignore the key; LiteLLM requires one present
 
+# JSON mode, restated in the one `response_format` shape every model server here accepts.
+# LM Studio refuses `{"type": "json_object"}` outright ("'response_format.type' must be
+# 'json_schema' or 'text'"), so a client sending the long-documented example to a tier
+# declared json_schema-capable got a 400 from the model it had asked for. The worker does
+# the same rewrite (worker model_client.portable_response_format) — the two planes must
+# not disagree about what a request means, and they share no code (ADR 7).
+_ANY_JSON_OBJECT = {"type": "json_schema",
+                    "json_schema": {"name": "response", "schema": {"type": "object"}}}
+
+
+def _portable_response_format(value):
+    # Only the object form arrives here: a bare string is refused before this (422).
+    if isinstance(value, dict) and value.get("type") == "json_object":
+        return _ANY_JSON_OBJECT
+    return value
+
 # The deployment name CBK_CLOUD_FALLBACK_MODEL registers under (deprecated: per-tier
 # `cloud_fallback` replaces it). Not a capability, so its usage rows carry none.
 LEGACY_FALLBACK = "cloud-fallback"
@@ -221,6 +237,8 @@ async def chat_completions(request: Request) -> dict:
         router = getattr(request.app.state, "sync_router_local", None) or router
 
     kwargs = {k: v for k, v in body.items() if k in _PASSTHROUGH}
+    if "response_format" in kwargs:
+        kwargs["response_format"] = _portable_response_format(kwargs["response_format"])
     try:
         resp = await router.acompletion(model=model, messages=messages, **kwargs)
     except Exception as e:  # an upstream / model-server failure

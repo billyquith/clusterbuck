@@ -170,9 +170,15 @@ addressing forms:
   resumes the job. Run the tool yourself and submit a new job carrying its result. A
   tool-capable model is given no authority by Clusterbuck — you decide which calls to honour.
 - For structured output, set both `requires.json_schema: true` and
-  `params.response_format` (e.g. `{"type": "json_object"}`). Without the requirement,
-  `response_format` is dropped on the async path, because routing has not checked the
-  model can honour it. Validate the JSON you get back either way.
+  `params.response_format`, with a schema:
+  `{"type": "json_schema", "json_schema": {"name": "…", "schema": {…}}}`. Without the
+  requirement, `response_format` is dropped on the async path, because routing has not
+  checked the model can honour it. Validate the JSON you get back either way.
+- Send a schema, not JSON mode. `{"type": "json_object"}` is refused outright by some
+  model servers (LM Studio answers `400`), so Clusterbuck rewrites it, on both paths,
+  into the equivalent "any JSON object" schema. That keeps older clients working, but a
+  real schema gets noticeably better output. With `requires.json_schema` and no
+  `response_format`, the async path asks for any JSON object.
 
 ## Poll, persist, and cancel async work
 

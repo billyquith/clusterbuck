@@ -31,6 +31,28 @@ from .naming import artifact_aliases
 #               configured for it — the same class of hole ADR 26 closed for the HTTP API.
 _PARAMS_NOT_FORWARDED = {"stream", "messages", "response_format", "api_key", "api_base"}
 
+# "Any JSON object", in the one `response_format` shape every OpenAI-compatible model server
+# here accepts. `{"type": "json_object"}` is not that shape: LM Studio answers it with a 400
+# ("'response_format.type' must be 'json_schema' or 'text'"), observed live against a tier
+# declared json_schema-capable — so a client following the documented example was refused
+# by the model the coordinator had just routed it to. Ollama, vLLM and llama.cpp all take
+# this form too. A caller who sends a real schema gets far better output than this, and
+# that is what the docs now ask for; this is only the stand-in for JSON mode.
+ANY_JSON_OBJECT = {"type": "json_schema",
+                   "json_schema": {"name": "response", "schema": {"type": "object"}}}
+
+
+def portable_response_format(value: Any) -> Any:
+    """JSON mode rewritten as the equivalent schema; anything else passed through as is.
+
+    Same meaning — the reply must be a JSON object — in a shape the server will not refuse.
+    Also takes the bare string `"json_object"`, which older docs showed in an example.
+    """
+    if value == "json_object" or (isinstance(value, dict)
+                                  and value.get("type") == "json_object"):
+        return ANY_JSON_OBJECT
+    return value
+
 
 class ModelClient:
     def __init__(self, client: httpx.AsyncClient, cfg: WorkerConfig) -> None:
@@ -69,9 +91,8 @@ class ModelClient:
         # what that filter removes. Without the requirement the field stays a dropped
         # hint, because nothing has checked.
         if job.wants_structured_output:
-            request["response_format"] = (
-                (job.params or {}).get("response_format") or {"type": "json_object"}
-            )
+            request["response_format"] = portable_response_format(
+                (job.params or {}).get("response_format") or ANY_JSON_OBJECT)
 
         # Inference params pass straight through (temperature, max_tokens, …).
         #

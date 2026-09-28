@@ -9,6 +9,7 @@ import pytest
 
 from cbk_worker.config import WorkerConfig
 from cbk_worker.model_client import (
+    ANY_JSON_OBJECT,
     ModelClient,
     _refuse_malformed_completion,
     _refuse_substituted_model,
@@ -117,18 +118,34 @@ async def test_response_format_is_forwarded_when_the_job_REQUIRES_json_schema():
         await ModelClient(http, WorkerConfig()).complete(_job(
             prompt="x",
             requires={"json_schema": True},
-            params={"response_format": {"type": "json_object"}},
+            params={"response_format": SCHEMA},
         ))
-    assert seen[0]["response_format"] == {"type": "json_object"}
+    assert seen[0]["response_format"] == SCHEMA
 
 
-async def test_requiring_json_schema_without_naming_a_shape_asks_for_json_mode():
-    """A client can state the need and leave the shape to us."""
+SCHEMA = {"type": "json_schema", "json_schema": {"name": "answer", "schema": {
+    "type": "object", "properties": {"answer": {"type": "string"}}}}}
+
+
+async def test_requiring_json_schema_without_naming_a_shape_asks_for_any_object():
+    """A client can state the need and leave the shape to us — in the schema form, since
+    JSON mode (`json_object`) is refused outright by LM Studio."""
     transport, seen = _capture()
     async with httpx.AsyncClient(transport=transport) as http:
         await ModelClient(http, WorkerConfig()).complete(
             _job(prompt="x", requires={"json_schema": True}))
-    assert seen[0]["response_format"] == {"type": "json_object"}
+    assert seen[0]["response_format"] == ANY_JSON_OBJECT
+
+
+@pytest.mark.parametrize("sent", [{"type": "json_object"}, "json_object"])
+async def test_json_mode_is_sent_as_the_equivalent_schema(sent):
+    """Found live: the documented `{"type": "json_object"}` reached a json_schema-capable
+    tier and its LM Studio answered 400. Same meaning, portable shape."""
+    transport, seen = _capture()
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ModelClient(http, WorkerConfig()).complete(_job(
+            prompt="x", requires={"json_schema": True}, params={"response_format": sent}))
+    assert seen[0]["response_format"] == ANY_JSON_OBJECT
 
 
 async def test_http_error_propagates_so_the_loop_can_record_a_failed_result():

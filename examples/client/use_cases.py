@@ -34,6 +34,14 @@ from cbk_client import Client, ClusterbuckError, JobStore
 
 MESSAGES = [{"role": "user", "content": "Extract the fields from this text."}]
 
+# Structured output is asked for with a schema. JSON mode (`{"type": "json_object"}`) is
+# not accepted by every model server — LM Studio refuses it — and a real schema gets
+# better output than "any object" everywhere. Clusterbuck rewrites JSON mode into the
+# schema form so older clients still work; new ones should send the schema.
+RESPONSE_FORMAT = {"type": "json_schema", "json_schema": {"name": "fields", "schema": {
+    "type": "object", "properties": {"fields": {"type": "object"}},
+    "required": ["fields"]}}}
+
 
 class Expectation(Exception):
     """The coordinator did something a client cannot work with."""
@@ -106,7 +114,7 @@ def sync_structured(c: Client, _: argparse.Namespace) -> None:
               and (cap.get("health") or {}).get("state") == "ready"]
     expect(bool(usable), "/fleet offers no alias that is ready and declares json_schema")
     expect("dead-extract" not in usable, "/fleet offered a dead alias as ready")
-    out = c.complete(usable[0], MESSAGES, response_format={"type": "json_object"})
+    out = c.complete(usable[0], MESSAGES, response_format=RESPONSE_FORMAT)
     try:
         json.loads(out.choices[0].message.content)
     except ValueError as e:
@@ -143,7 +151,7 @@ def durable_extraction(c: Client, _: argparse.Namespace) -> None:
     """A batch item: idempotent submit, a lost response retried, the result kept."""
     job = {"capability": "live-extract", "messages": MESSAGES,
            "requires": {"json_schema": True},
-           "params": {"temperature": 0, "response_format": {"type": "json_object"}},
+           "params": {"temperature": 0, "response_format": RESPONSE_FORMAT},
            "urgency": "waitable", "privacy": "local_only",
            "submitter": {"app": "reference-client"}}
     key = c.new_key()

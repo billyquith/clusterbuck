@@ -22,7 +22,10 @@ open long enough that anything the worker does *during* a beat, rather than afte
 happens on every beat instead of by luck.
 
 A request carrying `response_format` gets a JSON object as its content, so a client that
-validates structured output has something to validate.
+validates structured output has something to validate. JSON mode (`{"type":
+"json_object"}`) is refused with a 400, exactly as LM Studio refuses it: a client once
+followed the documented example to a live tier and was turned away, and the suite could
+not see it because this stub accepted anything.
 
 Usage:  python fake_model_server.py [--port 11434] [--stall-s 0] [--fail-chat 0]
                                    [--discovery-delay-s 0]
@@ -130,6 +133,16 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or "{}")
         if self.fail_chat:
             self.send_error(self.fail_chat, "simulated model server failure")
+            return
+        rf = body.get("response_format")
+        if isinstance(rf, dict) and rf.get("type") not in (None, "json_schema", "text"):
+            payload = json.dumps({"error": "'response_format.type' must be "
+                                           "'json_schema' or 'text'"}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
             return
         model = body.get("model", "fake-model")
         messages = body.get("messages", [])

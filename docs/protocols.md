@@ -69,7 +69,9 @@ POST /jobs
    "vision": false
  },
  "messages": [ {role, content}, … ],// OpenAI-style; or "prompt"
- "params": { "temperature": 0.2, "max_tokens": 1500, "response_format": "json_object" },
+ "params": { "temperature": 0.2, "max_tokens": 1500,
+             "response_format": { "type": "json_schema",
+                                  "json_schema": { "name": "…", "schema": { … } } } },
  "urgency": "waitable", // urgent | necessary | waitable — a trajectory:
  "escalate_after_min": 10, // waitable = eager but non-demanding; N is a
  // patience bound (not a delay) — unserved
@@ -171,8 +173,15 @@ plane forwarded it. `requires.json_schema` settles it: it is a hard requirement 
 filters on, so by the time the job reaches a worker the pinned artifact is declared
 capable of honouring the flag — which is exactly the check whose absence justified
 dropping it. Without the requirement it remains a dropped hint. Set both: the requirement
-to gate routing, and `params.response_format` to say what shape you want (default
-`{"type": "json_object"}`).
+to gate routing, and `params.response_format` to say what shape you want — a
+`json_schema`. With the requirement and no `response_format`, the worker asks for any JSON
+object.
+
+JSON mode (`{"type": "json_object"}`) is **rewritten** into that same "any JSON object"
+schema, on both planes, before it reaches a model server. It is not portable: LM Studio
+refuses it with a 400 ("'response_format.type' must be 'json_schema' or 'text'"), which
+turned the long-documented example into a refusal on a tier declared json_schema-capable.
+The rewrite keeps such clients working; a real schema gives better output.
 
 **The resolved artifact is pinned on the job** (`params.model`). A capability is only a queue
 name: the worker draining it answers with its own `CBK_MODEL`, for every capability it
