@@ -330,3 +330,120 @@ def test_sync_disabled_without_fleet(tmp_path):
         )
         assert resp.status_code == 503
         assert resp.json()["error"]["code"] == "fleet_not_configured"
+
+
+# --- metering and the budget gate (design.md §8) ----------------------------------------
+
+
+def test_a_sync_completion_is_metered_without_its_text(sync_client):
+    """The sync plane used to be invisible to cost tracking: no row, no avoided spend, no
+    budget. A row now — and nothing in it that a person wrote or a model said."""
+    secret, store = "the-launch-code-is-4321", sync_client.app.state.store
+    resp = sync_client.post(
+        "/v1/chat/completions",
+        json={"model": "8b-extract", "messages": [{"role": "user", "content": secret}]})
+    assert resp.status_code == 200, resp.text
+    rows = store.recent_usage()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.job_id.startswith("sync-")
+    assert (row.capability, row.venue, row.node, row.outcome) == (
+        "8b-extract", "local", "sync", "done")
+    assert row.tokens_in > 0
+    answer = resp.json()["choices"][0]["message"]["content"]
+    for value in row.model_dump().values():
+        assert secret not in str(value) and (not answer or answer not in str(value))
+
+
+def _cloud_fleet_client(fake_model, tmp_path, monkeypatch):
+    monkeypatch.setenv("CBK_T_SYNC_KEY", "sk-test")
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "capabilities:\n"
+        "  8b-extract:\n"
+        f"    model_server: '{fake_model}'\n"
+        "    model: 'fake'\n"
+        "    cloud_fallback: claude\n"
+        "  claude:\n"
+        "    model: 'anthropic/claude-sonnet-5'\n"
+        "    cloud: true\n"
+        "    api_key_env: CBK_T_SYNC_KEY\n"
+    )
+    app = create_app(redis_url="redis://localhost:6379/15", db_path=str(tmp_path / "t.db"),
+                     fleet_path=str(fleet), start_scheduler=False)
+    return TestClient(app)
+
+
+def _spend(store, amount):
+    from datetime import UTC, datetime
+
+    store.record_usage(job_id="spent", ts="t", capability="claude", model=None, node=None,
+                       venue="cloud", tokens_in=0, tokens_out=0, outcome="done",
+                       cost=amount, day=datetime.now(UTC).strftime("%Y-%m-%d"))
+
+
+def test_the_local_only_router_has_no_way_to_spend(fake_model, tmp_path, monkeypatch):
+    with _cloud_fleet_client(fake_model, tmp_path, monkeypatch) as c:
+        full, local = c.app.state.sync_router, c.app.state.sync_router_local
+        assert set(full.get_model_names()) == {"8b-extract", "claude"}
+        assert full.fallbacks == [{"8b-extract": ["claude"]}]
+        assert local.get_model_names() == ["8b-extract"]
+        assert not local.fallbacks
+
+
+def test_an_exhausted_budget_refuses_cloud_and_serves_locally(fake_model, tmp_path,
+                                                              monkeypatch):
+    import dataclasses
+
+    from clusterbuck.config import settings
+
+    monkeypatch.setattr("clusterbuck.config.settings",
+                        dataclasses.replace(settings, cloud_budget_monthly=1.0))
+    with _cloud_fleet_client(fake_model, tmp_path, monkeypatch) as c:
+        _spend(c.app.state.store, 5.0)
+        full = c.app.state.sync_router
+
+        async def must_not_be_called(*a, **kw):  # the router that can reach a provider
+            raise AssertionError("the full router was used past the budget")
+
+        full.acompletion = must_not_be_called
+        msg = [{"role": "user", "content": "x"}]
+        resp = c.post("/v1/chat/completions", json={"model": "claude", "messages": msg})
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["error"]["code"] == "cloud_budget_exhausted"
+        resp = c.post("/v1/chat/completions", json={"model": "8b-extract", "messages": msg})
+        assert resp.status_code == 200, resp.text
+
+
+def test_a_fallback_answer_is_metered_to_the_tier_that_answered(fake_model, tmp_path,
+                                                               monkeypatch):
+    """After a fallback the answering deployment is not the one the client named, and
+    only the former's price (and venue) is true."""
+    with _cloud_fleet_client(fake_model, tmp_path, monkeypatch) as c:
+        router = c.app.state.sync_router
+
+        class _Resp:
+            def __init__(self):
+                self._hidden_params = {
+                    "additional_headers": {"x-litellm-model-group": "claude"}}
+
+            def model_dump(self):
+                return {"id": "x", "object": "chat.completion", "created": 0,
+                        "model": "claude-sonnet-5",
+                        "choices": [{"index": 0, "finish_reason": "stop",
+                                     "message": {"role": "assistant", "content": "hi"}}],
+                        "usage": {"prompt_tokens": 1000, "completion_tokens": 100,
+                                  "total_tokens": 1100}}
+
+        async def answered_by_fallback(*a, **kw):
+            return _Resp()
+
+        router.acompletion = answered_by_fallback
+        resp = c.post("/v1/chat/completions",
+                      json={"model": "8b-extract", "messages": [{"role": "user",
+                                                                 "content": "x"}]})
+        assert resp.status_code == 200, resp.text
+        row = c.app.state.store.recent_usage()[0]
+        assert (row.capability, row.venue, row.node, row.cost_source) == (
+            "claude", "cloud", "cloud:anthropic", "litellm")
+        assert row.cost > 0

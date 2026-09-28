@@ -90,7 +90,10 @@ class Settings:
     stream_maxlen: int = int(os.environ.get("CBK_STREAM_MAXLEN", "10000"))
     # Static registry seed for the sync plane (protocols.md §5).
     fleet_path: str = os.environ.get("CBK_FLEET_PATH", "fleet.yaml")
-    # Opt-in cloud fallback for the sync plane; unset ⇒ sync plane is local-only.
+    # DEPRECATED — one keyless sync-plane fallback for every tier. Set `cloud_fallback:`
+    # on a tier in fleet.yaml instead: it names a provider account with its own key, and
+    # the async plane's fallback reads the same field. Still honoured for tiers that
+    # declare none; warned at startup.
     cloud_fallback_model: str | None = os.environ.get("CBK_CLOUD_FALLBACK_MODEL") or None
     # How long the sync plane waits on a model server for one completion, before
     # LiteLLM's own default of 6000s does. A person is waiting on this call — the whole
@@ -157,6 +160,22 @@ class Settings:
     cloud_budget_reserve_fraction: float = float(
         os.environ.get("CBK_CLOUD_BUDGET_RESERVE_FRACTION", "0.2")
     )
+    # Cloud rescue (rescue.py, design.md §8): move a queued `cloud_ok` job to its cloud
+    # alternate when no machine is reading its tier and its deadline is this close.
+    # Enough lead for a provider call to finish inside the deadline, not so much that a
+    # machine about to wake loses the job it was woken for.
+    cloud_rescue_lead_s: float = float(os.environ.get("CBK_CLOUD_RESCUE_LEAD_S", "120"))
+    # Rescue a job with NO deadline once it has waited this long unserved. Unset ⇒ never:
+    # a job that gave no deadline said it could wait, and spending money on it by default
+    # would contradict "buffered work costs only latency" (design.md §2).
+    cloud_rescue_after_s: float | None = (
+        float(os.environ["CBK_CLOUD_RESCUE_AFTER_S"])
+        if os.environ.get("CBK_CLOUD_RESCUE_AFTER_S") else None
+    )
+    # At most this many rescues per coordinator tick. Each one commits an estimate against
+    # the budget before the next is checked, so this is a second fence against a backlog
+    # of hundreds going to the cloud in one tick on estimates that turn out low.
+    cloud_rescue_max_per_tick: int = int(os.environ.get("CBK_CLOUD_RESCUE_MAX_PER_TICK", "5"))
 
 
 class ConfigError(ValueError):

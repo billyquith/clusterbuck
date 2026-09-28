@@ -619,26 +619,41 @@ Two governors apply to all of it:
 - **Privacy.** Every job carries `privacy: local_only | cloud_ok`, defaulting to
   `local_only`. A `local_only` job **never** leaves the LAN — not at `urgent`, not under
   overflow pressure, not to hit a deadline. It waits, or fails explicitly.
-- **Budget.** A monthly cap, and on the async plane it is *enforced*, not merely
-  displayed. `necessary` may spend the **paced pool** — the cap minus a reserve, scaled
-  by how much of the month has elapsed, so week one cannot burn the month. `urgent` may
-  additionally draw the reserve. `waitable` never reaches the budget check at all,
-  because for it cloud is a wake-rights question decided earlier: no wake, no cloud, no
-  demand.
+- **Budget.** A monthly cap, *enforced*, not merely displayed, on both planes.
+  `necessary` may spend the **paced pool** — the cap minus a reserve, scaled by how much
+  of the month has elapsed, so week one cannot burn the month. `urgent` may additionally
+  draw the reserve; the sync plane counts as `urgent`, because a person is waiting.
+  `waitable` never reaches the budget check at all, because for it cloud is a wake-rights
+  question decided earlier: no wake, no cloud, no demand.
 
-  **The sync plane is outside all of this, and that is a hole, not a design.** A
-  completion served through `/v1/chat/completions` is never captured by `usage.py`, so it
-  is never gated by `budget.py` either — a registered provider account driven through the
-  sync plane can spend real money with no appearance in the cap, the timeline, the
-  connections panel, or the *avoided cloud spend* headline this project names as its
-  reason to exist. Two things follow: the headline is a floor rather than a figure on any
-  fleet using the sync plane against a cloud account, and "enforced" above should be read
-  as "enforced where clusterbuck executes the job itself". Closing it means metering the
-  sync plane, most likely through a LiteLLM success callback writing the same usage rows.
+  Spend is checked as **reported plus committed**. A provider's bill is only seen once
+  it answers, so every cloud job admitted in the same minute used to be checked against
+  the same stale month-to-date, and a burst could sail past the cap. A job placed on a
+  cloud stream now carries an estimate (`est_cost`: its prompt at ~4 characters a token,
+  plus `max_tokens` or a generous default, at the model's price), which counts against
+  the cap until its real figure replaces it. The estimate errs high on purpose: too high
+  refuses a job a little early, too low lets the cap be a suggestion.
 
-  A related smaller one: a capability with no `price_*_per_1k` contributes `$0.0`
-  silently, so a tier added without prices quietly deflates the headline rather than
-  complaining.
+**Unavailability is built, in two halves.**
+
+- **At submit.** A local tier is *unavailable* when no machine is reading its queue and
+  none can be woken for it. A `cloud_ok` job with wake rights (`necessary`, `urgent`)
+  whose every bar-clearing local tier is unavailable goes straight to the best cloud
+  artifact that clears the same bar. A job addressed to a tier by name has no bar to
+  search with, so it goes to the provider account that tier names as its
+  `cloud_fallback`, and nowhere if it names none.
+- **By rescue.** A job queued for a tier that *could* be served — a machine was up, or
+  one could be woken — and then was not, is moved to the cloud when its deadline comes
+  within `CBK_CLOUD_RESCUE_LEAD_S` and still nothing is reading its tier. Where it may go
+  is decided **at submit**, against the ability bar and `requires` it was routed on, and
+  stored on the row (`cloud_alternate`); urgency and budget are re-checked at the moment
+  of rescue, so an escalated `waitable` job qualifies once promoted and not before. A job
+  with no deadline is not rescued unless the operator opts in (`CBK_CLOUD_RESCUE_AFTER_S`):
+  it said it could wait, and spending money on it by default would contradict §2.
+
+Both are availability rules, never speed rules. A tier that is up but slow keeps its
+work — that case is overflow, and §12's "speed never promotes cloud over local" is what
+keeps it from being built by accident.
 
 Cloud models are **artifacts with a price and no host node**. They enter the same catalog
 and the same ability matrix as local ones, measured rather than assumed — and by the same
@@ -651,11 +666,23 @@ executed by the coordinator's own executor, which records itself on the job as
 ## 9. Usage accounting
 
 Every job is logged, local and cloud: ids, timestamps, capability, model, node or
-`cloud:<provider>`, tokens in/out, queue wait, run time, outcome, cost.
+`cloud:<provider>`, tokens in/out (and how many of the input were served from the
+provider's cache), queue wait, run time, outcome, cost — and where the cost came from.
+So is every sync-plane completion, under an id of its own, attributed to the deployment
+that actually answered rather than the one the client named.
 
 **Metadata only — never prompt or completion text.** The accounting layer must not become
 a copy of every private thing the fleet has processed. Payloads live only in the broker,
 under their TTLs.
+
+**Where cost comes from.** A cloud row is priced by LiteLLM's price map for the model that
+answered, which knows cache reads and writes — on a long reused prompt, most of the bill —
+where a flat rate cannot. A model the map does not know falls back to the tier's
+`price_*_per_1k` and the row says `cost_source: fleet`, because an estimate recorded as a
+quote is how a budget drifts. A local row is always the fleet price: it is a
+counterfactual, what the run would have cost elsewhere, and only the operator can say
+what "elsewhere" is. A tier with neither is named at startup rather than silently
+recorded at $0.
 
 This is **metering, not billing**: visibility and planner input, not chargeback. The
 headline is **avoided cloud spend** — local tokens priced at the rate they would otherwise
@@ -992,8 +1019,29 @@ Short list, because reversing one of these quietly breaks something.
   faster sat idle unless a client named its tier. Price is now the tie-break. Two limits
   keep it honest: liveness is "reading this queue now" (so the presence ladder and pause
   count), never "enrolled"; and speed never promotes cloud over local — that stays a
-  privacy and budget decision. Reservations keep the old order: a booking is for a window
+  privacy and budget decision. The one exception is *availability* (§8): a tier that
+  nobody is reading and nobody can wake is not slow, it is absent, and a `cloud_ok` job
+  with wake rights is not made to wait for a machine to turn up of its own accord. Reservations keep the old order: a booking is for a window
   that has not started, and who is idle now says nothing about it.
+- **A rescued job's row changes capability, before its entry moves.** Usage is metered
+  by the row's capability, so a job moved to the cloud but still labelled local has its
+  real provider bill recorded as *avoided* spend and never counted against the budget.
+  The row is rewritten first, with `rescued_from` naming the tier it left, so a
+  coordinator that dies between the two leaves a row the orphan sweep can reconcile from
+  either side instead of a job metered in the wrong column.
+- **A rescue only moves an entry nobody holds.** The result is first-writer-wins, so a
+  duplicate answer is harmless to the client — but that protects the answer, not the
+  money. Moving a job a worker is already running pays a provider for an answer that is
+  about to be thrown away.
+- **The sync plane is metered inline, not through a LiteLLM callback.** Callbacks are
+  process-global, and the cloud executor calls LiteLLM in the same process: a success
+  callback would count every async cloud job twice. Likewise the budget gate is a second
+  router with no cloud in it, not a check before the call — LiteLLM decides a fallback
+  inside the call, after anything a check could see.
+- **A zero price from LiteLLM is not a price.** Building the sync router registers every
+  deployment in LiteLLM's global price map, an unknown model at $0, after which it prices
+  that model at nothing instead of refusing. Whether the map genuinely knows a model is
+  asked separately, before its figure is believed.
 - **A queue, not a serving cluster.** The scarce resource is availability. Everything
   follows from taking an intermittent fleet seriously.
 - **Pull, not push.** Subscription *is* liveness. A dispatcher would need a liveness table

@@ -40,6 +40,7 @@ from .model_health import ModelHealth
 from .observe import observe_tick
 from .queue import Queue
 from .reaper import reaper_scan
+from .rescue import rescue_scan
 from .reservations import reservation_tick
 from .store import Store
 from .usage import usage_scan
@@ -83,6 +84,17 @@ async def coordinator_loop(
 
         with _isolated("escalation"):
             await escalation_scan(store, queue, wake, fleet=fleet)
+        # After escalation, so a waitable job promoted this tick gains its cloud rights in
+        # the same tick; before usage, which would otherwise expire a job this could save.
+        with _isolated("rescue"):
+            await rescue_scan(
+                store, queue, wake, fleet, group=settings.consumer_group,
+                lead_s=settings.cloud_rescue_lead_s,
+                after_s=settings.cloud_rescue_after_s,
+                max_per_tick=settings.cloud_rescue_max_per_tick,
+                budget_monthly=settings.cloud_budget_monthly,
+                reserve_fraction=settings.cloud_budget_reserve_fraction,
+            )
         with _isolated("reservation"):
             await reservation_tick(store, wake)
         with _isolated("usage"):

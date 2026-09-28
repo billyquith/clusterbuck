@@ -121,6 +121,10 @@ class Store:
         submitted_at: str | None = None,
         observed_ip: str | None = None,
         idempotency_key: str | None = None,
+        privacy: str | None = None,
+        cloud_alternate: str | None = None,
+        cloud_alternate_model: str | None = None,
+        est_cost: float | None = None,
     ) -> Job | None:
         """Insert a queued job. Returns None normally — or, when `idempotency_key` is
         already taken, the job that took it, having written nothing.
@@ -142,6 +146,8 @@ class Store:
             submitter_app=submitter_app, submitter_instance=submitter_instance,
             submitter_request_id=submitter_request_id, submitted_at=submitted_at,
             observed_ip=observed_ip, idempotency_key=idempotency_key,
+            privacy=privacy, cloud_alternate=cloud_alternate,
+            cloud_alternate_model=cloud_alternate_model, est_cost=est_cost,
         )
         try:
             with self._session() as s:
@@ -280,6 +286,63 @@ class Store:
                 job.stream = None
                 s.add(job)
                 s.commit()
+
+    # --- cloud rescue (rescue.py) ----------------------------------------------------
+
+    def rescue_candidates(self) -> list[Job]:
+        """Queued jobs that COULD be moved to the cloud: permission recorded, a cloud
+        alternate chosen at submit, wake rights, a known entry, and never rescued yet.
+        Timing (deadline, age) and liveness are the caller's to judge — they need the
+        clock and Redis, which this query has neither of."""
+        with self._session() as s:
+            stmt = select(Job).where(
+                Job.status == "queued",
+                Job.privacy == "cloud_ok",
+                Job.cloud_alternate.is_not(None),
+                Job.urgency.in_(("necessary", "urgent")),
+                Job.entry_id.is_not(None),
+                Job.rescued_from.is_(None),
+            # Nearest deadline first: the per-tick cap must not spend its slots on jobs
+            # with minutes to spare while one with seconds left waits behind them.
+            ).order_by(Job.deadline_epoch.is_(None), Job.deadline_epoch, Job.created_at)
+            return list(s.exec(stmt))
+
+    def begin_rescue(self, id: str, *, entry_id: str, to_capability: str,
+                     est_cost: float) -> bool:
+        """Point the row at the cloud tier BEFORE its entry moves. True if it did.
+
+        One UPDATE, scoped to the entry the caller read, doing three things at once:
+        `capability` becomes the cloud tier (so the job is metered as cloud spend, not as
+        avoided spend, however the move ends), `rescued_from` records the tier it left,
+        and the delivery is cleared — the same crash-safety `clear_delivery` gives a tier
+        move. A coordinator dying between this and the move leaves a row the orphan
+        sweep can reconcile from either side.
+        """
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is None or job.entry_id != entry_id or job.rescued_from is not None:
+                return False
+            job.rescued_from = job.capability
+            job.capability = to_capability
+            job.est_cost = est_cost
+            job.entry_id = None
+            job.stream = None
+            s.add(job)
+            s.commit()
+            return True
+
+    def undo_rescue(self, id: str) -> None:
+        """Put a row back on the tier it was rescued from — for a move that did not
+        happen. Delivery is left as the caller sets it."""
+        with self._session() as s:
+            job = s.get(Job, id)
+            if job is None or job.rescued_from is None:
+                return
+            job.capability = job.rescued_from
+            job.rescued_from = None
+            job.est_cost = None
+            s.add(job)
+            s.commit()
 
     def jobs_by_entry_ids(self, entry_ids: list[str]) -> dict[tuple[str | None, str], Job]:
         """(stream, entry_id) → job, for the ids currently held in a stream's pending list.
@@ -1007,7 +1070,8 @@ class Store:
     def record_usage(self, *, job_id: str, ts: str, capability: str | None,
                      model: str | None, node: str | None, venue: str,
                      tokens_in: int, tokens_out: int, outcome: str, cost: float,
-                     day: str) -> None:
+                     day: str, tokens_cached_in: int = 0,
+                     cost_source: str | None = None) -> None:
         """Write one usage record. Idempotent under tick/GET races — silently does
         nothing if a row for this job already exists (INSERT OR IGNORE equivalent)."""
         with self._session() as s:
@@ -1015,8 +1079,9 @@ class Store:
                 return
             s.add(Usage(
                 job_id=job_id, ts=ts, capability=capability, model=model, node=node,
-                venue=venue, tokens_in=tokens_in, tokens_out=tokens_out, outcome=outcome,
-                cost=cost, day=day,
+                venue=venue, tokens_in=tokens_in, tokens_out=tokens_out,
+                tokens_cached_in=tokens_cached_in, outcome=outcome, cost=cost,
+                cost_source=cost_source, day=day,
             ))
             s.commit()
 
@@ -1079,6 +1144,20 @@ class Store:
                 "FROM usage WHERE day >= ? GROUP BY day, node ORDER BY day",
                 (cutoff,),
             ).fetchall()
+
+    def committed_cloud_estimate(self, month_prefix: str) -> float:
+        """Estimated spend of jobs placed on a cloud stream this month whose usage row
+        has not landed yet — money committed but not yet reported (budget.py). A job
+        leaves this sum the moment it is metered, at its real cost, or terminalised
+        without an answer, at $0."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COALESCE(SUM(j.est_cost), 0) AS est FROM jobs j "
+                "LEFT JOIN usage u ON u.job_id = j.id "
+                "WHERE u.job_id IS NULL AND j.est_cost IS NOT NULL AND j.created_at LIKE ?",
+                (f"{month_prefix}%",),
+            ).fetchone()
+            return float(row["est"])
 
     def cloud_spend_in_month(self, month_prefix: str) -> float:
         """Actual cloud spend for a 'YYYY-MM' prefix (budget burn)."""

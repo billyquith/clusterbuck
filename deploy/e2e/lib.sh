@@ -14,7 +14,7 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # Provides: REPO WORKDIR PIDS  log fail pass  wait_for wait_port_free stop_pid jqpy job_verdict
-#           redis_cli flush_redis
+#           wait_terminal deadline_in db_row  redis_cli flush_redis
 # and installs the EXIT trap that kills PIDS and removes WORKDIR.
 
 : "${E2E_NAME:?set E2E_NAME before sourcing lib.sh}"
@@ -75,6 +75,33 @@ job_verdict() {
 import sys,json
 j=json.load(sys.stdin)
 print(' '.join(str(x) for x in (j['status'], j.get('worker'), j.get('error')) if x))"
+}
+
+# base-url, job-id, [tries] — poll until the job is terminal; print its final status.
+# tries defaults to 60 (~30s at 0.5s apart). Prints the last status seen if it never is.
+wait_terminal() {
+  local status="" tries="${3:-60}"
+  for _ in $(seq 1 "$tries"); do
+    status=$(curl -fsS "$1/jobs/$2" | jqpy "['status']")
+    case "$status" in done|failed|expired|cancelled) break ;; esac
+    sleep 0.5
+  done
+  echo "$status"
+}
+
+# seconds — an RFC 3339 UTC timestamp that far from now, for a job's `deadline`.
+# timezone.utc rather than datetime.UTC: the system python3 on macOS is 3.9.
+deadline_in() { python3 -c "
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) + timedelta(seconds=$1)).isoformat().replace('+00:00', 'Z'))"; }
+
+# db-path, sql — the first row of a query against the coordinator's SQLite, pipe-joined,
+# NULL as empty. For asserting on columns the API does not expose.
+db_row() {
+  python3 -c "
+import sqlite3, sys
+r = sqlite3.connect(sys.argv[1]).execute(sys.argv[2]).fetchone()
+print('|'.join('' if v is None else str(v) for v in (r or ())))" "$1" "$2"
 }
 
 # THE one definition. CI sets CBK_REDIS_CLI because a GitHub service container has no

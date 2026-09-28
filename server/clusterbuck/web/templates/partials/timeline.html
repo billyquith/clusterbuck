@@ -8,6 +8,7 @@
     <span class="tl-node" title="{{ r.node }}">{{ names.get(r.node, r.node) or "—" }}</span>
     <span class="pill {{ 'warn' if r.venue == 'cloud' else 'ok' }}">{{ r.venue }}</span>
     <span class="tl-cap">{{ r.capability or "—" }}{% if r.model %} &middot; {{ r.model }}{% endif %}</span>
+    {% if r.cost %}<span class="tl-cost" title="{{ 'avoided — priced at the tier\'s cloud-equivalent rate' if r.venue != 'cloud' else ('billed, from the provider\'s published price' if r.cost_source == 'litellm' else 'ESTIMATED from fleet.yaml — LiteLLM has no price for this model') }}">${{ "%.4f"|format(r.cost) }}{% if r.venue == 'cloud' and r.cost_source != 'litellm' %} est.{% endif %}</span>{% endif %}
     <span class="tl-outcome">{{ r.outcome }}</span>
   </div>
   {% endfor %}

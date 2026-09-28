@@ -45,6 +45,10 @@ capabilities:
     model: "qwen2.5:32b"
     price_in_per_1k: 0.0009
     price_out_per_1k: 0.0027
+    # Where a `cloud_ok` job addressed to this tier BY NAME may go when no machine can
+    # serve it (design.md §8), and this tier's sync-plane fallback. A job's own
+    # `privacy: local_only` still keeps it here; this grants nothing on its own.
+    cloud_fallback: claude-sonnet
   70b-reason:
     description: "The strongest local model; slow — for work that must not go to the cloud"
     model_server: "http://localhost:11434/v1"
@@ -67,23 +71,43 @@ capabilities:
   # these live in the model catalog; a provider account has no host and never enters that
   # catalog, so it declares them here. An artifact that declares nothing is excluded from
   # any job that requires a feature, rather than served on the assumption it copes.
+  #
+  # Prices are optional here. A provider account's spend is priced by LiteLLM's own price
+  # map for the model that actually answered, cache reads and writes included; a
+  # price_*_per_1k set here is only used for a model that map does not know (the usage
+  # row then says `cost_source: fleet`). The startup log names any cloud tier neither can
+  # price, because its spend would otherwise count as $0 against the budget.
+  #
+  # The feature fields below are LiteLLM's model info for each id, not guesses.
   claude-sonnet:
-    model: "anthropic/claude-3-5-sonnet-20241022"
+    model: "anthropic/claude-sonnet-5"
     api_key_env: CBK_ANTHROPIC_API_KEY
     cloud: true
-    price_in_per_1k: 0.003
-    price_out_per_1k: 0.015
-    context_tokens: 200000
+    context_tokens: 1000000
     supports_tools: true
     supports_json_schema: true
     supports_vision: true
-  gpt-4o-mini:
-    model: "openai/gpt-4o-mini"
+  gpt-5.6-sol:
+    model: "openai/gpt-5.6-sol"
     api_key_env: CBK_OPENAI_API_KEY
     cloud: true
-    price_in_per_1k: 0.00015
-    price_out_per_1k: 0.0006
-    context_tokens: 128000
+    context_tokens: 922000
+    supports_tools: true
+    supports_json_schema: true
+    supports_vision: true
+  gpt-5.6-terra:
+    model: "openai/gpt-5.6-terra"
+    api_key_env: CBK_OPENAI_API_KEY
+    cloud: true
+    context_tokens: 922000
+    supports_tools: true
+    supports_json_schema: true
+    supports_vision: true
+  gpt-5.6-luna:
+    model: "openai/gpt-5.6-luna"
+    api_key_env: CBK_OPENAI_API_KEY
+    cloud: true
+    context_tokens: 922000
     supports_tools: true
     supports_json_schema: true
     supports_vision: true

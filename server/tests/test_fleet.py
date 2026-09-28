@@ -54,7 +54,7 @@ def test_seed_fleet_declares_a_no_host_cloud_capability():
     assert cap.cloud is True
     assert cap.model_server is None  # no host — the coordinator calls it, not a worker
     assert cap.api_key_env == "CBK_ANTHROPIC_API_KEY"
-    assert cap.model == "anthropic/claude-3-5-sonnet-20241022"
+    assert cap.model == "anthropic/claude-sonnet-5"
 
 
 def test_resolve_api_key_reads_the_named_env_var(monkeypatch):

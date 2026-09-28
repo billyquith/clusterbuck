@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .auth import install_auth, key_matches
 from .background import coordinator_loop
+from .budget import estimate_cost
 from .capability_proposal import propose_capabilities
 from .catalog import (
     apply_action_result,
@@ -64,7 +65,7 @@ from .signing import build_manifest, load_private_pem, public_pem, sign_bootstra
 from .store import Store
 from .sync import build_router, sync_routes
 from .tiering import tiering_ready
-from .usage import build_usage_summary, venue_of
+from .usage import build_usage_summary, litellm_can_price, venue_of
 from .versions import assess, parse_version, policy_from_settings, version_gt
 from .wake import WakeCoordinator
 from .web import WEB_DIR, web_routes
@@ -239,6 +240,14 @@ def create_app(
                 app.state.fleet, settings.cloud_fallback_model,
                 timeout_s=settings.sync_timeout_s,
             )
+            # What the sync plane serves once the cloud budget is spent (sync.py).
+            app.state.sync_router_local = build_router(
+                app.state.fleet, timeout_s=settings.sync_timeout_s, local_only=True)
+            if settings.cloud_fallback_model:
+                _log.warning(
+                    "CBK_CLOUD_FALLBACK_MODEL is deprecated: set `cloud_fallback: <provider "
+                    "account>` on each tier in %s instead, which gives the fallback its own "
+                    "key and puts it in the fleet file with everything else", path.name)
             _log.info(
                 "sync plane up: %d capabilities from %s",
                 len(app.state.fleet.capabilities), path.resolve(),
@@ -249,19 +258,36 @@ def create_app(
             # it drags the total down and looks like the fleet earned less. Cheap to
             # forget (prices are the one field with a harmless-looking default) and
             # invisible afterwards, so say it once at startup.
-            unpriced = sorted(
-                name for name, c in app.state.fleet.capabilities.items()
-                if not (c.price_in_per_1k or c.price_out_per_1k)
-            )
+            #
+            # A cloud tier is different: its spend is priced by LiteLLM for the model that
+            # answered (usage.cloud_cost), so it only needs a fleet price when LiteLLM
+            # does not know the model — and then it is not the headline that suffers but
+            # the budget, which would count that tier's real spend as $0.
+            unpriced, cloud_unpriced = [], []
+            for name, c in sorted(app.state.fleet.capabilities.items()):
+                if c.price_in_per_1k or c.price_out_per_1k:
+                    continue
+                if not c.cloud:
+                    unpriced.append(name)
+                elif not litellm_can_price(c.model):
+                    cloud_unpriced.append(name)
             if unpriced:
                 _log.warning(
                     "no price set for %s — these contribute $0 to avoided cloud spend "
                     "(set price_in_per_1k / price_out_per_1k in %s)",
                     ", ".join(unpriced), path.name,
                 )
+            if cloud_unpriced:
+                _log.warning(
+                    "cloud tier(s) %s: LiteLLM has no price for the model and %s sets "
+                    "none — their spend is recorded as $0 and the cloud budget cannot "
+                    "see it (set price_in_per_1k / price_out_per_1k)",
+                    ", ".join(cloud_unpriced), path.name,
+                )
         else:
             app.state.fleet = None
             app.state.sync_router = None
+            app.state.sync_router_local = None
             # Relative default resolves against CWD — a common silent-503 footgun.
             _log.warning(
                 "sync plane disabled: no fleet file at %s (set CBK_FLEET_PATH); "
@@ -580,6 +606,32 @@ def create_app(
             await app.state.queue.withdraw_if_unclaimed(
                 stream, entry_id, group=settings.consumer_group)
 
+    async def _unavailable_tiers(privacy: str, urgency: str) -> frozenset[str]:
+        """Local tiers no machine can serve right now: none reading the queue, none that
+        a magic packet could reach (routing.resolve's `unavailable`).
+
+        Only worth the Redis reads for a job that could act on it — one that may leave the
+        LAN and has the wake rights that make "nothing can be woken" meaningful. Anything
+        else gets the empty set, and routing behaves exactly as it did before.
+        """
+        fleet, wake = app.state.fleet, getattr(app.state, "wake", None)
+        if (fleet is None or wake is None or privacy != "cloud_ok"
+                or urgency not in {u.value for u in _WAKE_RIGHTS}):
+            return frozenset()
+        out = set()
+        for cap, spec in fleet.capabilities.items():
+            if spec.cloud or wake.wakeable_nodes(cap):
+                continue
+            try:
+                if await wake.has_live_consumer(cap):
+                    continue
+            except Exception:  # Redis unreadable: assume served, never spend on a guess
+                _log.warning("could not read %s's consumers for cloud fallback", cap,
+                             exc_info=True)
+                continue
+            out.add(cap)
+        return frozenset(out)
+
     @app.post("/jobs", status_code=202)
     async def submit_job(
         body: JobSubmit,
@@ -677,6 +729,7 @@ def create_app(
                 raise CbkError("reservation_invalid", "unknown or unconfirmed reservation",
                                400, param="reservation")
 
+        unavailable = await _unavailable_tiers(body.privacy.value, body.urgency.value)
         try:
             selection = resolve(
                 app.state.fleet, app.state.store,
@@ -688,6 +741,7 @@ def create_app(
                 urgency=body.urgency.value,
                 cloud_budget_monthly=settings.cloud_budget_monthly,
                 cloud_budget_reserve_fraction=settings.cloud_budget_reserve_fraction,
+                unavailable=unavailable,
             )
         except RoutingRefusal as e:
             # Explicit failure beats silently serving below the requested ability floor,
@@ -701,6 +755,9 @@ def create_app(
             raise CbkError(e.code, str(e), 422, reason=e.reason,
                            capability=body.capability) from e
         capability = selection.capability
+        if selection.fell_back_from is not None:
+            _log.info("job routed to cloud tier %s: no machine can serve %s right now "
+                      "and none can be woken", capability, selection.fell_back_from)
         if selection.eta_s is not None:
             # Speed and idleness now decide between tiers that all clear the bar; without
             # this line the choice is invisible after the fact.
@@ -817,6 +874,14 @@ def create_app(
             # from a client that sends no provenance at all.
             observed_ip=request.client.host if request.client else None,
             idempotency_key=key,
+            privacy=body.privacy.value,
+            cloud_alternate=selection.cloud_alternate,
+            cloud_alternate_model=selection.cloud_alternate_model,
+            # Committed the moment it is queued for a provider, not when the bill lands:
+            # otherwise every cloud job submitted in the same minute is checked against
+            # the same stale month-to-date and the cap is a suggestion (budget.py).
+            est_cost=(estimate_cost(app.state.fleet, capability, record)
+                      if selection.cloud else None),
         )
         if existing is not None:
             # Somebody already submitted this logical call. Nothing was written, and

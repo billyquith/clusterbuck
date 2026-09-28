@@ -26,6 +26,12 @@ from .store import Store
 
 DEFAULT_RESERVE_FRACTION = 0.2
 
+# Output length assumed for a cloud job that sets no `max_tokens`, for the committed-spend
+# estimate. Deliberately on the high side of a typical completion: an estimate that errs
+# low lets a burst overshoot the cap, one that errs high only refuses a job a little early
+# and is corrected the moment the real figure lands.
+EST_OUTPUT_TOKENS = 2000
+
 
 @dataclass(frozen=True)
 class BudgetDecision:
@@ -55,7 +61,10 @@ def check_cloud_budget(
     days_in_month = calendar.monthrange(dt.year, dt.month)[1]
     elapsed_days = dt.day  # 1..days_in_month — today already counts as elapsed
 
-    month_spend = store.cloud_spend_in_month(month)
+    # Committed as well as reported. Spend is only SEEN once a provider answers, so
+    # without the in-flight estimate every cloud job admitted in the same minute was
+    # checked against the same stale total and a burst could sail past the cap.
+    month_spend = store.cloud_spend_in_month(month) + store.committed_cloud_estimate(month)
     paced_pool = monthly_cap * (1.0 - reserve_fraction)
     allowed_by_now = paced_pool * elapsed_days / days_in_month
 
@@ -79,3 +88,32 @@ def check_cloud_budget(
             f"(${monthly_cap:g}/mo, {reserve_fraction:.0%} reserved for urgent jobs)",
         )
     return BudgetDecision(True)
+
+
+def estimate_cost(fleet, capability: str, job) -> float:
+    """What a job queued for a provider is expected to cost, before it has run.
+
+    Input is ~4 characters a token over the prompt text, output is `max_tokens` or
+    EST_OUTPUT_TOKENS. Priced by LiteLLM where it knows the model, else the fleet's rate.
+    Conservative by construction and replaced by the billed figure once the usage row is
+    written — it only has to stop a burst of admissions outrunning the cap.
+    """
+    spec = fleet.capabilities.get(capability) if fleet else None
+    if spec is None:
+        return 0.0
+    if job.messages:
+        chars = sum(len(m.content) for m in job.messages)
+    else:
+        chars = len(job.prompt or "")
+    tin = chars // 4 + 1
+    params = job.params or {}
+    tout = int(params.get("max_tokens") or EST_OUTPUT_TOKENS)
+    model = params.get("model") or spec.model
+    try:
+        import litellm
+
+        pin, pout = litellm.cost_per_token(model=model, prompt_tokens=tin,
+                                           completion_tokens=tout)
+        return float(pin + pout)
+    except Exception:  # unmapped: the fleet price, which may be 0 — warned at startup
+        return tin / 1000 * spec.price_in_per_1k + tout / 1000 * spec.price_out_per_1k

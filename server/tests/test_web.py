@@ -135,7 +135,7 @@ def test_connections_shows_which_models_each_worker_has_warm(client):
 
 def test_connections_fragment_lists_cloud_providers(client):
     # The conftest client runs from server/, so it loads the seed fleet.yaml, which
-    # registers anthropic (claude-sonnet) and openai (gpt-4o-mini) provider accounts.
+    # registers anthropic (claude-sonnet) and openai (gpt-5.6-*) provider accounts.
     r = client.get("/ui/connections")
     assert r.status_code == 200
     assert "anthropic" in r.text
@@ -590,7 +590,7 @@ def test_a_cloud_tier_is_not_nowhere_installed(client):
         jobs_done=0, tps=None, last_heartbeat="2026-01-01T00:00:00Z")
     orphans = client.get("/ui/models").text.partition("nowhere installed")[2]
     assert orphans, "a local tier with no node holding its model is still reported"
-    assert "gpt-4o-mini" not in orphans
+    assert "gpt-5.6-sol" not in orphans
 
 
 def test_timeline_names_the_machine_not_its_node_id(client):

@@ -40,6 +40,12 @@ The `model` alias maps to a capability tier in the gateway config. Response is t
 standard OpenAI shape. Any OpenAI-compatible SDK works unmodified — including its errors,
 which arrive in OpenAI's envelope with a stable `code` (§1c).
 
+Every completion is metered (metadata only) under an id of its own, attributed to the
+deployment that answered. A tier's `cloud_fallback` (§5) is the provider LiteLLM falls
+back to when that tier's model server fails. While the cloud budget is spent, no call can
+reach a provider: a request naming a cloud tier is refused with `cloud_budget_exhausted`
+(422, as on the job API), and a local tier is served with its cloud fallback removed.
+
 A failed call is **not retried behind the client's back**. LiteLLM's default of two
 silent retries meant a dead model server cost an interactive caller three connection
 attempts before it heard anything; the refusal now says whether it is `retryable`, and the
@@ -70,7 +76,12 @@ POST /jobs
  // after N min it becomes necessary (see
  // design.md → urgency & escalation)
  "privacy": "local_only", // local_only | cloud_ok (default local_only —
- // local_only NEVER routes to cloud)
+ // local_only NEVER routes to cloud). A
+ // cloud_ok job with wake rights goes to the
+ // cloud if its local tier cannot be served:
+ // at submit when nothing can serve it, or
+ // near its `deadline` if nothing came
+ // (design.md §8)
  "deadline": "2026-01-01T00:00:00Z",// optional expiry; see expires_at below.
  // Enforced by a coordinator sweep, which
  // withdraws an unclaimed entry and marks the
@@ -610,19 +621,24 @@ capabilities:
  # since the name is a terse routing key. Nothing routes on it.
  8b-extract: { model_server: "http://localhost:11434/v1", model: "…",
                description: "Quick structured work: fields into JSON, tagging" } # → q:8b-extract
- 32b-reason: { model_server: "http://localhost:11434/v1", model: "…" } # → q:32b-reason
+ # `cloud_fallback` (optional) names a registered provider account (below): where a
+ # `cloud_ok` job addressed to this tier by name goes when no machine can serve it, and
+ # the tier's sync-plane fallback. It must name a `cloud: true` capability with no
+ # `model_server` in the same file, or the fleet refuses to load.
+ 32b-reason: { model_server: "http://localhost:11434/v1", model: "…",
+               cloud_fallback: claude-sonnet } # → q:32b-reason
  70b-reason: { model_server: "http://localhost:11434/v1", model: "…" } # → q:70b-reason
 
  # A registered provider account : no `model_server` — it has no host node, so
  # the coordinator calls it directly instead of dispatching to a worker. `model` is a
  # LiteLLM "<provider>/<model>" id; `api_key_env` NAMES the env var holding the key (never
  # the key itself). Enters the ability matrix unscored, like any new artifact .
+ # Prices are optional: LiteLLM prices a model it knows for the model that answered,
+ # cache included; a price here is the fallback for one it does not.
  claude-sonnet:
- model: "anthropic/claude-3-5-sonnet-20241022"
+ model: "anthropic/claude-sonnet-5"
  api_key_env: CBK_ANTHROPIC_API_KEY
  cloud: true
- price_in_per_1k: 0.003
- price_out_per_1k: 0.015
 ```
 
 A capability's `model_server` distinguishes two different cloud shapes, both `cloud: true`:
@@ -801,7 +817,7 @@ the operator shared secret except where noted.
 | `GET /nodes` | Enrolled nodes: profile, mode, probed hardware, installed/loaded models, last heartbeat. Never exposes `node_key`. |
 | `POST /nodes/tokens` | Mint a one-time join token for §6 enrollment. |
 | `POST /nodes/{id}/policy` | The owner's contract for a node — `{disk_quota_gb, auto_approve}` as a **JSON body**. `auto_approve` opts that node out of human approval for installs. |
-| `GET /usage` | Metering rollups + the avoided-cloud-spend headline + budget burn (design.md → Usage accounting). Budget is **displayed, not enforced**. |
+| `GET /usage` | Metering rollups + the avoided-cloud-spend headline + budget burn (design.md → Usage accounting). The budget is **enforced**, on both planes (design.md §8). |
 | `GET /ability` | The ability matrix `ability(artifact, task_class)` with its scale version, each row marked `seed` or `measured`, plus a per-artifact headline scalar . |
 | `POST /ability/clear?artifact=<name>` | Drop an artifact's scores so the eval harness re-measures it. The heartbeat handler already does this automatically when a model's digest changes ; this is the same reset for an operator to trigger by hand when an artifact's behaviour changed without its digest moving (e.g. a model-server config or template edit). Opens a new measurement generation as well as dropping the scores, so the next batch is not averaged with the measurements being discarded; returns `{artifact, cleared, generation}`. |
 | `GET /eval` | Eval-harness state: artifacts still needing measurement, and per-batch progress. |

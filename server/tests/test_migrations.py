@@ -56,7 +56,7 @@ from sqlmodel import SQLModel
 # The current Alembic head. Pinned deliberately rather than derived from the migration
 # scripts: deriving it from the machinery under test would let a migration that was
 # never wired up pass silently. Bump this in the same commit as a new migration.
-_HEAD = "0011"
+_HEAD = "0012"
 
 
 def _affinity(decl_type: str) -> str:

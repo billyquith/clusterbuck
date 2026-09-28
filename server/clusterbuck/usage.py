@@ -4,10 +4,10 @@ Metering, not billing: per-job METADATA (tokens, model, node, capability, outcom
 — never prompt or completion text. The headline number is **avoided cloud spend**: local
 tokens priced at the cloud rate they would otherwise have paid, minus actual cloud spend.
 
-M3a is async-only: sync completions go straight through LiteLLM to the client (no job, no
-result blob) and aren't captured here (ADR 30 keeps that asymmetry rather than gating an
-unmetered path). Capture is gated on a usage row not yet existing — not on job status — so
-a client's GET flipping status can't skip a job.
+This module captures the async plane. Sync completions have no job and no result blob, so
+`sync.py` writes their rows itself, inline, with the same cost functions (`_job_cost`) and
+an id of its own (`sync-…`). Capture here is gated on a usage row not yet existing — not on
+job status — so a client's GET flipping status can't skip a job.
 
 `venue` used to be hardcoded `"local"` for every row, which made `cloud_spend_in_month`
 structurally always zero — the budget figure was display-only *because nothing could ever
@@ -38,11 +38,119 @@ def venue_of(fleet: Fleet | None, capability: str | None) -> str:
     return "cloud" if spec is not None and spec.cloud else "local"
 
 
-def _job_cost(fleet: Fleet | None, capability: str, tin: int, tout: int) -> float:
-    """local: avoided cost at the cloud-equivalent rate; cloud: the actual provider cost —
-    both are `price_*_per_1k` on the same CapabilitySpec, so the formula is identical."""
-    price_in, price_out = fleet.price(capability) if fleet else (0.0, 0.0)
+def _fleet_cost(fleet: Fleet | None, capability: str | None, tin: int, tout: int) -> float:
+    price_in, price_out = fleet.price(capability) if fleet and capability else (0.0, 0.0)
     return tin / 1000 * price_in + tout / 1000 * price_out
+
+
+# Models already warned about, so an unmapped one says so once per process rather than on
+# every job it serves.
+_unpriced_warned: set[str] = set()
+
+
+def litellm_model_id(spec_model: str, completion_model: str | None) -> str:
+    """The "<provider>/<model>" id LiteLLM prices by, for the model that actually answered.
+
+    A provider echoes the bare id (`claude-sonnet-5`), not the routing form; the provider
+    is taken from the capability's own `model`, which is what the call was made through.
+    """
+    if not completion_model:
+        return spec_model
+    if "/" in completion_model or "/" not in spec_model:
+        return completion_model
+    return f"{spec_model.split('/', 1)[0]}/{completion_model}"
+
+
+def litellm_can_price(model: str) -> bool:
+    """Whether LiteLLM's price map knows this "<provider>/<model>" id."""
+    import litellm
+
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        return False
+    return bool(info.get("input_cost_per_token") or info.get("output_cost_per_token"))
+
+
+def list_price_per_1k(spec) -> tuple[float, float]:
+    """(input, output) USD per 1k tokens for a tier — for ORDERING work, not billing it.
+
+    The fleet's own price when one is set; otherwise, for a cloud tier, LiteLLM's list
+    price for its model. Without the second half a fleet that leaves cloud prices to
+    LiteLLM (as it may) would rank every provider account at $0, and routing's cheapest-
+    first tie-break among them would quietly become alphabetical.
+    """
+    if spec.price_in_per_1k or spec.price_out_per_1k or not spec.cloud:
+        return spec.price_in_per_1k, spec.price_out_per_1k
+    if not litellm_can_price(spec.model):
+        return 0.0, 0.0
+    import litellm
+
+    info = litellm.get_model_info(spec.model)
+    return (float(info.get("input_cost_per_token") or 0) * 1000,
+            float(info.get("output_cost_per_token") or 0) * 1000)
+
+
+def cached_input_tokens(usage: dict) -> int:
+    """Prompt tokens served from the provider's cache — OpenAI's `prompt_tokens_details`,
+    or Anthropic's `cache_read_input_tokens` as LiteLLM surfaces it."""
+    details = usage.get("prompt_tokens_details") or {}
+    return int(details.get("cached_tokens") or usage.get("cache_read_input_tokens") or 0)
+
+
+def cloud_cost(
+    fleet: Fleet | None, capability: str | None, completion: dict | None,
+    tin: int, tout: int,
+) -> tuple[float, str]:
+    """(cost, source) for work a provider actually billed.
+
+    LiteLLM's price map first: it knows the model that answered rather than the one the
+    capability names, and it prices cache reads and writes, which a flat per-1k rate
+    cannot — on a long reused prompt that is most of the bill. The fleet's own
+    `price_*_per_1k` is the fallback for a model the map does not know, and says so in
+    `source`, because an estimate recorded as if it were a quote is how a budget drifts.
+    Neither ⇒ 0 with source `none`, warned rather than silent.
+    """
+    spec = fleet.capabilities.get(capability) if fleet and capability else None
+    model = litellm_model_id(spec.model if spec else "",
+                             completion.get("model") if isinstance(completion, dict) else None)
+    # Asked first rather than trusting `completion_cost` to raise for an unknown model:
+    # building the sync plane's Router registers every deployment in LiteLLM's global
+    # price map, and an unmapped one is registered at $0 — after which it is "priced",
+    # silently, at nothing. A zero price is not a price.
+    if isinstance(completion, dict) and completion.get("usage") and litellm_can_price(model):
+        try:
+            import litellm
+
+            cost = litellm.completion_cost(
+                completion_response=litellm.ModelResponse(**completion), model=model)
+            return float(cost), "litellm"
+        except Exception:  # unmapped model, or a response shape it cannot price
+            pass
+    fallback = _fleet_cost(fleet, capability, tin, tout)
+    if model not in _unpriced_warned:
+        _unpriced_warned.add(model)
+        if fallback:
+            _log.warning("LiteLLM cannot price %r — using the fleet's price_*_per_1k for "
+                         "%s, which ignores cache pricing", model, capability)
+        else:
+            _log.warning("no price for %r (LiteLLM does not know it and %s sets no "
+                         "price_*_per_1k) — its spend is recorded as $0 and does not "
+                         "count against the cloud budget", model, capability)
+    return fallback, "fleet" if fallback else "none"
+
+
+def _job_cost(
+    fleet: Fleet | None, capability: str | None, tin: int, tout: int, *,
+    venue: str = "local", completion: dict | None = None,
+) -> tuple[float, str]:
+    """local: avoided cost at the fleet's cloud-equivalent rate — a counterfactual, which
+    nothing but the operator's own price can give; cloud: what the provider billed
+    (`cloud_cost`)."""
+    if venue == "cloud":
+        return cloud_cost(fleet, capability, completion, tin, tout)
+    cost = _fleet_cost(fleet, capability, tin, tout)
+    return cost, "fleet" if cost else "none"
 
 
 async def usage_scan(
@@ -96,12 +204,15 @@ async def usage_scan(
         tout = int(usage.get("completion_tokens") or 0)
         completion = result.get("completion")
         model = completion.get("model") if isinstance(completion, dict) else None
+        venue = venue_of(fleet, row.capability)
+        cost, source = _job_cost(fleet, row.capability, tin, tout,
+                                 venue=venue, completion=completion)
 
         store.record_usage(
             job_id=row.id, ts=ts, capability=row.capability, model=model,
-            node=result.get("worker"), venue=venue_of(fleet, row.capability),
-            tokens_in=tin, tokens_out=tout,
-            outcome=status, cost=_job_cost(fleet, row.capability, tin, tout), day=day,
+            node=result.get("worker"), venue=venue,
+            tokens_in=tin, tokens_out=tout, tokens_cached_in=cached_input_tokens(usage),
+            outcome=status, cost=cost, cost_source=source, day=day,
         )
         store.set_status(row.id, status)  # so an unpolled completed job shows terminal
         captured += 1

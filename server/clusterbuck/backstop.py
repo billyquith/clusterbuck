@@ -86,6 +86,13 @@ async def backstop_scan(
         # work. So look for the entry before concluding it is not there — and if it turns
         # up, adopt it rather than killing the job.
         found = await queue.find_entry_for_job(row.capability, row.id)
+        if found is None and row.rescued_from:
+            # A rescue that died between pointing the row at the cloud tier and moving
+            # the entry (rescue.py): the entry never left its original stream. Undo the
+            # half that happened, so the job is served — and metered — where it really is.
+            found = await queue.find_entry_for_job(row.rescued_from, row.id)
+            if found is not None:
+                store.undo_rescue(row.id)
         if found is not None:
             stream, entry_id = found
             store.record_delivery(row.id, stream=stream, entry_id=entry_id)

@@ -42,8 +42,9 @@ from datetime import UTC, datetime
 
 from .budget import BudgetDecision, check_cloud_budget
 from .evaluation import SCALE_VERSION, TIER1_MAX_ABILITY
-from .fleet import Fleet
+from .fleet import Fleet, resolve_api_key
 from .store import Store
+from .usage import list_price_per_1k
 
 # Output length assumed for a job whose length is unknown, to turn tokens/sec into seconds.
 # Only the RATIO between tiers matters for the ranking; this sets how a cold load weighs
@@ -125,6 +126,17 @@ class Selection:
     # Estimated seconds to an answer on the chosen tier, when one was known. Carried for
     # the log line: "why this tier" is otherwise invisible once speed decides it.
     eta_s: float | None = None
+    # Where this job may go if the local tier chosen never serves it (rescue.py): a cloud
+    # capability and the artifact on it that cleared the SAME bar, within the job's
+    # privacy. Decided now, not at rescue time, so the rescue cannot land on something
+    # the client's floor would have refused. Only privacy is applied to it here: urgency
+    # and budget are re-checked when it is used, because both can change before then (an
+    # escalated waitable gains wake rights; a budget refills on the 1st).
+    cloud_alternate: str | None = None
+    cloud_alternate_model: str | None = None
+    # The local tier this job was meant for, when routing sent it to the cloud because no
+    # machine could serve that tier (design.md §8, unavailability). None otherwise.
+    fell_back_from: str | None = None
 
     @property
     def on_a_guess(self) -> bool:
@@ -158,6 +170,17 @@ class NoCapableArtifact(RoutingRefusal):
     on a weaker model defeats need-shaped addressing — the client asked for a floor and would
     have no way to know it was not met.
     """
+
+
+def can_call(spec) -> bool:
+    """False for a registered provider account whose key is not set.
+
+    The sync plane already leaves such an account out of its router; the async side
+    has to refuse it as a TARGET too. Otherwise an operator who copied a fleet file
+    without the key has jobs routed, fallen back or rescued onto an account the executor
+    can only fail — which turns "a machine may still wake" into a certain failure.
+    """
+    return not (spec.cloud and spec.model_server is None) or bool(resolve_api_key(spec))
 
 
 def _cloud_gate(
@@ -264,8 +287,17 @@ def resolve(
     now: float | None = None,
     scale_version: str = SCALE_VERSION,
     etas: dict[str, TierEta] | None = None,
+    unavailable: frozenset[str] | set[str] = frozenset(),
 ) -> Selection:
-    """The capability to enqueue on AND the artifact that must run the job."""
+    """The capability to enqueue on AND the artifact that must run the job.
+
+    `unavailable` is the local tiers no machine can serve right now: none is reading the
+    queue and none can be woken for it. A `cloud_ok` job whose every bar-clearing local
+    tier is in it goes to the cloud (design.md §8). That is an AVAILABILITY rule and
+    deliberately not a speed one — a tier that is up but slow still wins over the cloud
+    (§12), because that case is overflow and overflow is not built. The caller computes
+    the set because liveness is read from Redis, which this function does not touch.
+    """
     budget = check_cloud_budget(
         store, monthly_cap=cloud_budget_monthly, urgency=urgency,
         reserve_fraction=cloud_budget_reserve_fraction, now=now,
@@ -310,10 +342,25 @@ def resolve(
                     f"capability {capability!r} runs {spec.model!r}, which does not meet "
                     f"the job's `requires`: {why}"
                 )
+        # A tier named explicitly has no ability bar to find a cloud equivalent through,
+        # so its cloud alternative is whatever the operator declared as its
+        # `cloud_fallback` — held to the job's privacy and `requires` like any other.
+        alt = None
+        fb = spec.cloud_fallback if not spec.cloud else None
+        if fb is not None and privacy != "local_only" and can_call(fleet.capabilities[fb]):
+            fb_spec = fleet.capabilities[fb]
+            if not (asked and _unmet(asked, _declared(fb_spec.model, fb_spec, catalog))):
+                alt = fb
+        if alt is not None and capability in unavailable and _cloud_gate(
+                True, privacy=privacy, urgency=urgency, budget=budget) is None:
+            return Selection(capability=alt, artifact=fleet.capabilities[alt].model,
+                             cloud=True, fell_back_from=capability)
         # Explicit addressing names a tier, and the tier's registered model is the artifact
         # it means. Pinning it here is what stops the tier's meaning being decided by
         # whatever CBK_MODEL happens to say on the node that claims the job.
-        return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud)
+        return Selection(capability=capability, artifact=spec.model, cloud=spec.cloud,
+                         cloud_alternate=alt,
+                         cloud_alternate_model=fleet.capabilities[alt].model if alt else None)
 
     if fleet is None:
         raise NoCapableArtifact(
@@ -329,19 +376,34 @@ def resolve(
     # Candidates whose artifact clears the ability bar for this task class, within privacy,
     # urgency's wake rights, and (for a cloud candidate) budget.
     etas = tier_eta(fleet, store) if etas is None else etas
-    # (is_cloud, eta, price, capability, artifact, score, provenance)
-    candidates: list[tuple[bool, float, float, str, str, float, str | None]] = []
+    # (is_cloud, is_unavailable, eta, price, capability, artifact, score, provenance)
+    candidates: list[tuple[bool, bool, float, float, str, str, float, str | None]] = []
     excluded_by_privacy = 0
     excluded_by_budget = 0
     unmet: dict[str, str] = {}
     best_available: float | None = None
+    # Cloud artifacts that clear the bar but are held back by urgency or budget. Not
+    # candidates now, but still a rescue target: privacy is the job's own and permanent,
+    # the other two are re-checked when a rescue is actually attempted.
+    held_back: list[tuple[float, str, str, float]] = []
     for cap, spec in fleet.capabilities.items():
+        if not can_call(spec):
+            continue  # an account with no key serves nothing; warned at startup (sync.py)
         excluded = _cloud_gate(spec.cloud, privacy=privacy, urgency=urgency, budget=budget)
+        if excluded == "privacy=local_only":
+            excluded_by_privacy += 1
+            continue
         if excluded is not None:
-            if excluded == "privacy=local_only":
-                excluded_by_privacy += 1
-            elif excluded != "urgency=waitable never uses cloud":
+            if excluded != "urgency=waitable never uses cloud":
                 excluded_by_budget += 1
+            # Out of the running now, so it must not colour the refusal below (its score
+            # is not "available", its features are not why nothing matched) — only
+            # remembered as a rescue target if it would clear the bar.
+            if not (asked and _unmet(asked, _declared(spec.model, spec, catalog))):
+                score = store.get_ability(spec.model, task_class, scale_version)
+                if score is not None and score >= min_ability:
+                    held_back.append((sum(list_price_per_1k(spec)),
+                                      cap, spec.model, score))
             continue
         # BEFORE ability is compared (ADR 37), not after. The other way round, a
         # capable-but-unsuitable artifact wins on score and the requirement is decided by
@@ -360,20 +422,40 @@ def resolve(
             continue
         eta = etas[cap].seconds if cap in etas else math.inf
         candidates.append((
-            spec.cloud, eta, spec.price_in_per_1k + spec.price_out_per_1k, cap,
+            spec.cloud, cap in unavailable, eta, sum(list_price_per_1k(spec)), cap,
             spec.model, score,
             store.ability_provenance(spec.model, task_class, scale_version),
         ))
 
     if candidates:
-        # Local before cloud (False < True) — cost and privacy posture, unchanged. Then the
-        # soonest answer. Then cheapest, which is also the whole order when no tier has a
-        # live machine (every eta is inf).
+        # Local before cloud (False < True) — cost and privacy posture, unchanged. Then a
+        # tier that can be served (awake, or wakeable) before one that cannot: both have
+        # no ETA, and only one of them has a way to be answered. Then the soonest answer.
+        # Then cheapest, which is also the whole order when no tier has a live machine.
         candidates.sort()
-        cloud, eta, _price, cap, artifact, score, provenance = candidates[0]
+        local = [c for c in candidates if not c[0]]
+        cloud_ok_now = [c for c in candidates if c[0]]
+        pick = candidates[0]
+        fell_back_from = None
+        if local and cloud_ok_now and all(c[1] for c in local):
+            # Every local tier that could run this has nobody to run it and nobody to
+            # wake. Waiting would be waiting for a machine to turn up of its own accord,
+            # which a job with cloud permission and wake rights did not ask to do.
+            pick, fell_back_from = cloud_ok_now[0], local[0][4]
+        cloud, _unavailable, eta, _price, cap, artifact, score, provenance = pick
+        alt = None
+        if not cloud:
+            # Cheapest cloud artifact that cleared the bar: a rescue is a stand-in for the
+            # local tier, not an upgrade on it. Prices are equal-weighted in and out.
+            options = sorted([(c[3], c[4], c[5]) for c in cloud_ok_now]
+                             + [(h[0], h[1], h[2]) for h in held_back])
+            alt = options[0] if options else None
         return Selection(capability=cap, artifact=artifact, cloud=cloud,
                          score=score, provenance=provenance,
-                         eta_s=None if math.isinf(eta) else eta)
+                         eta_s=None if math.isinf(eta) else eta,
+                         cloud_alternate=alt[1] if alt else None,
+                         cloud_alternate_model=alt[2] if alt else None,
+                         fell_back_from=fell_back_from)
 
     if asked and not candidates and unmet and best_available is None:
         # Everything that could have run this was filtered on a declared capability, so

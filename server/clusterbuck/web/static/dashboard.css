@@ -147,6 +147,8 @@ form.run-form .cats span { display: flex; gap: .4rem; align-items: center; }
   white-space: nowrap; color: var(--muted);
 }
 .tl-outcome { flex: 0 0 auto; margin-left: auto; color: var(--muted); }
+.tl-cost { flex: 0 0 auto; margin-left: auto; font-variant-numeric: tabular-nums; }
+.tl-cost + .tl-outcome { margin-left: 0; }
 
 /* Usage page status strip: one row of the few numbers worth a glance. */
 .status-strip {

@@ -62,6 +62,13 @@ class CapabilitySpec(BaseModel):
     supports_tools: bool | None = None
     supports_json_schema: bool | None = None
     supports_vision: bool | None = None
+    # A registered provider account (a no-host cloud capability, by name) to fall back to
+    # when this tier cannot be served (design.md §8). It is what gives a job addressed to
+    # this tier BY NAME somewhere to go — a need-shaped job finds its cloud alternative
+    # through the ability matrix instead — and it is this tier's sync-plane fallback.
+    # Only ever used for a `cloud_ok` job inside the budget; naming it here grants no job
+    # permission to leave the LAN.
+    cloud_fallback: str | None = None
 
 
 class NodeSpec(BaseModel):
@@ -124,6 +131,25 @@ class Fleet(BaseModel):
                         f"node {node.id!r} lists {cap!r}, a no-host cloud capability "
                         f"(provider account) — no worker can serve it, only the coordinator"
                     )
+        return self
+
+
+    @model_validator(mode="after")
+    def _cloud_fallbacks_name_provider_accounts(self) -> Fleet:
+        """A `cloud_fallback` must name a registered provider account. Anything else would
+        either do nothing (an unknown name) or route a job the operator thought would go
+        to the cloud onto some other local tier, which is worse than failing to load."""
+        for name, spec in self.capabilities.items():
+            fb = spec.cloud_fallback
+            if fb is None:
+                continue
+            target = self.capabilities.get(fb)
+            if target is None or not target.cloud or target.model_server is not None:
+                raise ValueError(
+                    f"capability {name!r} has cloud_fallback {fb!r}, which is not a "
+                    f"registered provider account (a `cloud: true` capability with no "
+                    f"model_server) in this file"
+                )
         return self
 
 

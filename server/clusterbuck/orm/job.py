@@ -110,3 +110,27 @@ class Job(SQLModel, table=True):
     # worker would leave the job with no blob, no terminal status, and nothing to recover
     # it. Paired with a floored `deadline_epoch`, the expiry sweep terminalises it.
     cancel_requested: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
+
+    # --- cloud fallback (design.md §8) ------------------------------------------------
+    # Copied from the submit rather than read back off the payload, because the rescue
+    # sweep scans rows and must not fetch every queued entry to learn whether it may
+    # leave the LAN. Null on rows from before this existed, which the sweep reads as
+    # local_only — the safe answer for a job whose permission nobody recorded.
+    privacy: str | None = None
+    # The cloud capability (and the artifact on it) this job may be moved to if the local
+    # fleet never picks it up, decided AT SUBMIT against the same ability bar and privacy
+    # the job was routed on. Stored rather than re-resolved later so a rescue can never
+    # land on a model that would not have cleared the bar the client asked for. Null ⇒
+    # nothing to rescue to.
+    cloud_alternate: str | None = None
+    cloud_alternate_model: str | None = None
+    # Spend this job has committed on a cloud stream but not yet reported (budget.py).
+    # Set when it is placed on one, at submit or by a rescue; the usage row replaces it
+    # with the real figure once the provider answers.
+    est_cost: float | None = None
+    # The local tier this job was rescued FROM (rescue.py); null if it never was. Written
+    # in the same step that points `capability` at the cloud tier and BEFORE the entry is
+    # moved, so a coordinator that dies mid-rescue leaves a row that names both streams
+    # the entry could be on — the orphan sweep looks on both and undoes a rescue whose
+    # move never happened (backstop.py).
+    rescued_from: str | None = None
