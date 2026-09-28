@@ -231,8 +231,8 @@ _JOB_KEYS = {
     "id", "status", "urgency", "capability",
     "created_at", "started_at", "finished_at",
     "deadline", "escalates_at", "expires_at",
-    "queue_position", "result", "usage", "error", "error_code", "attempts", "worker",
-    "submitter",
+    "queue_position", "result", "usage", "error", "error_code", "retryable",
+    "attempts", "worker", "submitter",
 }
 
 
@@ -251,6 +251,39 @@ def test_job_view_key_set_is_stable_in_both_branches(client, redis_url):
     }))
     conn.close()
     assert set(client.get(f"/jobs/{job_id}").json()) == _JOB_KEYS
+
+
+def test_retryable_mirrors_the_error_code_table_not_a_second_copy_of_it(client, redis_url):
+    """A reference client used to keep its own hardcoded set of codes worth resubmitting
+    — `RESUBMIT_WITH_FRESH_KEY` — which drifts from `contract/error-codes.json` the
+    moment either is edited alone. The job view now carries the same `retryable` §1c
+    already pins for HTTP errors, so a client branches on the job instead."""
+    from clusterbuck.errors import CODES
+
+    job_id = _submit(client).json()["id"]
+    assert client.get(f"/jobs/{job_id}").json()["retryable"] is None, "nothing failed yet"
+
+    conn = redis.from_url(redis_url, decode_responses=True)
+    conn.set(f"res_{job_id[4:]}", json.dumps({
+        "job_id": job_id, "status": "failed", "worker": "node-a",
+        "completed_at": "2026-09-02T00:00:00Z",
+        "error": "boom", "error_code": "model_server_unreachable",
+    }))
+    conn.close()
+    got = client.get(f"/jobs/{job_id}").json()
+    assert got["error_code"] == "model_server_unreachable"
+    assert got["retryable"] == CODES["model_server_unreachable"] is True
+
+    job_id2 = _submit(client).json()["id"]
+    conn = redis.from_url(redis_url, decode_responses=True)
+    conn.set(f"res_{job_id2[4:]}", json.dumps({
+        "job_id": job_id2, "status": "failed", "worker": "node-a",
+        "completed_at": "2026-09-02T00:00:00Z",
+        "error": "boom", "error_code": "model_request_rejected",
+    }))
+    conn.close()
+    got2 = client.get(f"/jobs/{job_id2}").json()
+    assert got2["retryable"] == CODES["model_request_rejected"] is False
 
 
 def test_created_at_is_reported_so_a_client_need_not_time_it_locally(client):

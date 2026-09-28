@@ -209,6 +209,7 @@ GET /jobs/{id}
  "queue_position": 0 | null, // unclaimed jobs ahead of you; null unless queued
  "result": { … OpenAI-style completion … } | null,
  "error": null, "error_code": null, // why it did not complete — see below
+ "retryable": null | true | false, // CODES[error_code]; null iff error_code is null
  "attempts": 0, "worker": "<opaque-node-id>" | null,
  "submitter": { "app","instance","request_id","submitted_at",
  "observed_ip" } | null } // provenance as recorded; null if none
@@ -231,6 +232,16 @@ status but `done`:
 | `artifact_not_installed` | failed | The node that claimed it lacks the artifact routing pinned. | Operator fix; resubmit (fresh key) once fixed. |
 | `model_substituted` | failed | The model server answered with a different model than the one pinned. | Operator fix (usually an LM Studio load). |
 | `worker_failed` | failed | Failed without a classified cause — a worker that predates error codes, or an unexpected error. | Treat as not retryable. |
+
+**`retryable` rides beside `error_code`** (`CODES[error_code]` from
+[`contract/error-codes.json`](../contract/error-codes.json)), the identical table §1c
+already uses for HTTP errors — so a client branches on the job the same way it branches
+on a refused submit, rather than keeping a second, driftable copy of "which codes are
+worth trying again" for the job plane. It means exactly what it means there: the
+identical payload may succeed if simply resubmitted soon, nothing about whether a
+resubmit is the right ACTION — `job_orphaned` is `false` (the failure will not clear
+itself) yet the table still says resubmit under a fresh key, because that is the only way
+to recover a payload nothing kept a copy of. `null` iff `error_code` is `null`.
 
 A resubmit always takes a **fresh** idempotency key: a key has no TTL, so the old one
 returns the old, terminal job forever. The same key is only for a submit whose response
@@ -359,10 +370,11 @@ runnable:
 1. Mint one `Idempotency-Key` per *logical* call, and persist it with the request before
    sending.
 2. On `202`/`200`, persist `{id, result_key}` against that key before doing anything else.
-3. A transport failure on submit is ambiguous: retry with the **same** key.
-4. Poll `GET /jobs/{id}` until a terminal status; persist `result` and `error_code` the
-   first time you see them.
-5. Branch on `error_code`. To run the work again, submit under a **fresh** key.
+3. A transport failure OR a 5xx on submit is ambiguous either way: retry with the
+   **same** key.
+4. Poll `GET /jobs/{id}` until a terminal status; persist `result`, `error_code` and
+   `retryable` the first time you see them.
+5. Branch on `error_code`/`retryable`. To run the work again, submit under a **fresh** key.
 6. Stop waiting with `DELETE /jobs/{id}`.
 
 **Collecting a result later.** A completed result lives in the result store for

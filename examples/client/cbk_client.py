@@ -13,8 +13,8 @@ Two paths, chosen per request by whether a person is waiting:
 
   1. Mint one Idempotency-Key per *logical* call, and persist it with the job before
      doing anything else.
-  2. A transport failure on submit is ambiguous (the job may exist): retry with the
-     **same** key. The coordinator answers a repeat with the existing job.
+  2. A transport failure OR a 5xx on submit is ambiguous (the job may exist either way):
+     retry with the **same** key. The coordinator answers a repeat with the existing job.
   3. Poll until a terminal status, and persist the result the first time you see it —
      completions expire from the coordinator after `CBK_RESULT_TTL_S`.
   4. To run the work *again* after any terminal status, use a **fresh** key. A key has no
@@ -29,6 +29,9 @@ Dependencies: `httpx` and the stock `openai` SDK.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -39,11 +42,6 @@ import httpx
 import openai
 
 TERMINAL = {"done", "failed", "expired", "cancelled"}
-
-# The codes this client reacts to. A real client keeps a small map like this rather than
-# the whole table: most codes only need to be shown to a person, not acted on.
-RESUBMIT_WITH_FRESH_KEY = {"job_orphaned", "job_abandoned", "model_server_unreachable",
-                           "model_server_timeout", "model_server_error"}
 
 
 @dataclass
@@ -75,22 +73,43 @@ class JobStore:
 
     Stands in for whatever durable store the client already has. What matters is *when*
     it is written — before the submit returns, and again on the first terminal poll.
+
+    Writes are atomic (temp file + `os.replace`), not `Path.write_text` in place: a crash
+    or a kill signal mid-write used to leave a half-written file, and every record in it
+    — not just the one being updated — was lost, since the next read raised on the
+    truncated JSON. `os.replace` is atomic on both POSIX and Windows, so a reader never
+    observes a partial file. A lock serialises concurrent callers IN THIS PROCESS
+    (multiple threads sharing one `JobStore`); it does not extend across processes, which
+    would need a file lock instead — matching the one-process shape of this example.
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._lock = threading.Lock()
 
     def _load(self) -> dict[str, dict]:
         return json.loads(self.path.read_text()) if self.path.exists() else {}
 
     def put(self, key: str, **fields: Any) -> dict:
-        records = self._load()
-        records.setdefault(key, {}).update(fields)
-        self.path.write_text(json.dumps(records, indent=2))
-        return records[key]
+        with self._lock:
+            records = self._load()
+            records.setdefault(key, {}).update(fields)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self.path.parent or ".", prefix=f".{self.path.name}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(records, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_name, self.path)
+            except BaseException:
+                Path(tmp_name).unlink(missing_ok=True)
+                raise
+            return records[key]
 
     def get(self, key: str) -> dict | None:
-        return self._load().get(key)
+        with self._lock:
+            return self._load().get(key)
 
 
 class Client:
@@ -137,15 +156,46 @@ class Client:
                     raise
                 time.sleep(0.5 * (attempt + 1))
                 continue
-            accepted = self._json(resp)
+            try:
+                accepted = self._json(resp)
+            except ClusterbuckError as e:
+                # A 5xx is exactly as ambiguous as a dropped connection: the row may
+                # already be committed even though THIS response says the request
+                # failed (Redis timed out after the write, the connection was reset
+                # while the reply was in flight). The same key makes retrying safe
+                # either way — a repeat returns the existing job rather than a second
+                # one. A 4xx is not ambiguous (nothing was accepted) and must not be
+                # retried here — see `error_from_body`.
+                if e.status >= 500 and attempt < attempts - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
             return self.store.put(key, job_id=accepted["id"], result_key=accepted["result_key"],
                                   state=accepted["status"],
                                   replayed=resp.headers.get("Idempotency-Replayed") == "true")
         raise AssertionError("unreachable")
 
+    def _job_id(self, key: str) -> str:
+        """The job id stored against a key, or a clear error naming exactly what to do —
+        never the bare `KeyError`/`TypeError` a missing or half-written record used to
+        raise from indexing `None` or a dict with no `job_id` yet."""
+        record = self.store.get(key)
+        if record is None:
+            raise KeyError(f"no stored record for key {key!r} — was submit() ever called "
+                           f"with this key?")
+        job_id = record.get("job_id")
+        if job_id is None:
+            raise RuntimeError(
+                f"key {key!r} has no job_id yet: submit() started but this client never "
+                f"saw a response (a crash, or a kill, between the request and reading "
+                f"it) — call submit() again with this SAME key to find out what actually "
+                f"happened; the coordinator answers a repeat with the existing job."
+            )
+        return job_id
+
     def poll(self, key: str, *, timeout_s: float = 30, interval_s: float = 0.25) -> dict:
         """Poll a stored job to a terminal status and persist what it ended with."""
-        job_id = self.store.get(key)["job_id"]
+        job_id = self._job_id(key)
         deadline = time.monotonic() + timeout_s
         while True:
             view = self._json(self.http.get(f"/jobs/{job_id}"))
@@ -154,19 +204,27 @@ class Client:
                 # CBK_RESULT_TTL_S, and keeps no copy of it anywhere durable.
                 return self.store.put(key, state=view["status"], result=view.get("result"),
                                       error=view.get("error"),
-                                      error_code=view.get("error_code"))
+                                      error_code=view.get("error_code"),
+                                      # From the job view directly — the SAME table
+                                      # §1c uses for HTTP errors — rather than this
+                                      # client keeping its own copy of which codes are
+                                      # worth resubmitting and letting it drift.
+                                      retryable=view.get("retryable"))
             if time.monotonic() > deadline:
                 return self.store.put(key, state=view["status"])
             time.sleep(interval_s)
 
     def cancel(self, key: str) -> dict:
-        job_id = self.store.get(key)["job_id"]
+        job_id = self._job_id(key)
         view = self._json(self.http.delete(f"/jobs/{job_id}"))
         return self.store.put(key, state=view["status"])
 
     def resubmit(self, key: str) -> tuple[str, dict]:
         """Run a finished call's work again. A fresh key — the old one is spent."""
         record = self.store.get(key)
+        if record is None:
+            raise KeyError(f"no stored record for key {key!r} — was submit() ever called "
+                           f"with this key?")
         fresh = self.new_key()
         self.store.put(key, superseded_by=fresh)
         return fresh, self.submit(record["request"], fresh)

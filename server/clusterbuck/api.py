@@ -32,7 +32,7 @@ from .catalog import (
 )
 from .cloud_executor import CloudExecutor, cloud_capabilities
 from .config import JOIN_PASSWORD_MIN_LEN, settings
-from .errors import CbkError, install_error_handlers
+from .errors import CODES, CbkError, install_error_handlers
 from .eval_runner import artifacts_needing_eval, eval_tick
 from .evaluation import (
     SCALE_VERSION,
@@ -967,6 +967,17 @@ def create_app(
             return "worker_failed"
         return None
 
+    def _retryable_for(error_code: str | None) -> bool | None:
+        """Whether the identical job would be worth submitting again, fresh key, right
+        now — the same table §1c already pins for HTTP errors, applied to a job's
+        `error_code` instead of hardcoding a second copy of it into every client. A
+        reference client used to keep its own `RESUBMIT_WITH_FRESH_KEY` set for exactly
+        this, which drifts from `CODES` the moment either one is edited without the
+        other. `None` alongside a `None` code: nothing to be retryable ABOUT — `done`,
+        or a code that aged out past `CBK_RESULT_TTL_S`.
+        """
+        return CODES.get(error_code) if error_code else None
+
     @app.get("/jobs/{job_id}")
     async def get_job(job_id: str) -> dict:
         row = app.state.store.get(job_id)
@@ -989,6 +1000,7 @@ def create_app(
             result = None
         if result is None:
             # No terminal result yet — report the queue-state we last recorded.
+            code = _error_code(row.status, None)
             return {
                 "id": job_id,
                 "status": row.status,
@@ -1000,7 +1012,8 @@ def create_app(
                 "result": None,
                 "usage": None,
                 "error": None,
-                "error_code": _error_code(row.status, None),
+                "error_code": code,
+                "retryable": _retryable_for(code),
                 "attempts": row.attempts,
                 # From the pending list, so a running job finally has an answer to "has
                 # anything picked this up" — the result blob cannot say until it is over.
@@ -1012,6 +1025,7 @@ def create_app(
         if status in RESULT_STATUSES and row.status != status:
             app.state.store.set_status(job_id, status)
             row = app.state.store.get(job_id) or row  # pick up finished_at
+        code = _error_code(status, result)
 
         return {
             "id": job_id,
@@ -1024,7 +1038,8 @@ def create_app(
             "result": result.get("completion"),
             "usage": result.get("usage"),
             "error": result.get("error"),
-            "error_code": _error_code(status, result),
+            "error_code": code,
+            "retryable": _retryable_for(code),
             "attempts": row.attempts,
             "worker": result.get("worker") or row.claimed_by,
             "submitter": _submitter_view(row),
