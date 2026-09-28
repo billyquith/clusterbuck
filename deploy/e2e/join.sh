@@ -84,7 +84,8 @@ cat > "$WORKDIR/node.json" <<JSON
 JSON
 
 OUT="$WORKDIR/join.out"
-python3 "$REPO/install/worker/join.py" --coordinator "$URL" --model m \
+JOIN_PY="$(python311)" || exit 1
+"$JOIN_PY" "$REPO/install/worker/join.py" --coordinator "$URL" --model m \
   --password "$PASSWORD" --node-state "$WORKDIR/node.json" --dry-run >"$OUT" 2>&1 \
   || fail "join.py failed: $(tail -3 "$OUT")"
 
