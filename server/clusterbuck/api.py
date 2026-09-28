@@ -763,10 +763,24 @@ def create_app(
         deadline_epoch = None
         if body.deadline:
             try:
-                deadline_epoch = datetime.fromisoformat(
-                    body.deadline.replace("Z", "+00:00")
-                ).timestamp()
-            except ValueError as e:
+                parsed = datetime.fromisoformat(body.deadline.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    # `fromisoformat` accepts a bare local time with no UTC offset at
+                    # all (RFC 3339 requires one) rather than rejecting it — and
+                    # `.timestamp()` on a naive value is interpreted in the SERVER's own
+                    # timezone, not UTC, so the same deadline string would expire at a
+                    # different instant depending on where the coordinator happens to be
+                    # deployed. Silent and wrong in a way nothing downstream can detect.
+                    raise ValueError("no UTC offset")
+                deadline_epoch = parsed.timestamp()
+                # Round-trip it now, at 422 time, rather than letting a value
+                # `datetime.fromtimestamp` cannot render (a year past 9999 once
+                # normalised to UTC, which an in-range-looking `-01:00` offset can still
+                # produce) sit in the row until the first GET, DELETE or sweep tries to
+                # render `deadline`/`expires_at` and 500s — permanently, since nothing
+                # ever rewrites a stored deadline.
+                _now_iso_at(deadline_epoch)
+            except (ValueError, OverflowError, OSError) as e:
                 # Fail loudly. Silently dropping an unparseable deadline to "no expiry"
                 # gave a client the opposite of what it asked for — an unbounded job — and
                 # told it nothing, so the mistake was undiscoverable from the outside.

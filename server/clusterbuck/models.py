@@ -139,7 +139,11 @@ class JobSubmit(BaseModel):
 
     params: dict[str, Any] = Field(default_factory=dict)
     urgency: Urgency = Urgency.waitable
-    escalate_after_min: int | None = Field(default=None, ge=0)
+    # Bounded well above any patience bound a real client would set, but well below the
+    # point where `now + timedelta(minutes=…)` could overflow `datetime` (year 9999):
+    # unbounded, an absurd value 500'd instead of 422'd, since the overflow only
+    # surfaces later, when `submit_job` computes `escalate_at` from it.
+    escalate_after_min: int | None = Field(default=None, ge=0, le=100_000_000)
     privacy: Privacy = Privacy.local_only
     deadline: str | None = None
     reservation: str | None = None  # opt-in reservation id to queue against (§8)

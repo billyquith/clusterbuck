@@ -321,6 +321,27 @@ def test_a_malformed_deadline_is_rejected_not_silently_dropped(client):
     assert "deadline" in r.json()["detail"]
 
 
+def test_a_deadline_with_no_utc_offset_is_rejected(client):
+    """RFC 3339 requires an offset. Accepting a naive value silently interpreted it in
+    the SERVER's own local timezone via `.timestamp()` — the identical deadline string
+    would then expire at a different real instant depending on where the coordinator
+    happens to be deployed, with nothing to notice from outside."""
+    for naive in ("2026-12-01T12:00:00", "2026-12-01"):
+        r = _submit(client, deadline=naive)
+        assert r.status_code == 422, f"{naive!r} was accepted with no UTC offset"
+        assert "deadline" in r.json()["detail"]
+
+
+def test_an_out_of_range_deadline_is_rejected_at_submit_not_left_to_500_later(client):
+    """A deadline that looks in-range in its own offset can still normalise past
+    `datetime.max` in UTC (year 9999) — this one becomes year 10000. Previously that
+    500'd every later GET/DELETE of the job, permanently, since nothing ever rewrites a
+    stored deadline; now it is refused before a row is ever written."""
+    r = _submit(client, deadline="9999-12-31T23:59:59-01:00")
+    assert r.status_code == 422
+    assert "deadline" in r.json()["detail"]
+
+
 def test_queue_position_reports_work_ahead_while_nothing_is_running(client):
     """No worker exists in this fixture, so every job stays queued — which is exactly the
     state in which `depth` and `pending` both lie."""

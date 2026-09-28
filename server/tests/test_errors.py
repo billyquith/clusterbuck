@@ -71,6 +71,35 @@ def test_an_upstream_4xx_is_the_request_and_a_5xx_is_the_server():
     assert classify_upstream(RuntimeError("anything else")) == "model_server_error"
 
 
+def test_an_unhandled_exception_still_answers_in_the_envelope(client, monkeypatch):
+    """Nothing upstream of `install_error_handlers` catches a plain `Exception` — Redis
+    unreachable inside a route, a programming error — so without a catch-all it fell all
+    the way through to Starlette's bare `text/plain` "Internal Server Error": no `code`,
+    no `retryable`, nothing a client can branch on for the one failure class
+    protocols.md §1c reserves `internal_error` for."""
+    def boom(*a, **kw):
+        raise RuntimeError("the broker is unreachable")
+
+    monkeypatch.setattr(client.app.state.store, "get", boom)
+
+    # A second `TestClient(...)` used AS A CONTEXT MANAGER re-sends the ASGI lifespan
+    # startup event, which recreates `app.state.store` and silently un-patches it —
+    # constructing it directly and never entering it as `with ... as` skips that, while
+    # still getting `raise_server_exceptions=False`'s suppression of the traceback
+    # Starlette's ServerErrorMiddleware always re-raises after building its response.
+    from fastapi.testclient import TestClient
+
+    no_raise = TestClient(client.app, raise_server_exceptions=False)
+    resp = no_raise.get("/jobs/job_anything")
+
+    assert resp.status_code == 500
+    assert resp.headers["content-type"].startswith("application/json")
+    body = resp.json()
+    ENVELOPE.validate(body)
+    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["retryable"] is False
+
+
 def test_validation_errors_and_bare_http_errors_answer_in_the_envelope(client):
     resp = client.post("/jobs", json={"messages": "not a list"})
     assert resp.status_code == 422

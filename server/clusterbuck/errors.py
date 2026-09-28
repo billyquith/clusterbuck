@@ -17,6 +17,7 @@ read from it: the contract directory is not part of the installed package.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
@@ -25,6 +26,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+_log = logging.getLogger("clusterbuck.errors")
 
 # code → retryable. "Retryable" means the identical request may succeed if simply retried
 # soon; it never means "could succeed once an operator changes the fleet".
@@ -116,6 +119,21 @@ def install_error_handlers(app: FastAPI) -> None:
         loc = [str(p) for p in (errors[0].get("loc") or ())[1:]] if errors else []
         return error_response("invalid_request", _jsonable(errors), 422,
                               param=".".join(loc) or None)
+
+    @app.exception_handler(Exception)
+    async def _uncaught(request: Request, exc: Exception) -> JSONResponse:
+        """Nothing else in this file runs for an exception that is not an
+        `HTTPException`/`RequestValidationError` — Redis being unreachable inside a
+        route, an `OverflowError` from a value pydantic's own field constraints did not
+        catch, any programming error. Left unhandled, FastAPI has no envelope for it at
+        all and Starlette's default is bare `text/plain` "Internal Server Error": no
+        `code`, no `retryable`, nothing a client can branch on for the one class of
+        failure protocols.md §1c already reserves a code for. `internal_error` is in
+        `CODES` for exactly this; this is what actually raises it.
+        """
+        _log.exception("unhandled exception serving %s %s",
+                       request.method, request.url.path)
+        return error_response("internal_error", "an unexpected error occurred", 500)
 
 
 def _jsonable(errors: list[dict]) -> list[dict]:
