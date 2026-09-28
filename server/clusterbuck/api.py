@@ -438,6 +438,11 @@ def create_app(
                 name: {"queue": stream_key(name), "model": c.model,
                        "model_server": c.model_server,
                        "cloud": c.cloud, "description": c.description,
+                       # The provider account this tier falls back to when no machine can
+                       # serve it (design.md §8), as configured; null = none. A client
+                       # choosing whether to send `cloud_ok` work here needs to know where
+                       # it could end up, and the job view only says so afterwards.
+                       "cloud_fallback": c.cloud_fallback,
                        # What the model is DECLARED able to do — the facts `requires`
                        # filters on for a job. The sync plane applies no `requires`, so
                        # a sync client choosing an alias for structured output has to be

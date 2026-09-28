@@ -23,7 +23,9 @@ One front door, two paths behind it, sharing the same machines:
 - **Async plane** — a durable queue for patient work. A job names a **capability tier**
   (`8b-extract`) or, better, a **need** (`task_class` + `min_ability`: "summarise this
   with a model scoring at least 6"). It waits on that queue until a capable worker pulls
-  it — and if the job has earned it, the coordinator wakes a machine.
+  it — and if the job has earned it, the coordinator wakes a machine. A job that allows
+  the cloud goes to a hosted provider only when no local machine can serve it, within a
+  monthly budget that is enforced, not just displayed.
 
 Workers **pull**; nothing is ever dispatched to a named node. Subscribing to a queue *is*
 the liveness signal, which is what makes a fleet that sleeps and roams work at all. **A

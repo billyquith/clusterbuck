@@ -228,6 +228,11 @@ GET /jobs/{id}
 
 The client never learns which machine ran the job beyond an opaque id (diagnostics only).
 
+`capability` is the tier the job is on **now**, which is not always the one it was sent
+to. A `cloud_ok` job is moved to a cloud tier when its local tier cannot be served,
+either at submit or by the rescue sweep near its `deadline` (design.md §8). A job that
+ran in the cloud reports `worker: "cloud:<provider>"`.
+
 **Why a job did not complete: `error_code`.** `error` is free text for a person;
 `error_code` is the stable code a client branches on (§1c). It is set on every terminal
 status but `done`:
@@ -812,7 +817,7 @@ the operator shared secret except where noted.
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Liveness. **Unauthenticated** (probe). |
-| `GET /fleet` | The registry as loaded from `fleet.yaml` (§5), plus two things per capability that a sync client needs to choose an alias: `features` — what its model is declared able to do, from the same lookup `requires` is filtered against (§1b), `null` = undeclared — and `health` — `{state: ready \| degraded \| unreachable \| unknown, checked_at, last_ok_at, last_error}`, the coordinator's own probe of `GET {model_server}/models` every `CBK_MODEL_PROBE_S`. `health` is advisory: the sync plane never refuses on it. A provider account is not probed and reads `unknown`. |
+| `GET /fleet` | The registry as loaded from `fleet.yaml` (§5), including each tier's `cloud_fallback` (the provider account it falls back to, `null` for none), plus two things per capability that a sync client needs to choose an alias: `features` — what its model is declared able to do, from the same lookup `requires` is filtered against (§1b), `null` = undeclared — and `health` — `{state: ready \| degraded \| unreachable \| unknown, checked_at, last_ok_at, last_error}`, the coordinator's own probe of `GET {model_server}/models` every `CBK_MODEL_PROBE_S`. `health` is advisory: the sync plane never refuses on it. A provider account is not probed and reads `unknown`. |
 | `GET /queues` | Per-capability **backlog** (queued, never delivered — the real backlog), `pending` (claimed-unacked, i.e. in flight), `depth` (`XLEN`: retained history incl. acked, bounded by `CBK_STREAM_MAXLEN`), live worker `consumers`, and `executors` (live coordinator-side cloud executors). A client does not need this endpoint to know its own place in line — `queue_position` is on the job body (§1b) — which matters because this one sits behind the operator secret. |
 | `GET /nodes` | Enrolled nodes: profile, mode, probed hardware, installed/loaded models, last heartbeat. Never exposes `node_key`. |
 | `POST /nodes/tokens` | Mint a one-time join token for §6 enrollment. |

@@ -421,3 +421,23 @@ def test_a_servable_local_tier_beats_one_nobody_can_serve(store):
                                       price_in_per_1k=0.01, price_out_per_1k=0.01),
     })
     assert _route(store, fleet, unavailable={"cheap-dark"}).capability == "dear-asleep"
+
+
+def test_fleet_view_shows_where_each_tier_falls_back_to(redis_url, tmp_path):
+    """A client deciding whether to send `cloud_ok` work to a tier can see where it may go."""
+    from clusterbuck.api import create_app
+    from fastapi.testclient import TestClient
+
+    fleet = tmp_path / "fleet.yaml"
+    fleet.write_text(
+        "capabilities:\n"
+        f"  {LOCAL}:\n    model_server: 'http://127.0.0.1:9/v1'\n    model: '{LOCAL_MODEL}'\n"
+        f"    cloud_fallback: {CLOUD}\n"
+        f"  {CLOUD}:\n    model: '{CLOUD_MODEL}'\n    cloud: true\n"
+        "    api_key_env: CBK_T_KEY\n")
+    app = create_app(redis_url=redis_url, db_path=str(tmp_path / "f.db"),
+                     fleet_path=str(fleet), start_scheduler=False)
+    with TestClient(app) as c:
+        caps = c.get("/fleet").json()["capabilities"]
+    assert caps[LOCAL]["cloud_fallback"] == CLOUD
+    assert caps[CLOUD]["cloud_fallback"] is None

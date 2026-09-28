@@ -52,8 +52,9 @@ Content-Type: application/json
 The `model` is a Clusterbuck capability alias, not necessarily the underlying model
 name, and it binds whatever deployment backs that alias now — it names a target, not a
 need. Discover registered aliases with `GET /v1/models`, or `GET /fleet` for each alias's
-configured model, `cloud` flag, `description`, and two things a sync client needs to
-choose one:
+configured model, `cloud` flag, `description`, `cloud_fallback` (the provider account the
+tier falls back to when it cannot be served, `null` for none), and two things a sync
+client needs to choose one:
 
 - `features` — what the model is declared able to do (`json_schema`, `tools`, `vision`,
   `context_tokens`; `null` means undeclared). Sync does not apply `requires`, so pick an
@@ -68,14 +69,19 @@ A successful response is a normal OpenAI-style chat completion. A failed call is
 retried for you, and its error carries a stable `code` (see *Errors* below):
 `capability_not_found` (404) for an alias that does not exist, `model_server_unreachable`,
 `model_server_timeout` or `model_server_error` when the alias exists but its model server
-failed, `fleet_not_configured` (503) when there is no fleet. A sync failure does not mean
+failed, `fleet_not_configured` (503) when there is no fleet, and `cloud_budget_exhausted`
+(422) when the alias is a cloud tier and the monthly cloud budget is spent. A sync failure does not mean
 the async worker route is unavailable: an unreachable-server error carries
 `use_async: true` when something is consuming that capability's queue or a machine
 serving it can be woken, so `POST /jobs` is worth trying.
 
 The sync path forwards straight to a capability's model server: it does not route by
-ability, apply `requires`, meter usage, or wake a sleeping machine. Anything that needs
-those goes through `POST /jobs`.
+ability, apply `requires`, or wake a sleeping machine. Anything that needs those goes
+through `POST /jobs`. It is metered (token counts and cost, never text) and held to the
+cloud budget. If the operator gave a tier a cloud fallback, a failed call to that tier's
+model server may be answered by a hosted provider instead. The sync request has no
+`privacy` field, so that is operator policy, not the client's choice. Once the budget is
+spent, no sync call reaches a provider.
 
 Use the asynchronous path for batch work, long-running work, or requests that may
 wait for capacity. It is the correct route when a sleeping worker may be woken or a
@@ -115,6 +121,30 @@ entries; larger requests are rejected with `422`.
 `cloud_ok` only when the data and budget policy allow a hosted provider. Use `urgent`,
 `necessary`, or `waitable` for `urgency`. Give user-visible work a `deadline` and/or
 `escalate_after_min`: a waitable job with neither may wait indefinitely.
+
+## When a job goes to the cloud
+
+Local first, always. A job reaches a hosted provider only if it is `cloud_ok`, the
+monthly cloud budget allows it, and one of these holds:
+
+- **No local artifact is good enough.** Need-shaped routing found nothing local that
+  clears `min_ability` and `requires`, but a cloud artifact does.
+- **The local tier cannot be served at submit.** Its urgency is `necessary` or `urgent`,
+  no machine is reading the tier, and none can be woken. A need-shaped job goes to the
+  cheapest cloud artifact that clears the same bar. A job addressed by `capability` goes
+  to that tier's `cloud_fallback` (shown by `GET /fleet`), or waits if there is none.
+- **Nothing came before the deadline.** The job was queued locally, still nothing is
+  reading its tier, and its `deadline` is within the rescue window (120 s by default). It
+  is moved to a cloud artifact chosen at submit against the same ability bar. A job with
+  no `deadline` is not moved, unless the operator has enabled that.
+
+A tier that is up but slow keeps its work: speed never sends a job to the cloud.
+`waitable` jobs never use the cloud until escalation promotes them to `necessary`.
+
+When a job ran in the cloud, `GET /jobs/{id}` shows it. `capability` names the cloud tier,
+which may not be the one you sent (it changes on a submit-time fallback or a rescue), and
+`worker` reads `cloud:<provider>`. Nothing else about the job changes: the same
+`result`, `usage` and terminal statuses.
 
 ## Hard requirements: `requires`
 
