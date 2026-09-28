@@ -26,7 +26,9 @@ BODY='{"capability":"8b-extract","messages":[{"role":"user","content":"retry me"
 post(){  # $1 = key ("" for none); prints "<code> <id>"
   local hdr=()
   [[ -n "$1" ]] && hdr=(-H "Idempotency-Key: $1")
-  curl -sS -X POST "$URL/jobs" -H 'content-type: application/json' "${hdr[@]}" \
+  # The `+` form, not a bare "${hdr[@]}": macOS bash 3.2 calls an empty array unbound
+  # under set -u, and `:-` would hand curl an empty argument instead of none.
+  curl -sS -X POST "$URL/jobs" -H 'content-type: application/json' ${hdr[@]+"${hdr[@]}"} \
     -d "$BODY" -o "$WORKDIR/out.json" -D "$WORKDIR/hdr.txt" -w '%{http_code}' \
     | tr -d '\n'
   printf ' '
