@@ -688,8 +688,17 @@ def create_app(
                                 "status": existing.status},
                         headers={"Idempotency-Replayed": "true"},
                     )
+                # Pin the RECORDED tier's model, not `selection.artifact`. The resolve above
+                # is a gate — the tier still exists, and this job may still use it — not a
+                # routing decision: the queue is fixed by the row. Routing can now land a
+                # job somewhere other than the tier it was addressed to (`fell_back_from`,
+                # when no machine can serve a local tier), and the retry may see a fleet the
+                # original did not. Taking its artifact would then pin a model onto a queue
+                # whose workers do not serve it, which fails there as a model error and
+                # reads as the job's own fault. Reaching this line means the explicit path
+                # already found the fleet and the capability in it.
                 params = dict(body.params or {})
-                params["model"] = selection.artifact
+                params["model"] = app.state.fleet.capabilities[existing.capability].model
                 record = JobRecord(
                     id=existing.id, created_at=existing.created_at,
                     capability=existing.capability, messages=body.messages,

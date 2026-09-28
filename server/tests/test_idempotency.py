@@ -124,6 +124,39 @@ def test_a_retry_repairs_a_row_committed_but_never_enqueued(client, redis_url):
     assert _stream_len(redis_url) == 1
 
 
+def test_a_repair_pins_the_recorded_tiers_model_not_this_calls_routing(
+    client, redis_url, monkeypatch,
+):
+    """The repair re-enqueues on the capability recorded on the row, so the pinned model
+    must be that tier's — whatever routing would pick for the retry. Routing can now send
+    a job to the cloud when no machine serves its local tier (`fell_back_from`), so the
+    retry's selection is simulated as having done exactly that: a cloud artifact pinned
+    onto the local queue would be claimed by a worker that does not serve it."""
+    from clusterbuck import api
+    from clusterbuck.ids import new_ids
+    from clusterbuck.routing import Selection
+
+    job_id, result_key = new_ids()
+    client.app.state.store.insert(
+        id=job_id, result_key=result_key, capability="8b-extract",
+        created_at="2026-09-02T00:00:00Z", urgency="waitable", idempotency_key=KEY,
+    )
+    monkeypatch.setattr(api, "resolve", lambda *a, **k: Selection(
+        capability="claude-sonnet", artifact="anthropic/claude-sonnet-5", cloud=True,
+        fell_back_from="8b-extract",
+    ))
+
+    assert _submit(client, key=KEY).status_code == 200
+
+    conn = redis.from_url(redis_url, decode_responses=True)
+    try:
+        [(_, fields)] = conn.xrange(stream_key("8b-extract"))
+    finally:
+        conn.close()
+    expected = client.app.state.fleet.capabilities["8b-extract"].model
+    assert json.loads(fields["job"])["params"]["model"] == expected
+
+
 def test_different_keys_are_different_jobs(client, redis_url):
     a = _submit(client, key="key-a")
     b = _submit(client, key="key-b")
