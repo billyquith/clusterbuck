@@ -155,6 +155,43 @@ def test_a_cancelling_job_is_terminalised_even_if_the_worker_vanishes(
     assert rows and rows[0].outcome == "cancelled", "not 'expired'"
 
 
+def test_a_cancel_that_races_a_finish_reports_the_real_result(client, redis_url):
+    """`withdraw`'s XDEL succeeds against an acked-but-still-present entry exactly as it
+    does against one never delivered at all, and a worker acks only AFTER writing its
+    result (protocols.md §2). So a worker that answers and acks strictly between DELETE's
+    own `read_result` probe and its call to `withdraw` used to be reported `cancelled`
+    with the answer discarded — even though the work had genuinely completed. Forced
+    deterministically here by making `withdraw` itself land the result first."""
+    job_id = _submit(client).json()["id"]
+    _claim(redis_url)
+
+    real_withdraw = client.app.state.queue.withdraw
+
+    async def withdraw_after_finish(stream, entry_id, *, group):
+        # Result first, ack second — the same order a real worker uses (protocols.md
+        # §2) — so by the time `real_withdraw` runs, the entry is answered AND acked:
+        # exactly what "deleted" cannot tell apart from "nobody ever claimed this".
+        conn = redis.from_url(redis_url, decode_responses=True)
+        conn.set(f"res_{job_id[4:]}", json.dumps({
+            "job_id": job_id, "status": "done", "worker": "node-alpha",
+            "completed_at": "2026-09-02T00:00:00Z",
+            "completion": {"id": "c1", "choices": []},
+        }))
+        conn.xack(stream, group, entry_id)
+        conn.close()
+        return await real_withdraw(stream, entry_id, group=group)
+
+    client.app.state.queue.withdraw = withdraw_after_finish
+    try:
+        got = client.delete(f"/jobs/{job_id}").json()
+    finally:
+        client.app.state.queue.withdraw = real_withdraw
+
+    assert got["status"] == "done", "the real answer, not a cancellation that lost it"
+    assert got["result"] is not None
+    assert client.get(f"/jobs/{job_id}").json()["status"] == "done"
+
+
 def test_a_worker_that_finishes_first_still_wins(client, redis_url):
     """The floor must not eagerly terminalise: if the run completes, its result is the
     truth and the job is `done`, not `cancelled`."""

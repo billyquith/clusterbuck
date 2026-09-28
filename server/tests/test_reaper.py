@@ -264,3 +264,37 @@ async def test_the_dead_letter_write_itself_refuses_to_clobber(store, queue):
     assert result["worker"] == "node-woke-up"
     assert store.get("job_squeeze").status == "done", "the row follows the blob"
     assert out["dead_lettered"] == 0, "nothing was actually dead-lettered"
+
+
+async def test_a_job_already_terminalised_by_a_coordinator_sweep_is_not_revived(
+    store, queue
+):
+    """The coordinator's own sweeps — the deadline sweep, a cancellation it could not
+    prove — terminalise a job by writing the ROW's status directly, with no result blob
+    at all: there is nothing for the reaper's `read_result` probe to see. Reclaiming that
+    same stale claim used to requeue (or dead-letter) it anyway, un-terminalising
+    `expired` back to `queued` — this is the reaper half of "terminal means terminal"
+    (design.md §12); the sweeps write no blob precisely because nothing else was
+    expected to still be holding the entry.
+    """
+    await _submit(queue, store, "job_expired", max_attempts=1)
+    await _claim_and_die(queue)
+    # Stands in for the deadline sweep's own terminalising write: status only, no blob —
+    # exactly the state `usage_scan`'s deadline branch leaves behind for a claimed job.
+    store.set_status("job_expired", "expired")
+
+    out = await reaper_scan(store, queue, group=GROUP, min_idle_ms=0, capabilities=[CAP])
+
+    assert out == {"requeued": 0, "dead_lettered": 0}
+    assert store.get("job_expired").status == "expired", "must not be revived to queued"
+    assert await queue.read_result("res_job_expired") is None, "still no invented result"
+    assert await _pending(queue) == 0, "the stale claim is acked away, not left dangling"
+
+
+async def test_set_status_refuses_to_move_a_row_out_of_terminal(store):
+    store.insert(id="job_t", result_key="res_t", capability=CAP, created_at="t")
+    assert store.set_status("job_t", "done") is True
+    assert store.get("job_t").status == "done"
+
+    assert store.set_status("job_t", "queued") is False, "a terminal row must refuse"
+    assert store.get("job_t").status == "done", "and stay exactly as it was"

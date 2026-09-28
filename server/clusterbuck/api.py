@@ -108,13 +108,6 @@ def _validated_idempotency_key(raw: str | None) -> str | None:
     return key
 
 
-# Statuses the COORDINATOR decides, from its own clock or a client's DELETE, rather than
-# from an executor's result. Once recorded they are final and no result blob overrides
-# them. (`done` and `failed` need no such rule: they come from the first result written,
-# and result writes are first-writer-wins.)
-_SEALED_STATUSES = frozenset({"expired", "cancelled"})
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -867,12 +860,18 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown job id")
 
         result = await app.state.queue.read_result(row.result_key)
-        if row.status in _SEALED_STATUSES and (result or {}).get("status") != row.status:
-            # The coordinator gave up on this job. A result that lands afterwards comes
-            # from a worker that had already claimed it and ran on regardless; it must not
-            # turn `expired` into `done`, or `cancelled` into anything, after the client
-            # was told to stop waiting. Terminal has to mean terminal. (A blob that AGREES
-            # — the backstop's own `expired`, carrying its reason — is kept.)
+        if row.status in TERMINAL_STATUSES and (result or {}).get("status") != row.status:
+            # The row is already terminal, and this blob disagrees with it — discard the
+            # blob rather than the row. This covers two cases, not only the one it was
+            # first written for: `expired`/`cancelled` are the COORDINATOR's own verdicts,
+            # which a worker running on regardless must not overturn after the client was
+            # told to stop waiting. But `done`/`failed` need the same guard: first-writer-
+            # wins only holds while the first writer's blob is still in Redis, and once it
+            # has aged out past `CBK_RESULT_TTL_S` a second writer's `SET … NX` succeeds
+            # against an absent key, not a held one — a stale second answer would
+            # otherwise flip a row that already went terminal. Terminal has to mean
+            # terminal either way. (A blob that AGREES — the backstop's own `expired`,
+            # carrying its reason — is kept.)
             result = None
         if result is None:
             # No terminal result yet — report the queue-state we last recorded.
@@ -949,6 +948,17 @@ def create_app(
                 row.stream, row.entry_id, group=settings.consumer_group
             )
             if outcome == "deleted":
+                # XDEL succeeds against an acked-but-still-present entry exactly as it
+                # does against one never delivered at all — and a worker acks only AFTER
+                # writing its result (protocols.md §2, "result first, ack second"). So
+                # "deleted" alone cannot tell apart "nobody ever claimed this" from "a
+                # worker claimed it, answered, and acked in the gap since our read_result
+                # above" — the gap this awaits, not a lock, leaves open. Re-checking here
+                # is what makes `cancelled` provable rather than merely likely: a result
+                # that landed in that gap is a real, completed answer, and must be told to
+                # the client rather than discarded as if the job never ran.
+                if await app.state.queue.read_result(row.result_key) is not None:
+                    return await get_job(job_id)
                 verdict = "cancelled"
         # else: a row from before deliveries were recorded, or the window between the
         # insert and the XADD — nothing provable either way.

@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from .models import TERMINAL_STATUSES
 from .queue import REAPER_CONSUMER, TIER_ORDER, Queue, stream_key
 from .store import Store
 
@@ -55,6 +56,8 @@ async def reaper_scan(
             tier=tier,
         )
         for entry_id, job in stale:
+            job_id = job.get("id", "<unknown>")
+
             # A job whose result already exists finished just as we reclaimed it: the worker
             # wrote the result but died before acking. Nothing to re-run.
             result_key = job.get("result_key")
@@ -62,9 +65,25 @@ async def reaper_scan(
                 await queue.ack(capability, group, entry_id, tier=tier)
                 continue
 
+            # The coordinator's OWN sweeps terminalise a job by writing the row's status
+            # directly, with no result blob at all — the deadline-expiry and
+            # cancellation-floor branches in `usage_scan` both do this. The read_result
+            # probe above cannot see that: there is nothing in Redis to read. Without this
+            # check a claim reclaimed after one of those sweeps had already given up on it
+            # was requeued (or dead-lettered) anyway, un-terminalising an `expired` or
+            # `cancelled` row back to `queued`/`failed` — exactly what "terminal means
+            # terminal" (design.md §12) forbids. The stale entry is still acked away: it
+            # is not going to be delivered again regardless, and leaving it pending would
+            # only give a later scan the same decision to make.
+            row = store.get(job_id)
+            if row is not None and row.status in TERMINAL_STATUSES:
+                _log.info("%s [%s] is already %s — dropping the stale claim, not "
+                          "reviving it", job_id, capability, row.status)
+                await queue.ack(capability, group, entry_id, tier=tier)
+                continue
+
             attempts = int(job.get("attempts", 0)) + 1
             max_attempts = int(job.get("max_attempts", 3))
-            job_id = job.get("id", "<unknown>")
 
             if attempts >= max_attempts:
                 # FIRST WRITER WINS here too (`only_if_absent`), not just on the executor

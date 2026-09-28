@@ -172,32 +172,41 @@ class Store:
         with self._session() as s:
             return s.get(Job, id)
 
-    def set_status(self, id: str, status: str) -> None:
+    def set_status(self, id: str, status: str) -> bool:
         """Set a job's status, stamping `finished_at` the first time it goes terminal.
 
-        The stamp lives here rather than at the call sites because there are four places
-        the coordinator first writes a terminal status — the lazy write-back on poll, the
-        usage tick's capture and its deadline-expiry branch, and the reaper's dead-letter
-        — and hooking only one of them would leave a `done` job with no `finished_at`,
-        which is precisely the ambiguity the column exists to remove.
+        The stamp lives here rather than at the call sites because there are several
+        places the coordinator first writes a terminal status — the lazy write-back on
+        poll, the usage tick's capture and its deadline-expiry branch, the reaper's
+        dead-letter, and the backstop — and hooking only one of them would leave a `done`
+        job with no `finished_at`, which is precisely the ambiguity the column exists to
+        remove.
 
-        The stamp is a guarded UPDATE (`WHERE finished_at IS NULL`) rather than
-        read-then-write, so two ticks racing the same job cannot overwrite an earlier,
-        more accurate observation with a later one.
+        This is a single guarded UPDATE (`WHERE status NOT IN TERMINAL_STATUSES`), not
+        read-then-write: a row already `done`, `failed`, `expired` or `cancelled` refuses
+        every further write, so nothing — a reaper requeue un-sealing an expired job back
+        to `queued`, a stale second result flipping `failed` to `done` once the first
+        blob has aged out of Redis, a tick that lands after a cancellation — can move a
+        row OUT of a terminal status once one has been recorded (design.md §12, "terminal
+        must mean terminal"). Because the guard is on the CURRENT row, a row reaching this
+        method non-terminal has never had `finished_at` set either, so the stamp needs no
+        separate NULL check of its own.
+
+        Returns whether the row actually changed — false means it was already terminal
+        and this write was refused, which callers may use to skip work that assumed it
+        would land (see `reaper_scan`).
         """
+        values: dict[str, str] = {"status": status}
+        if status in TERMINAL_STATUSES:
+            values["finished_at"] = now_iso()
         with self._session() as s:
-            job = s.get(Job, id)
-            if job is None:
-                return
-            job.status = status
-            s.add(job)
-            if status in TERMINAL_STATUSES:
-                s.exec(
-                    update(Job)
-                    .where(Job.id == id, Job.finished_at.is_(None))
-                    .values(finished_at=now_iso())
-                )
+            result = s.exec(
+                update(Job)
+                .where(Job.id == id, Job.status.not_in(TERMINAL_STATUSES))
+                .values(**values)
+            )
             s.commit()
+            return bool(result.rowcount)
 
     def orphaned_jobs(self, before_iso: str) -> list[Job]:
         """Non-terminal jobs older than `before_iso` that may have no stream entry.
