@@ -765,11 +765,22 @@ file, so a generated `.cmd` shim reads `worker.env` at each launch; it sets `PYT
 because the service account's redirected stdout otherwise falls back to the ANSI codepage
 and dies on the worker's own output.
 
-**Self-update refuses on Windows.** The in-place swap cannot work while zipimport holds
-the handle, and `os.execv` there spawns a child rather than replacing the image — which,
-with the task's restart policy, would leave two workers on one Redis consumer name.
-Updating a Windows node means replacing the `.pyz` and restarting the task. The
-coordinator still marks it `stale`, so the drift stays visible.
+**Self-update on Windows is a hand-off to the launcher.** The worker cannot do the POSIX
+swap: zipimport holds the running `.pyz` open, and `os.execv` there spawns a child rather
+than replacing the image, which with the task's restart policy would put two workers on
+one Redis consumer name. So it verifies exactly as on POSIX (signature, strictly newer,
+digest), stages the build as `bin\cbk.pyz.new`, and exits `75`. The generated
+`run-worker.cmd` — the only other process in the task, and holding no handle on the file
+— moves it into place, keeps the old one as `cbk.prev.pyz`, and starts it again. A
+launcher that can do this says so with `CBK_UPDATE_HANDOFF=1`; under one that cannot, the
+worker still refuses, because an older launcher would restart the old build, which would
+fetch the update again and loop. Re-running `install.ps1` upgrades a node to the new
+launcher, and is idempotent on an installed node: it stops the running worker first, keeps
+`worker.env` and the node's identity, and needs no `-RedisUrl`.
+
+The build lives in `bin\`, which the service account may write; the launcher, `worker.env`
+and the update-signing key stay admin-only. That is the same trust as Linux, where the
+binary belongs to the `clusterbuck` user.
 
 Never write a file the worker parses with `Set-Content -Encoding UTF8`: on PowerShell 5.1
 that emits a BOM, and cmd's `for /f` folds a BOM into the *first variable's name* — so the
@@ -983,24 +994,35 @@ moves to a new version, the *previous* artifact stops being servable even though
 still on disk. Rolling the channel back means restoring the old `release.json`, not just
 pointing at the old file.
 
-### Releasing a worker version touches three settings, not one
+### A release is one record
 
-They all name a version, nothing reconciles them, and disagreement is silent:
+Three settings used to name the released version, and nothing reconciled them:
+`CBK_WORKER_CURRENT_VERSION` (whether a node reads `ok` or `stale`), `CBK_WORKER_ARTIFACT`
+(what a joining node downloads) and `release.json` (what existing nodes are offered).
+Bumping only the first two produced the worst state — every node told it was `stale`
+while being offered nothing, which reads exactly like "self-update is not configured"
+on a channel that is working.
 
-| Setting | Governs | Read by |
-|---|---|---|
-| `CBK_WORKER_CURRENT_VERSION` | whether a node is judged `ok` or `stale` | the fitness check, on every heartbeat |
-| `CBK_WORKER_ARTIFACT` | the build a **joining** node downloads | `GET /worker/artifact`, which bootstrap points the joiner at |
-| `CBK_UPDATE_RELEASE` → `release.json` | the manifest **existing** nodes are offered | `_build_update_for`, on every heartbeat |
+Now `release.json` is the record and the other two follow it: fitness judges against its
+version, and `/worker/artifact` serves the file it names, so a join and an update hand out
+the same bytes by construction. The variables still work as overrides, and the coordinator
+warns at startup when one disagrees with the manifest. Publishing is one command on the
+coordinator, as the service user:
 
-Bumping only the first two produces the worst of the three states: every node is told it
-is `stale` while being offered nothing, because the release manifest still names the
-version they already run. It reads exactly like "self-update is not configured" when it is
-fully configured — signing key, channel, `auto_update` and all.
+```bash
+python -m clusterbuck.release publish <cbk.pyz | https://…/cbk.pyz>
+```
 
-So a release is: publish `cbk-<ver>.pyz` into the release directory, rewrite
-`release.json` (keeping a `.bak-<oldver>`), refresh the join artifact, and bump
-`CBK_WORKER_CURRENT_VERSION`. Miss one and the fleet drifts quietly.
+It reads the version **from the build itself** (a manifest that disagreed with the build's
+own `AGENT_VERSION` would have nodes install it, report the old number, and be offered it
+again every beat), refuses anything not strictly newer, checks the digest (for a URL,
+against the `<url>.sha256` beside it), copies the build in, and rewrites the manifest
+atomically, keeping `release.json.bak-<old>`. No restart. It is a CLI and not an endpoint
+on purpose: publishing is code execution on every auto-updating worker, and the API key is
+a credential clients hold.
+
+`deploy/release.sh X.Y.Z [--publish-via HOST]` wraps the whole thing: bump, test, tag,
+let the release workflow build and attach the artifact, then publish that exact file.
 
 This is the same shape as the three registries in §6 — several records that each name
 part of the truth and never check each other. Worth watching for as a pattern.
@@ -1042,6 +1064,17 @@ Short list, because reversing one of these quietly breaks something.
   deployment in LiteLLM's global price map, an unknown model at $0, after which it prices
   that model at nothing instead of refusing. Whether the map genuinely knows a model is
   asked separately, before its figure is believed.
+- **A Windows worker may write its own build directory.** `install.ps1` used to make the
+  binary read-only to the service account, reasoning that the worker must not rewrite its
+  own binary. What that closed was never the worker: the inherited ACL left the file
+  writable by every authenticated user while the task ran as SYSTEM. That hole stays
+  closed (Users have nothing in `bin\`, and the account is NetworkService), and the
+  worker needs `bin\` to stage an update. Do not "restore" read-only without another way
+  for Windows nodes to update; the launcher, `worker.env` and the signing key are the
+  files that must stay admin-only.
+- **Release state lives in `release.json`, and the version in it comes from the build.**
+  Settings that each named the version drifted silently; a version typed by hand that
+  disagrees with the build's own is an update loop. `clusterbuck.release` derives it.
 - **A queue, not a serving cluster.** The scarce resource is availability. Everything
   follows from taking an intermittent fleet seriously.
 - **Pull, not push.** Subscription *is* liveness. A dispatcher would need a liveness table

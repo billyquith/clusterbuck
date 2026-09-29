@@ -141,3 +141,65 @@ async def test_fleet_on_an_empty_coordinator_says_so(monkeypatch, capsys):
     monkeypatch.setattr(httpx, "AsyncClient", Mocked)
     assert await commands.run_fleet(_args()) == 0
     assert "fleet is empty" in capsys.readouterr().out
+
+
+# --- applying an offered update: only when idle, and only if it will apply --------------
+
+
+class _Loop:
+    def __init__(self, busy: bool) -> None:
+        self.busy, self.updating, self.exit_code = busy, False, 0
+
+
+class _Applier:
+    def __init__(self, stage=None, commit=None) -> None:
+        from cbk_worker.update import Outcome, UpdateResult
+        self._stage = UpdateResult(stage or Outcome.STAGED, "x")
+        self._commit = UpdateResult(commit or Outcome.APPLIED, "x")
+        self.staged = self.committed = 0
+
+    async def stage(self, m):
+        self.staged += 1
+        return self._stage
+
+    def commit(self, m):
+        self.committed += 1
+        return self._commit
+
+
+_OFFER = {"version": "9.9.9", "rid": "py3-none-any", "url": "u", "sha256": "0" * 64,
+          "channel": "stable", "signature": "s", "protocol_version": 1}
+
+
+async def test_an_update_waits_for_the_jobs_in_hand():
+    """Pausing claims is not a drain: swapping with a job in flight stranded it until the
+    reaper reclaimed it on another node."""
+    import asyncio
+    loop, applier, stop = _Loop(busy=True), _Applier(), asyncio.Event()
+    await commands._try_update(applier, _OFFER, loop, stop)
+    assert applier.committed == 0 and loop.updating is True   # holding claims, not swapping
+    loop.busy = False
+    await commands._try_update(applier, _OFFER, loop, stop)
+    assert applier.committed == 1
+
+
+@pytest.mark.parametrize("outcome", ["refused", "failed", "skipped"])
+async def test_nothing_is_drained_until_the_build_is_staged(outcome):
+    """A node that will refuse, or cannot download, must keep claiming: draining first
+    took a node that could not reach the download out of service every other beat."""
+    import asyncio
+
+    from cbk_worker.update import Outcome
+    loop = _Loop(busy=True)
+    applier = _Applier(stage=Outcome(outcome))
+    await commands._try_update(applier, _OFFER, loop, asyncio.Event())
+    assert loop.updating is False and applier.committed == 0
+
+
+async def test_a_windows_handoff_exits_for_the_launcher():
+    import asyncio
+
+    from cbk_worker.update import EXIT_UPDATE, Outcome
+    loop, stop = _Loop(busy=False), asyncio.Event()
+    await commands._try_update(_Applier(commit=Outcome.HANDOFF), _OFFER, loop, stop)
+    assert loop.exit_code == EXIT_UPDATE and stop.is_set()

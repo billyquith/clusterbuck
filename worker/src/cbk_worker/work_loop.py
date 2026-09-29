@@ -79,6 +79,13 @@ class WorkLoop:
         # this build. In-flight jobs already claimed still finish; nothing new is claimed.
         # Rewritten on every beat, which is why the start-up hold below is NOT this flag.
         self.paused = False
+        # Set while an offered update waits for the jobs in hand to finish. Separate from
+        # `paused` for the same reason as the hold below: every beat rewrites that, and an
+        # update that reclaimed the node on the next beat would never find it idle.
+        self.updating = False
+        # What `run_work` exits with. Non-zero only when the Windows launcher is to swap in
+        # a staged build (update.EXIT_UPDATE).
+        self.exit_code = 0
         # Monotonic deadline of the start-up hold for the coordinator's first verdict, or
         # None when not holding (`hold_for_verdict`). Kept apart from `paused` because
         # every beat recomputes that from the ladder and the last verdict, and the first
@@ -394,6 +401,11 @@ class WorkLoop:
         return False
 
     @property
+    def busy(self) -> bool:
+        """Whether any claimed job is still in flight."""
+        return bool(self._running)
+
+    @property
     def free_slots(self) -> int:
         """How many more jobs this node may take right now."""
         return max(0, self.effective_limit - len(self._running))
@@ -418,7 +430,8 @@ class WorkLoop:
         the one node that was awake. At `max_concurrent_jobs = 1` the behaviour is
         unchanged, because `run` waits for the slot before polling again.
         """
-        if self.paused or self._awaiting_verdict() or self.effective_limit <= 0:
+        if (self.paused or self.updating or self._awaiting_verdict()
+                or self.effective_limit <= 0):
             return False
         did_work = False
         # One job per capability per pass, rather than draining a stream before looking at
@@ -439,7 +452,7 @@ class WorkLoop:
             # to do: claim one, run it, move to the next capability.
             if self.free_slots <= 0:
                 await self._wait_for_slot()
-                if self.paused:
+                if self.paused or self.updating:
                     break
             # Urgent tier first, base only if it had nothing. Note this stays INSIDE the
             # one-job-per-capability discipline: the tier loop breaks as soon as it takes

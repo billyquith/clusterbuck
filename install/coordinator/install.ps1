@@ -22,7 +22,8 @@
     Installation root directory. Default: C:\clusterbuck
 
 .PARAMETER WorkerVersion
-    CBK_WORKER_CURRENT_VERSION written to server config. Default: 0.8.0
+    Pins CBK_WORKER_CURRENT_VERSION in server config. Default: unset, so nodes are judged
+    against whatever release.json names (the variable overrides it).
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1
@@ -33,7 +34,7 @@ param(
     [string]$Branch        = 'main',
     [string]$Port          = '8018',
     [string]$DeployDir     = 'C:\clusterbuck',
-    [string]$WorkerVersion = '0.8.0'
+    [string]$WorkerVersion = ''
 )
 
 Set-StrictMode -Version Latest
@@ -169,8 +170,8 @@ CBK_DB_PATH=$DbPath
 CBK_FLEET_PATH=$FleetYaml
 CBK_HOST=0.0.0.0
 CBK_PORT=$Port
-CBK_WORKER_CURRENT_VERSION=$WorkerVersion
 "@
+    if ($WorkerVersion) { $envBody += "`r`nCBK_WORKER_CURRENT_VERSION=$WorkerVersion" }
     [System.IO.File]::WriteAllText($ServerEnv, $envBody, (New-Object System.Text.UTF8Encoding($false)))
     # Restrict to Administrators
     $acl = Get-Acl $ServerEnv

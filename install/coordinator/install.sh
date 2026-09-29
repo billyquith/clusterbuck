@@ -16,7 +16,8 @@
 #   --branch BRANCH  Branch or tag to install (default: main)
 #   --port PORT      Coordinator API port     (default: 8018)
 #   --lan-redis      Bind Redis on all interfaces so remote workers can reach it
-#   --worker-version VER  CBK_WORKER_CURRENT_VERSION to write to server.env (default: 0.8.0)
+#   --worker-version VER  pin CBK_WORKER_CURRENT_VERSION in server.env (default: unset,
+#                         so nodes are judged against whatever release.json names)
 
 set -euo pipefail
 
@@ -25,7 +26,7 @@ REPO_URL="https://github.com/billyquith/clusterbuck"
 BRANCH="main"
 PORT="8018"
 LAN_REDIS=0
-WORKER_VERSION="0.8.0"
+WORKER_VERSION=""
 DEPLOY_DIR="/opt/clusterbuck"
 SECRETS_FILE="/root/.cbk-secrets"
 
@@ -168,12 +169,16 @@ CBK_DB_PATH=/var/lib/clusterbuck/cbk.db
 CBK_FLEET_PATH=/etc/clusterbuck/fleet.yaml
 CBK_HOST=0.0.0.0
 CBK_PORT=${PORT}
-CBK_WORKER_CURRENT_VERSION=${WORKER_VERSION}
 HOME=/var/lib/clusterbuck
 XDG_CACHE_HOME=/var/lib/clusterbuck/cache
 HF_HOME=/var/lib/clusterbuck/cache/huggingface
 TIKTOKEN_CACHE_DIR=/var/lib/clusterbuck/cache/tiktoken
 EOF
+  # Only when asked for: it overrides release.json, and a default pinned here judged every
+  # node against 0.8.0 forever, whatever was released after.
+  if [[ -n "$WORKER_VERSION" ]]; then
+    echo "CBK_WORKER_CURRENT_VERSION=${WORKER_VERSION}" >> /etc/clusterbuck/server.env
+  fi
   chown root:root /etc/clusterbuck/server.env
   chmod 600 /etc/clusterbuck/server.env
   ok "server.env written"

@@ -14,7 +14,9 @@
     Coordinator server URL. Required.  e.g. http://coordinator.local:8018
 
 .PARAMETER RedisUrl
-    Redis URL including password. Required.  e.g. redis://:pass@coordinator.local:6379/0
+    Redis URL including password.  e.g. redis://:pass@coordinator.local:6379/0
+    Needed only when worker.env does not exist yet. A re-run of an installed node leaves
+    it out, so the broker password is not put on a command line to change nothing.
 
 .PARAMETER Model
     Model this node advertises to the coordinator. Required.  e.g. qwen2.5:7b
@@ -39,7 +41,9 @@
     Local model server URL.  Default: http://127.0.0.1:11434/v1
 
 .PARAMETER DeployDir
-    Directory where the binary lives.  Default: C:\clusterbuck
+    Install root.  Default: C:\clusterbuck. The launcher lives here, admin-only; the
+    worker build lives in its bin\ subdirectory, which the worker may write so that it
+    can update itself.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1 `
@@ -51,7 +55,7 @@
 #>
 param(
     [Parameter(Mandatory)] [string]$CoordinatorUrl,
-    [Parameter(Mandatory)] [string]$RedisUrl,
+    [string]$RedisUrl       = '',
     [Parameter(Mandatory)] [string]$Model,
     [string]$Artifact       = '',
     [string]$Token          = '',
@@ -116,6 +120,33 @@ function Protect-SecretFile {
     Set-Acl -Path $Path -AclObject $acl
 }
 
+function Protect-WorkerDir {
+    <#
+      A directory the worker writes: its build (bin\) and its log. Not inherited from
+      the parent, Administrators and SYSTEM in full, and the service account at Modify,
+      inherited by everything created inside it — so a staged update, the retained
+      previous build and a fresh log file all come out right with no per-file step.
+      Existing children are reset to inherit from here, which also undoes the
+      ReadAndExecute-only ACL an older install put on the binary.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $none    = [System.Security.AccessControl.PropagationFlags]::None
+    $acl = Get-Acl $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+    foreach ($id in @('Administrators', 'SYSTEM')) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $id, 'FullControl', $inherit, $none, 'Allow'))
+    }
+    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $ServiceAccount, 'Modify', $inherit, $none, 'Allow'))
+    Set-Acl -Path $Path -AclObject $acl
+    Get-ChildItem -LiteralPath $Path -Force | ForEach-Object {
+        & icacls $_.FullName /reset /Q | Out-Null
+    }
+}
+
 # ── prerequisite checks ───────────────────────────────────────────────────────
 Write-Step 'Checking prerequisites'
 
@@ -123,6 +154,17 @@ $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) { Write-Fail 'Python not found. Install Python 3.11+ from https://python.org' }
 $pyVer = & python -c 'import platform; print(platform.python_version())'
 if ([version]$pyVer -lt [version]'3.11') { Write-Fail "Python 3.11+ required (found $pyVer)" }
+# Baked into the launcher as a full path: the service account's PATH is not the admin's
+# shell's, and a bare `python` there can resolve to nothing, or to something else.
+$PyExe = $py.Source
+if ($PyExe -like "$env:SystemDrive\Users\*") {
+    Write-Warn "Python is a per-user install ($PyExe) - the service account may not be able to run it. Install it for all users."
+}
+& $PyExe -c 'import cryptography' 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn 'cryptography is not installed for this Python: the worker runs, but refuses every self-update.'
+    Write-Warn "  Fix: & '$PyExe' -m pip install cryptography"
+}
 Write-Ok "Python $pyVer"
 
 try {
@@ -137,15 +179,43 @@ Write-Step 'Directories'
 $EtcDir = "$env:ProgramData\clusterbuck"
 $VarDir = "$env:ProgramData\clusterbuck\data"
 $LogDir = "$env:ProgramData\clusterbuck\logs"
+$BinDir = "$DeployDir\bin"
 
-foreach ($d in $DeployDir, $EtcDir, $VarDir, $LogDir) {
+foreach ($d in $DeployDir, $BinDir, $EtcDir, $VarDir, $LogDir) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
+# The launcher appends to the log as the service account. A log an older install created
+# as SYSTEM is not writable by it, and cmd then fails the redirect and never starts Python.
+Protect-WorkerDir $LogDir
 Write-Ok 'Directories ready'
+
+# ── stop a running worker ─────────────────────────────────────────────────────
+# A re-run replaces the binary and the task, and neither is safe under a live worker: the
+# .pyz is locked while it runs, and unregistering the task does not stop its process, so
+# starting the new registration would put a SECOND worker on the same consumer name.
+# Stopping the task ends cmd.exe; its Python child can outlive it, so that is checked too.
+# A job in flight is abandoned to the coordinator's reaper, which requeues it.
+if (Get-ScheduledTask -TaskName 'cbk-worker' -ErrorAction SilentlyContinue) {
+    Write-Step 'Stopping the running worker'
+    Stop-ScheduledTask -TaskName 'cbk-worker' -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object { $_.CommandLine -like '*cbk.pyz*work*' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Write-Ok 'Worker stopped'
+}
 
 # ── binary ────────────────────────────────────────────────────────────────────
 Write-Step 'Worker binary'
-$CbkBin = "$DeployDir\cbk.pyz"
+$CbkBin = "$BinDir\cbk.pyz"
+
+# Older installs kept the build beside the launcher. Carry it into bin\ rather than
+# demanding a fresh -Artifact from an operator who is only re-running to repair a node.
+$legacyBin = "$DeployDir\cbk.pyz"
+if (-not $Artifact -and -not (Test-Path $CbkBin) -and (Test-Path $legacyBin)) {
+    Move-Item $legacyBin $CbkBin
+    Write-Ok "Moved the existing binary into $BinDir"
+}
 
 if ($Artifact) {
     if ($Artifact -match '^https?://') {
@@ -168,20 +238,19 @@ No binary at $CbkBin — supply one with -Artifact PATH
 "@
 }
 
-# SYSTEM executes this binary at every boot, and at the inherited ACL it is WRITABLE by
-# Authenticated Users - so any local account can replace the code the machine runs as
-# SYSTEM. Same hole the wrapper had, on the file that actually is the worker. Applied
-# whether the binary was just installed or was already there, since an older install left
-# it wide open and no re-run would otherwise repair it.
+# bin\ is the one place the worker may write, and it has to: self-update stages the next
+# build here (cbk.pyz.new), and the launcher swaps it in once the worker has exited (see
+# worker/src/cbk_worker/update.py). The same trust as Linux, where install.sh gives the
+# binary to the `clusterbuck` user for the same reason.
 #
-# Self-update does not need write access here any more: it is refused outright on Windows
-# (see worker/src/cbk_worker/update.py — the in-place swap cannot work while zipimport
-# holds the handle, and os.execv there would leave two workers on one consumer name).
-# That refusal is what made dropping off SYSTEM possible; the two changes belong together.
-# Updating a Windows node means replacing the .pyz and restarting the scheduled task.
-# ReadAndExecute, not FullControl: the service account runs the binary and must not
-# be able to rewrite it.
-if (Test-Path $CbkBin) { Protect-SecretFile $CbkBin -Grant ReadAndExecute }
+# It was ReadAndExecute only, on the grounds that the worker must not rewrite its own
+# binary. What that protected against was never the worker: it was the inherited ACL,
+# which left the file writable by Authenticated Users while the task ran as SYSTEM, so any
+# local account could replace the code the machine ran with full authority. That stays
+# closed — Users have nothing here, and the service account is NetworkService, not an
+# administrator. Everything that runs as someone else stays admin-only: the launcher
+# (DeployDir, below) and the update-signing key the worker verifies with.
+Protect-WorkerDir $BinDir
 
 # WRITING FILES THE WORKER PARSES: never `Set-Content -Encoding UTF8`.
 #
@@ -199,6 +268,7 @@ $EnvFile   = "$EtcDir\worker.env"
 $NodeState = "$VarDir\node.json"
 
 if (-not (Test-Path $EnvFile)) {
+    if (-not $RedisUrl) { Write-Fail "No $EnvFile yet, so -RedisUrl is required to write one" }
     $envBody = @"
 CBK_REDIS_URL=$RedisUrl
 CBK_SERVER_URL=$CoordinatorUrl
@@ -219,6 +289,33 @@ CBK_NODE_STATE=$NodeState
 }
 Protect-SecretFile $EnvFile -Grant Read          # the wrapper reads it at every launch
 
+# The update-signing public key, if the caller has one (join.py hands it over in
+# CBK_UPDATE_PUBKEY_PEM, in the environment rather than argv). install.sh has always done
+# this and this script never did, so every Windows node built by the join flow refused
+# every update for "no pinned public key" while the coordinator marked it stale.
+#
+# Admin-only to write: this key is what decides which builds the worker will install, so
+# an account that could replace it could make the node run anything.
+$PubkeyFile = "$EtcDir\update-pubkey.pem"
+if ($env:CBK_UPDATE_PUBKEY_PEM) {
+    [System.IO.File]::WriteAllText($PubkeyFile, $env:CBK_UPDATE_PUBKEY_PEM.Trim() + "`n",
+        (New-Object System.Text.UTF8Encoding($false)))
+    Write-Ok "update-signing public key -> $PubkeyFile"
+}
+if (Test-Path $PubkeyFile) {
+    Protect-SecretFile $PubkeyFile -Grant Read
+    if (-not (Select-String -Path $EnvFile -Pattern '^CBK_UPDATE_PUBKEY=' -Quiet)) {
+        # Appended BOM-free, for the same reason worker.env is written that way above.
+        [System.IO.File]::AppendAllText($EnvFile, "`r`nCBK_UPDATE_PUBKEY=$PubkeyFile`r`n",
+            (New-Object System.Text.UTF8Encoding($false)))
+        Write-Ok 'worker.env now pins the update-signing key'
+    }
+}
+if (-not (Select-String -Path $EnvFile -Pattern '^CBK_UPDATE_PUBKEY=' -Quiet)) {
+    Write-Warn 'No update-signing key is pinned: this node will refuse every self-update.'
+    Write-Warn '  Join through join.ps1, which fetches it, or set CBK_UPDATE_PUBKEY in worker.env.'
+}
+
 # ── Scheduled Task ────────────────────────────────────────────────────────────
 Write-Step 'Scheduled Task'
 $taskName = 'cbk-worker'
@@ -234,14 +331,49 @@ $wrapper  = "$DeployDir\run-worker.cmd"
 #
 # `eol=#` skips comment lines; `tokens=1,* delims==` keeps everything after the FIRST `=`
 # as the value, so a credential containing `=` survives intact.
+#
+# It is also what makes Windows self-update possible. The worker cannot replace a .pyz it
+# is running from, so it stages the verified build as cbk.pyz.new and exits 75
+# (update.EXIT_UPDATE). This script, which holds no handle on the file, swaps it in and
+# starts it again — one worker at a time, since nothing here runs a second copy. It says
+# so with CBK_UPDATE_HANDOFF=1; a worker under an older launcher refuses to stage, because
+# that launcher would restart the old build and it would fetch the update again forever.
+# Any other exit is passed up to Task Scheduler, whose restart policy covers crashes.
 @"
 @echo off
-rem SYSTEM runs this with stdout redirected to a file, so Python falls back to the legacy
-rem ANSI codepage and dies encoding the arrows in the worker's own log lines. Force UTF-8.
+rem The service account runs this with stdout redirected to a file, so Python falls back
+rem to the legacy ANSI codepage and dies encoding the arrows in the worker's own log lines.
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
+rem This launcher swaps in a staged build when the worker exits 75 (see below).
+set CBK_UPDATE_HANDOFF=1
 for /f "usebackq eol=# tokens=1,* delims==" %%a in ("$EnvFile") do set "%%a=%%b"
-python "$CbkBin" work >> "$LogDir\worker.log" 2>&1
+
+:run
+"$PyExe" "$CbkBin" work >> "$LogDir\worker.log" 2>&1
+set "rc=%ERRORLEVEL%"
+if not "%rc%"=="75" exit /b %rc%
+
+rem 75: the worker staged a verified build and stepped aside for this swap.
+if not exist "$CbkBin.new" goto wait
+if exist "$BinDir\cbk.prev.pyz" del /f /q "$BinDir\cbk.prev.pyz"
+move /y "$CbkBin" "$BinDir\cbk.prev.pyz" >nul
+if errorlevel 1 goto noswap
+move /y "$CbkBin.new" "$CbkBin" >nul
+if errorlevel 1 goto restore
+echo [launcher] swapped in the staged build; previous kept as cbk.prev.pyz>> "$LogDir\worker.log"
+goto run
+
+:restore
+move /y "$BinDir\cbk.prev.pyz" "$CbkBin" >nul
+:noswap
+rem A file lock (antivirus, an open handle) is the usual cause. Say so, then run what is there.
+echo [launcher] could not swap in the staged build; running the one in place>> "$LogDir\worker.log"
+
+:wait
+rem Pause rather than spin before running whatever is in place.
+ping -n 6 127.0.0.1 >nul
+goto run
 "@ | Set-Content $wrapper -Encoding ASCII
 
 # No longer holds the credential, but SYSTEM executes it at every boot - so an account

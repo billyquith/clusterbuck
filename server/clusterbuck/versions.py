@@ -127,12 +127,17 @@ def assess(policy: VersionPolicy, *, agent_version: str | None,
     return Fitness("ok", current_version=policy.current)
 
 
-def policy_from_settings(settings) -> VersionPolicy:
+def policy_from_settings(settings, release_path: str | None = None) -> VersionPolicy:
+    from .release import released_version
+
     blocked = {
         v.strip() for v in (settings.worker_blocked_versions or "").split(",") if v.strip()
     }
     return VersionPolicy(
-        current=settings.worker_current_version,
+        # Unset: whatever is released. The two used to be set separately and drifted, and
+        # a node judged against a version nobody was offering it could never be `ok`.
+        current=(settings.worker_current_version
+                 or released_version(release_path or settings.update_release)),
         minimum=settings.worker_min_version,
         blocked=frozenset(blocked),
     )

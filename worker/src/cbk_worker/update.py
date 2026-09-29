@@ -11,6 +11,9 @@ security boundary and is deliberately strict:
      A signature over a manifest says nothing about what actually arrived.
   4. **Retain the previous artifact** as `<name>.prev`, so a bad release can be rolled back.
   5. **Swap, then re-exec.** The replaced process starts the new artifact and steps aside.
+     On Windows the worker cannot do either (see `UpdateApplier.apply`), so it stops after
+     step 3, stages the verified file as `<name>.new`, and exits with `EXIT_UPDATE`; the
+     launcher that started it does the swap and starts the new build.
 
 Signature format: Python `cryptography` uses DER (SEC1/RFC 3279) ECDSA signatures; the
 signing server (`server/clusterbuck/signing.py`) produces the same format.
@@ -28,6 +31,7 @@ import hashlib
 import os
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -160,8 +164,25 @@ def current_artifact() -> Path | None:
     return None
 
 
+# The exit code that means "a verified build is staged next to me — swap it in and start
+# it". EX_TEMPFAIL, so it cannot be mistaken for a crash (1) or a clean stop (0). The Windows
+# launcher (install.ps1's run-worker.cmd) tests for exactly this value.
+EXIT_UPDATE = 75
+
+# Set by a launcher that performs the swap. Without it a Windows worker still refuses: an
+# older launcher would restart the OLD build on exit 75, which would download the update
+# again, exit again, and loop.
+HANDOFF_ENV = "CBK_UPDATE_HANDOFF"
+
+# How long a failed fetch of one version is left alone before trying again, so a node that
+# cannot reach the download does not refetch on every heartbeat.
+FETCH_RETRY_S = 300.0
+
+
 class Outcome(enum.Enum):
     APPLIED = "applied"
+    STAGED = "staged"     # verified and waiting as `<name>.new`; `commit` puts it in service
+    HANDOFF = "handoff"   # Windows commit: the caller must exit with EXIT_UPDATE
     SKIPPED = "skipped"
     REFUSED = "refused"
     FAILED = "failed"
@@ -175,40 +196,169 @@ class UpdateResult:
 
 class UpdateApplier:
     def __init__(self, client: httpx.AsyncClient, public_key_pem: str | None,
-                 log: Callable[[str], None] | None = None) -> None:
+                 log: Callable[[str], None] | None = None, *,
+                 platform: str | None = None, handoff: bool | None = None) -> None:
         self._client = client
         self._public_key_pem = public_key_pem
         self._log = log or print
+        # Seams for tests, not configuration: monkeypatching `os.name` breaks pathlib.
+        self._platform = platform
+        self._handoff = handoff
+        self._staged: tuple[str, str] | None = None     # (version, sha256) waiting as .new
+        self._failed_at: dict[str, float] = {}          # version → monotonic time
+
+    @property
+    def _windows(self) -> bool:
+        return (self._platform or os.name) == "nt"
+
+    @property
+    def _launcher_swaps(self) -> bool:
+        if self._handoff is not None:
+            return self._handoff
+        return os.environ.get(HANDOFF_ENV) == "1"
 
     async def apply(self, m: UpdateManifest) -> UpdateResult:
         """Verify and apply a manifest. On success the process re-execs and does not return.
 
-        Refuses outright on Windows. The swap-then-re-exec sequence below is unsound there
-        and has two failure modes, neither of them safe:
+        Except on Windows, where the swap-then-re-exec sequence below is unsound in two
+        ways, neither of them safe:
 
           * `shutil.move` over the running `.pyz` hits WinError 32, because zipimport holds
-            the handle open. The update simply never lands, reported as FAILED each time.
+            the handle open. The update simply never lands.
           * If it did land, `os.execv` on Windows does not replace the process image the
             way it does on POSIX — it spawns a child and the parent exits. The Task
             Scheduler registration then restarts the task (`RestartCount 999`), and the
-            fleet briefly has TWO workers on one Redis consumer name. That is precisely
-            what `_reexec`'s comment says execv prevents, and it is only true on POSIX.
+            fleet briefly has TWO workers on one Redis consumer name.
 
-        ADR 13a already recorded the swap as "unverified on Windows — a known gap, not a
-        claim". Leaving it to fail ambiguously was the worse option: a silent no-op looks
-        like a worker that will not update, and the duplicate-consumer case looks like a
-        queue bug somewhere else entirely. A refusal names itself.
+        So on Windows this process never swaps anything. It verifies exactly as below,
+        stages the verified bytes as `<name>.new`, and returns HANDOFF; the caller exits
+        with `EXIT_UPDATE`, and the launcher — which holds no handle on the file and is
+        still the only process in the task — renames it into place and starts it. One
+        worker at a time, and the new build is the one that comes back.
 
-        The coordinator still marks such a node `stale`, so the drift stays visible; the
-        operator updates it by replacing the artifact and restarting the task.
+        That needs a launcher that knows the protocol, which says so by setting
+        `CBK_UPDATE_HANDOFF=1`. Without it this still REFUSES: an older launcher would
+        restart the old build on exit 75, which would fetch the update again and loop.
         """
-        if os.name == "nt":
+        result = await self.stage(m)
+        if result.outcome is not Outcome.STAGED:
+            return result
+        return self.commit(m)
+
+    def is_staged(self, m: UpdateManifest) -> bool:
+        """Whether this exact build is already downloaded, verified and waiting."""
+        target = current_artifact()
+        if target is None or self._staged != (m.version, m.sha256.lower()):
+            return False
+        return target.with_name(target.name + ".new").is_file()
+
+    async def stage(self, m: UpdateManifest) -> UpdateResult:
+        """Fetch and verify the build and leave it as `<name>.new`, touching nothing else.
+
+        Safe to run while the node is serving, and that is the point: only `commit` needs
+        the node idle. Draining before the download meant a download that kept failing —
+        a node off the LAN its coordinator advertises, say — took the node out of service
+        every other beat for as long as it failed.
+        """
+        refusal = self.precheck(m)
+        if refusal is not None:
+            return refusal
+        target = current_artifact()
+        if target is None:  # vanished since precheck looked
+            return UpdateResult(Outcome.SKIPPED, "the running artifact is gone")
+        if self.is_staged(m):
+            return UpdateResult(Outcome.STAGED, f"{m.version} already staged")
+        failed_at = self._failed_at.get(m.version)
+        if failed_at is not None and time.monotonic() - failed_at < FETCH_RETRY_S:
+            return UpdateResult(Outcome.SKIPPED, f"fetch of {m.version} failed recently; "
+                                                 f"retrying later")
+        if should_pause_for_skew(m):
+            self._log(f"note: {m.version} requires protocol {m.protocol_version}, "
+                      f"this agent speaks {PROTOCOL_VERSION}")
+
+        staged = target.with_name(target.name + ".new")
+        # A launcher swaps whatever `.new` it finds, so the download lands under another
+        # name and becomes `.new` only once its digest has been checked. A crash mid-
+        # download then leaves a `.part` nothing acts on, never a torn `.new`.
+        download = target.with_name(target.name + ".part")
+        try:
+            self._log(f"fetching {m.version} ({m.rid}) from {m.url}")
+            digest = hashlib.sha256()
+            with download.open("wb") as fh:
+                async with self._client.stream("GET", m.url) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.aiter_bytes():
+                        digest.update(chunk)
+                        fh.write(chunk)
+
+            # (3) The manifest's signature says nothing about what actually arrived.
+            actual = digest.hexdigest()
+            if actual.lower() != m.sha256.lower():
+                download.unlink(missing_ok=True)
+                return UpdateResult(Outcome.REFUSED,
+                                    f"digest mismatch: expected {m.sha256}, got {actual}")
+            if not self._windows:
+                download.chmod(0o755)
+            os.replace(download, staged)
+        except Exception as e:
+            download.unlink(missing_ok=True)
+            self._failed_at[m.version] = time.monotonic()
+            return UpdateResult(Outcome.FAILED, f"fetching {m.version} failed: {e}")
+        self._staged = (m.version, m.sha256.lower())
+        self._failed_at.pop(m.version, None)
+        return UpdateResult(Outcome.STAGED, f"staged {m.version}")
+
+    def commit(self, m: UpdateManifest) -> UpdateResult:
+        """Put the staged build into service. Call only with no job in flight.
+
+        POSIX: swap, then re-exec, and this does not return. Windows: return HANDOFF,
+        and the caller exits `EXIT_UPDATE` for the launcher to do the swap.
+        """
+        target = current_artifact()
+        if target is None or not self.is_staged(m):
+            return UpdateResult(Outcome.FAILED, f"{m.version} is not staged")
+        staged = target.with_name(target.name + ".new")
+        if self._windows:
+            self._log(f"staged {m.version} at {staged}; exiting for the launcher to "
+                      f"swap it in")
+            return UpdateResult(Outcome.HANDOFF, f"staged {m.version}")
+
+        previous = target.with_name(target.stem + ".prev" + target.suffix)
+        try:
+            # (4) Retain the outgoing artifact so a bad release can be reverted.
+            previous.unlink(missing_ok=True)
+            shutil.move(str(target), str(previous))
+            shutil.move(str(staged), str(target))
+            self._log(f"installed {m.version}; previous artifact retained at {previous}")
+
+            # (5) Hand over to the new artifact and step aside.
+            self._reexec(target)
+            return UpdateResult(Outcome.APPLIED, f"applied {m.version}, re-executing")
+        except Exception as e:
+            staged.unlink(missing_ok=True)
+            self._staged = None
+            # If the swap half-completed, put the old artifact back rather than leaving none.
+            try:
+                if not target.exists() and previous.exists():
+                    shutil.move(str(previous), str(target))
+            except OSError:
+                pass
+            return UpdateResult(Outcome.FAILED, f"update to {m.version} failed: {e}")
+
+    def precheck(self, m: UpdateManifest) -> UpdateResult | None:
+        """Every check that needs no download: a refusal or skip, or None to proceed.
+
+        Separate so the caller can learn a node will refuse BEFORE it drains the node to
+        apply: a worker that can never update (no pinned key, an old launcher) must not
+        stop claiming on every beat only to discover it again.
+        """
+        if self._windows and not self._launcher_swaps:
             return UpdateResult(
                 Outcome.REFUSED,
-                f"self-update is not supported on Windows (offered {m.version}): the "
+                f"self-update on Windows needs a launcher that swaps the build in "
+                f"(offered {m.version}): this one does not set {HANDOFF_ENV}=1. The "
                 f"running artifact cannot be replaced in place, and os.execv would leave "
-                f"two workers on one consumer name. Replace the .pyz and restart the "
-                f"scheduled task instead.")
+                f"two workers on one consumer name. Re-run install.ps1 to get one.")
 
         if not self._public_key_pem:
             return UpdateResult(Outcome.REFUSED,
@@ -260,51 +410,7 @@ class UpdateApplier:
                 f"is either a replayed one or a misconfigured channel; roll back by hand "
                 f"with cbk.prev.pyz if that is genuinely what you want.")
 
-        if should_pause_for_skew(m):
-            self._log(f"note: {m.version} requires protocol {m.protocol_version}, "
-                      f"this agent speaks {PROTOCOL_VERSION}")
-
-        staged = target.with_name(target.name + ".new")
-        previous = target.with_name(target.stem + ".prev" + target.suffix)
-
-        try:
-            self._log(f"fetching {m.version} ({m.rid}) from {m.url}")
-            digest = hashlib.sha256()
-            with staged.open("wb") as fh:
-                async with self._client.stream("GET", m.url) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.aiter_bytes():
-                        digest.update(chunk)
-                        fh.write(chunk)
-
-            # (3) The manifest's signature says nothing about what actually arrived.
-            actual = digest.hexdigest()
-            if actual.lower() != m.sha256.lower():
-                staged.unlink(missing_ok=True)
-                return UpdateResult(Outcome.REFUSED,
-                                    f"digest mismatch: expected {m.sha256}, got {actual}")
-
-            if os.name != "nt":
-                staged.chmod(0o755)
-
-            # (4) Retain the outgoing artifact so a bad release can be reverted.
-            previous.unlink(missing_ok=True)
-            shutil.move(str(target), str(previous))
-            shutil.move(str(staged), str(target))
-            self._log(f"installed {m.version}; previous artifact retained at {previous}")
-
-            # (5) Hand over to the new artifact and step aside.
-            self._reexec(target)
-            return UpdateResult(Outcome.APPLIED, f"applied {m.version}, re-executing")
-        except Exception as e:
-            staged.unlink(missing_ok=True)
-            # If the swap half-completed, put the old artifact back rather than leaving none.
-            try:
-                if not target.exists() and previous.exists():
-                    shutil.move(str(previous), str(target))
-            except OSError:
-                pass
-            return UpdateResult(Outcome.FAILED, f"update to {m.version} failed: {e}")
+        return None
 
     def _reexec(self, target: Path) -> None:
         self._log("re-executing as the new version; this process image is being replaced")

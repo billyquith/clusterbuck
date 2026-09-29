@@ -33,7 +33,7 @@ from .models import (
 )
 from .presence import PresenceLadder
 from .registry import RegistryClient, default_state_path, load_state, save_state
-from .update import Outcome, UpdateApplier
+from .update import EXIT_UPDATE, Outcome, UpdateApplier
 from .work_loop import WorkLoop, queue_names
 
 # --- cbk work -------------------------------------------------------------------------
@@ -59,18 +59,37 @@ def _apply_fitness(fitness: Fitness | None) -> bool:
 
 
 async def _try_update(applier: UpdateApplier, manifest_body: dict[str, Any],
-                      loop: WorkLoop) -> None:
-    """Verify and apply an offered update.
+                      loop: WorkLoop, stop: asyncio.Event) -> None:
+    """Take an offered update: download while serving, then switch over once idle.
 
-    Stops claiming first: completing the swap while holding a claimed job would strand it
-    until the reaper reclaims it.
+    Stopping claims used to be the whole preparation, and it is not a drain: a job already
+    claimed was still generating when the swap re-exec'd over it, and waited out the
+    reaper's visibility timeout on another node. So the switch happens only on a beat that
+    finds the node idle; until then claims are held (`loop.updating`) and the heartbeat
+    keeps running — blocking here through a long generation would take it down.
+
+    Claims are held only once the build is verified and staged. Holding them first meant a
+    download that kept failing drained the node every other beat, for as long as it failed.
     """
-    was_paused = loop.paused
-    loop.paused = True
-    result = await applier.apply(UpdateManifest.from_wire(manifest_body))
+    manifest = UpdateManifest.from_wire(manifest_body)
+    staged = await applier.stage(manifest)
+    if staged.outcome is not Outcome.STAGED:
+        if staged.outcome is not Outcome.SKIPPED:
+            Out.warn(f"update {staged.outcome.value}: {staged.detail}")
+        loop.updating = False
+        return
+    loop.updating = True
+    if loop.busy:
+        return          # the next beat looks again
+    result = applier.commit(manifest)
+    if result.outcome is Outcome.HANDOFF:
+        # Windows: the launcher swaps the staged build in once this process has gone.
+        loop.exit_code = EXIT_UPDATE
+        stop.set()
+        return
     if result.outcome is not Outcome.APPLIED:
         Out.warn(f"update {result.outcome.value}: {result.detail}")
-        loop.paused = was_paused        # not updating after all — resume as before
+        loop.updating = False           # not updating after all — claim again
 
 
 async def _execute_action(manager: ModelManager, action: ModelAction) -> ActionResult:
@@ -265,7 +284,9 @@ async def _heartbeat_loop(registry: RegistryClient, loop: WorkLoop, ladder: Pres
                 # A signed update, if offered and this node opted in. Applying replaces the
                 # process image, so nothing after this runs on success.
                 if resp.update:
-                    await _try_update(applier, resp.update, loop)
+                    await _try_update(applier, resp.update, loop, stop)
+                elif loop.updating:
+                    loop.updating = False       # the offer was withdrawn while we drained
 
                 # Execute an approved model action, if one was issued. The worker never
                 # decides this — it only carries out an approved proposal. A quarantined
@@ -353,7 +374,7 @@ async def run_work(args: argparse.Namespace) -> int:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await redis.aclose()
-    return 0
+    return loop.exit_code
 
 
 # --- admin verbs ----------------------------------------------------------------------

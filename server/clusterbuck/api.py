@@ -59,6 +59,7 @@ from .models import (
 )
 from .perf_runner import UnknownCategory, perf_run_list_view, perf_run_view, start_run
 from .queue import Queue, stream_key, tier_for, tier_of
+from .release import released_artifact, released_version
 from .reservations import admit, iso
 from .routing import RoutingRefusal, declared_features, resolve
 from .signing import build_manifest, load_private_pem, public_pem, sign_bootstrap
@@ -301,6 +302,17 @@ def create_app(
 
         app.state.update_signing_key = update_signing_key or settings.update_signing_key
         app.state.update_release = update_release or settings.update_release
+        # The overrides still win, so say when one has drifted from what is released —
+        # the silent disagreement release.py exists to remove.
+        released = released_version(app.state.update_release)
+        if released and settings.worker_current_version not in (None, released):
+            _log.warning("CBK_WORKER_CURRENT_VERSION=%s overrides the released %s: nodes "
+                         "are judged against the override. Unset it to follow releases.",
+                         settings.worker_current_version, released)
+        if released and settings.worker_artifact:
+            _log.warning("CBK_WORKER_ARTIFACT is set, so joining nodes get %s rather than "
+                         "the released %s. Unset it to follow releases.",
+                         settings.worker_artifact, released)
 
         # Seed the ability matrix with anchored defaults (overwritten by real eval runs)
         # and the model catalog with generic known-good artifacts.
@@ -1290,7 +1302,11 @@ def create_app(
         """
         path = (worker_artifact if worker_artifact is not None
                 else settings.worker_artifact)
-        return Path(path) if path and Path(path).is_file() else None
+        if path:
+            return Path(path) if Path(path).is_file() else None
+        # Unset: the build the release manifest names, so a join and an update hand out
+        # the same bytes without anyone copying them to a second place (release.py).
+        return released_artifact(app.state.update_release)
 
     def _require_join_password(presented: str | None) -> None:
         """Gate for the two bootstrap routes. 404 when unconfigured, 401 when wrong.
@@ -1371,7 +1387,8 @@ def create_app(
         artifact = _artifact_path()
         if artifact is not None:
             digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-            version = settings.worker_current_version or ""
+            version = (settings.worker_current_version
+                       or released_version(app.state.update_release) or "")
             body["artifact_sha256"] = digest
             key_path = app.state.update_signing_key
             if key_path and Path(key_path).is_file():
@@ -1447,7 +1464,8 @@ def create_app(
         if path is None:
             raise HTTPException(
                 status_code=404,
-                detail="no worker artifact configured (set CBK_WORKER_ARTIFACT)",
+                detail="no worker artifact configured (publish a release with `python -m "
+                       "clusterbuck.release publish`, or set CBK_WORKER_ARTIFACT)",
             )
         return FileResponse(str(path), media_type="application/octet-stream",
                             filename="cbk.pyz")
@@ -1498,7 +1516,7 @@ def create_app(
         # produce plausible-looking wrong results, so the coordinator judges the reported
         # build version too (ADR 27).
         fitness = assess(
-            policy_from_settings(settings),
+            policy_from_settings(settings, app.state.update_release),
             agent_version=body.agent_version,
             protocol_version=body.protocol_version,
         )

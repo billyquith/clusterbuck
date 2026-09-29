@@ -105,7 +105,7 @@ async def test_refuses_without_a_pinned_key(tmp_path, monkeypatch):
     monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
     m, _ = _signed(tmp_path, b"NEW")
     async with httpx.AsyncClient() as c:
-        result = await upd.UpdateApplier(c, None, log=lambda _: None).apply(m)
+        result = await upd.UpdateApplier(c, None, log=lambda _: None, platform="posix").apply(m)
     assert result.outcome is upd.Outcome.REFUSED
     assert "signed-or-nothing" in result.detail
 
@@ -114,7 +114,7 @@ async def test_skips_when_not_running_from_a_packaged_artifact(tmp_path, monkeyp
     monkeypatch.delenv("CBK_AGENT_PATH", raising=False)
     m, pem = _signed(tmp_path, b"NEW")
     async with httpx.AsyncClient() as c:
-        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix").apply(m)
     # Running from the test venv, not a .pyz: replacing a developer's tree is never intended.
     assert result.outcome is upd.Outcome.SKIPPED
     assert "nothing to replace" in result.detail
@@ -124,7 +124,7 @@ async def test_skips_when_already_on_that_version(tmp_path, monkeypatch):
     monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
     m, pem = _signed(tmp_path, b"NEW", version=AGENT_VERSION)
     async with httpx.AsyncClient() as c:
-        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix").apply(m)
     assert result.outcome is upd.Outcome.SKIPPED and AGENT_VERSION in result.detail
 
 
@@ -147,7 +147,7 @@ async def test_a_missing_verifier_is_reported_as_such_not_as_a_bad_signature(
         return httpx.Response(200, content=b"NEW")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
-        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix").apply(m)
 
     assert result.outcome is upd.Outcome.REFUSED       # still fails closed
     assert "cryptography" in result.detail and "pip install" in result.detail
@@ -176,7 +176,8 @@ async def test_bad_signature_is_refused_before_any_fetch(tmp_path, monkeypatch):
         return httpx.Response(200, content=b"NEW")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
-        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(tampered)
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None,
+                                         platform="posix").apply(tampered)
     assert result.outcome is upd.Outcome.REFUSED and "signature invalid" in result.detail
     assert fetched == [], f"fetched despite an invalid signature: {fetched}"
 
@@ -190,7 +191,7 @@ async def test_digest_mismatch_is_refused_and_leaves_the_old_artifact(tmp_path, 
         return httpx.Response(200, content=b"TAMPERED-IN-FLIGHT")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
-        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix").apply(m)
     assert result.outcome is upd.Outcome.REFUSED and "digest mismatch" in result.detail
     assert target.read_bytes() == b"OLD", "a bad download replaced the running artifact"
     assert not (tmp_path / "cbk.pyz.new").exists(), "staged file left behind"
@@ -208,7 +209,7 @@ async def test_successful_update_swaps_and_retains_the_previous(tmp_path, monkey
     monkeypatch.setattr(upd.os, "execv", lambda exe, argv: execs.append(argv))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
-        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix").apply(m)
 
     assert result.outcome is upd.Outcome.APPLIED, result.detail
     assert target.read_bytes() == b"NEW"
@@ -249,9 +250,10 @@ async def test_self_update_refuses_on_windows(monkeypatch, tmp_path):
 
     from cbk_worker.update import Outcome, UpdateApplier, UpdateManifest
 
-    monkeypatch.setattr("cbk_worker.update.os.name", "nt")
+    monkeypatch.delenv("CBK_UPDATE_HANDOFF", raising=False)
     async with httpx.AsyncClient() as client:
-        applier = UpdateApplier(client, public_key_pem="-----BEGIN PUBLIC KEY-----")
+        applier = UpdateApplier(client, public_key_pem="-----BEGIN PUBLIC KEY-----",
+                                platform="nt")
         m = UpdateManifest(version="9.9.9", url="https://example/cbk.pyz",
                            sha256="0" * 64, signature="x", protocol_version=1)
         got = await applier.apply(m)
@@ -275,9 +277,10 @@ async def test_the_windows_refusal_comes_before_any_download(monkeypatch, tmp_pa
             called = True
             raise AssertionError("downloaded before checking the platform")
 
-    monkeypatch.setattr("cbk_worker.update.os.name", "nt")
+    monkeypatch.delenv("CBK_UPDATE_HANDOFF", raising=False)
     async with _Boom() as client:
-        applier = UpdateApplier(client, public_key_pem="-----BEGIN PUBLIC KEY-----")
+        applier = UpdateApplier(client, public_key_pem="-----BEGIN PUBLIC KEY-----",
+                                platform="nt")
         got = await applier.apply(UpdateManifest(
             version="1.0.0", url="https://example/cbk.pyz", sha256="0" * 64,
             signature="x", protocol_version=1))
@@ -330,7 +333,7 @@ async def test_a_correctly_signed_downgrade_is_refused(tmp_path, monkeypatch):
     m, pem = _signed(tmp_path, b"NEW", version=older)
 
     async with httpx.AsyncClient() as c:
-        result = await upd.UpdateApplier(c, pem, log=lambda _: None).apply(m)
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix").apply(m)
 
     assert result.outcome is upd.Outcome.REFUSED
     assert "strictly newer" in result.detail
@@ -348,3 +351,93 @@ def _older_than(version: str) -> str:
             parts[i] -= 1
             return ".".join(str(x) for x in parts)
     raise AssertionError(f"cannot build a version older than {version}")
+
+
+# --- Windows: stage and hand off to the launcher -------------------------------------
+
+
+async def test_windows_stages_the_verified_build_and_hands_off(tmp_path, monkeypatch):
+    """The launcher swaps whatever `.new` it finds, so the running file is untouched, no
+    re-exec happens, and `.new` exists only once its digest has checked out."""
+    target = _artifact(tmp_path, content=b"OLD")
+    monkeypatch.setenv("CBK_AGENT_PATH", str(target))
+    m, pem = _signed(tmp_path, b"NEW")
+    monkeypatch.setattr(upd.os, "execv", lambda *a: pytest.fail("re-exec'd on Windows"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"NEW")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None,
+                                         platform="nt", handoff=True).apply(m)
+
+    assert result.outcome is upd.Outcome.HANDOFF, result.detail
+    assert target.read_bytes() == b"OLD"
+    assert (tmp_path / "cbk.pyz.new").read_bytes() == b"NEW"
+    assert not (tmp_path / "cbk.pyz.part").exists()
+
+
+async def test_windows_never_stages_a_build_whose_digest_is_wrong(tmp_path, monkeypatch):
+    target = _artifact(tmp_path, content=b"OLD")
+    monkeypatch.setenv("CBK_AGENT_PATH", str(target))
+    m, pem = _signed(tmp_path, b"NEW")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"TAMPERED")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        result = await upd.UpdateApplier(c, pem, log=lambda _: None,
+                                         platform="nt", handoff=True).apply(m)
+
+    assert result.outcome is upd.Outcome.REFUSED
+    assert not (tmp_path / "cbk.pyz.new").exists()
+    assert not (tmp_path / "cbk.pyz.part").exists()
+
+
+async def test_windows_without_a_swapping_launcher_still_refuses(tmp_path, monkeypatch):
+    """An older launcher restarts the OLD build on exit 75: staging for it would loop."""
+    monkeypatch.setenv("CBK_AGENT_PATH", str(_artifact(tmp_path)))
+    monkeypatch.delenv(upd.HANDOFF_ENV, raising=False)
+    m, pem = _signed(tmp_path, b"NEW")
+    async with httpx.AsyncClient() as c:
+        applier = upd.UpdateApplier(c, pem, log=lambda _: None, platform="nt")
+        assert applier.precheck(m).outcome is upd.Outcome.REFUSED
+        monkeypatch.setenv(upd.HANDOFF_ENV, "1")
+        assert applier.precheck(m) is None
+
+
+async def test_a_failed_fetch_is_not_retried_every_beat(tmp_path, monkeypatch):
+    target = _artifact(tmp_path, content=b"OLD")
+    monkeypatch.setenv("CBK_AGENT_PATH", str(target))
+    m, pem = _signed(tmp_path, b"NEW")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("no route to host")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        applier = upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix")
+        assert (await applier.stage(m)).outcome is upd.Outcome.FAILED
+        assert (await applier.stage(m)).outcome is upd.Outcome.SKIPPED   # backing off
+    assert calls == 1
+    assert not (tmp_path / "cbk.pyz.part").exists()
+    assert not (tmp_path / "cbk.pyz.new").exists()
+
+
+async def test_staging_changes_nothing_in_service_until_commit(tmp_path, monkeypatch):
+    target = _artifact(tmp_path, content=b"OLD")
+    monkeypatch.setenv("CBK_AGENT_PATH", str(target))
+    m, pem = _signed(tmp_path, b"NEW")
+    execs: list = []
+    monkeypatch.setattr(upd.os, "execv", lambda exe, argv: execs.append(argv))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, content=b"NEW"))) as c:
+        applier = upd.UpdateApplier(c, pem, log=lambda _: None, platform="posix")
+        assert (await applier.stage(m)).outcome is upd.Outcome.STAGED
+        assert target.read_bytes() == b"OLD" and not execs
+        assert (await applier.stage(m)).outcome is upd.Outcome.STAGED   # no refetch
+        assert applier.commit(m).outcome is upd.Outcome.APPLIED
+    assert target.read_bytes() == b"NEW" and execs
