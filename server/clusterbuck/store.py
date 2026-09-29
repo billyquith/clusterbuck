@@ -603,12 +603,19 @@ class Store:
 
     def failed_eval_runs(self, artifact: str, task_class: str, generation: int = 1) -> int:
         """No-signal runs in ONE generation. Counting every generation let a batch that
-        once failed its way to the cap block the artifact from ever being re-measured."""
+        once failed its way to the cap block the artifact from ever being re-measured.
+
+        A run is a BATCH, not an item. Every batch dispatches each of the class's items
+        once, so the item that failed most often has failed once per batch. Counting rows
+        instead meant one refused batch of a ten-item class was already ten "runs", past a
+        cap of six: a provider out of credit for two minutes left three cloud accounts
+        permanently unmeasurable."""
         with self._conn() as c:
             return c.execute(
-                "SELECT COUNT(*) AS n FROM eval_runs "
-                "WHERE artifact = ? AND task_class = ? AND state = 'failed' "
-                "AND generation = ?",
+                "SELECT COALESCE(MAX(n), 0) AS n FROM ("
+                " SELECT COUNT(*) AS n FROM eval_runs "
+                " WHERE artifact = ? AND task_class = ? AND state = 'failed' "
+                " AND generation = ? GROUP BY item_index)",
                 (artifact, task_class, generation),
             ).fetchone()["n"]
 

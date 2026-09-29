@@ -311,6 +311,31 @@ async def test_all_failed_batch_stops_redispatching(store, queue):
     assert artifacts_needing_eval(store, suite=single) == []
 
 
+async def test_one_failed_batch_of_a_multi_item_class_is_retried(store, queue):
+    """The cap is on BATCHES. Counted per item, one refused batch of a ten-item class was
+    already past it, and the artifact was never measured again. Single-item suites, which
+    every other test here uses, cannot tell the two apart."""
+    _enroll_with(store, [ARTIFACT])
+    three = [SUITE[0]] * 3
+
+    async def failing_batch() -> None:
+        await dispatch(store, queue, now="t", suite=three, min_items=1)
+        for run in store.pending_eval_runs():
+            await queue.client.set(run.result_key, json.dumps({
+                "job_id": run.job_id, "status": "failed", "worker": "w",
+                "completed_at": "t", "error": "provider out of credit"}))
+        await collect(store, queue, now="t", suite=three, min_items=1)
+
+    await failing_batch()
+    assert store.failed_eval_runs(ARTIFACT, "extract") == 1
+    assert [a for a, _ in artifacts_needing_eval(store, suite=three, min_items=1)] == [
+        ARTIFACT]
+
+    for _ in range(10):
+        await failing_batch()
+    assert artifacts_needing_eval(store, suite=three, min_items=1) == []  # still bounded
+
+
 async def test_seeded_artifacts_are_still_measured(store, queue):
     """seed_ability previously exempted the shipped fleet from evaluation forever."""
     from clusterbuck.evaluation import seed_ability
