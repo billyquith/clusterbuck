@@ -18,8 +18,6 @@ from clusterbuck.orm.node import Node
 from clusterbuck.routing import resolve, tier_eta
 from clusterbuck.store import Store
 
-NOW = datetime.now(UTC)
-
 
 def _fleet(*, big_is_cheaper: bool = False, **extra) -> Fleet:
     """`small` is cheaper by default, so the old order always chose it. Tests expecting
@@ -54,7 +52,10 @@ def _node(store, node_id, *, serves, tps, warm=(), age_s=5.0, load_s=None):
                    capabilities=json.dumps([serves]), enrolled_at="2026-01-01T00:00:00Z",
                    auto_approve=0))
         s.commit()
-    stamp = (NOW - timedelta(seconds=age_s)).isoformat().replace("+00:00", "Z")
+    # Now, not at import: the suite runs for over a minute on a CI runner, and a module-level
+    # clock made every "5 s old" heartbeat older than the silence threshold by the time
+    # these tests ran, so every node read as silent there and nowhere else.
+    stamp = (datetime.now(UTC) - timedelta(seconds=age_s)).isoformat().replace("+00:00", "Z")
     queues = [f"q:{serves}"] if serves else []
     store.record_heartbeat(node_id=node_id, mode="active", installed="[]",
                            loaded=json.dumps(list(warm)), queues=json.dumps(queues),
