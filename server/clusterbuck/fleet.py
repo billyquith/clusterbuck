@@ -69,6 +69,12 @@ class CapabilitySpec(BaseModel):
     # Only ever used for a `cloud_ok` job inside the budget; naming it here grants no job
     # permission to leave the LAN.
     cloud_fallback: str | None = None
+    # Request params this tier's model refuses, stripped before every call to it. LiteLLM's
+    # `drop_params` only drops what its own model map says a model lacks, and the map can
+    # be wrong: it lists `temperature` for a reasoning model that 400s on anything but the
+    # default. That refusal failed every eval item and every sync call that fell back to
+    # such an account, and nothing short of naming the param here reaches it.
+    drop_params: list[str] = []
 
 
 class NodeSpec(BaseModel):

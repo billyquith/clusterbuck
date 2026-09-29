@@ -127,6 +127,11 @@ def cloud_cost(
             return float(cost), "litellm"
         except Exception:  # unmapped model, or a response shape it cannot price
             pass
+    if not (tin or tout):
+        # Nothing was billed — a failed call, typically — so there is nothing to price, and
+        # warning "no price" here is false: it fired for every job in a burst the provider
+        # refused, on a model LiteLLM prices perfectly well, and read as a budget hole.
+        return 0.0, "none"
     fallback = _fleet_cost(fleet, capability, tin, tout)
     if model not in _unpriced_warned:
         _unpriced_warned.add(model)

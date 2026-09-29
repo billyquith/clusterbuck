@@ -649,6 +649,10 @@ capabilities:
  # the key itself). Enters the ability matrix unscored, like any new artifact .
  # Prices are optional: LiteLLM prices a model it knows for the model that answered,
  # cache included; a price here is the fallback for one it does not.
+ # `drop_params` (optional, any capability) lists request params the model refuses,
+ # stripped from every call to it, including one that arrives as another tier's sync
+ # fallback. Needed where LiteLLM's own map is wrong — e.g. a reasoning model that
+ # accepts only the default `temperature`.
  claude-sonnet:
  model: "anthropic/claude-sonnet-5"
  api_key_env: CBK_ANTHROPIC_API_KEY

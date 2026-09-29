@@ -208,3 +208,20 @@ def test_usage_endpoint_shape(client):
     assert set(data) == {"headline", "budget", "totals", "by_model", "by_node", "by_day"}
     assert data["totals"]["jobs"] == 0
     assert data["headline"]["currency"] == "USD"
+
+
+def test_a_failed_cloud_call_is_not_reported_as_unpriced(caplog):
+    """A provider that refused the call billed nothing; saying "no price… does not count
+    against the cloud budget" about it sent an operator hunting a hole that was not there."""
+    from clusterbuck import usage
+
+    fleet = Fleet(capabilities={
+        "acct": CapabilitySpec(model="openai/some-unmapped-model", cloud=True)})
+    usage._unpriced_warned.discard("openai/some-unmapped-model")
+    with caplog.at_level("WARNING", logger="clusterbuck.usage"):
+        assert usage.cloud_cost(fleet, "acct", None, 0, 0) == (0.0, "none")
+    assert "no price" not in caplog.text
+    # Real spend on an unmapped, unpriced model still says so.
+    with caplog.at_level("WARNING", logger="clusterbuck.usage"):
+        usage.cloud_cost(fleet, "acct", None, 100, 10)
+    assert "no price" in caplog.text

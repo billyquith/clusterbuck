@@ -469,3 +469,62 @@ def test_json_mode_is_sent_as_the_equivalent_schema(sync_client):
     assert resp.status_code == 200, resp.text
     assert seen["response_format"]["type"] == "json_schema"
     assert seen["response_format"]["json_schema"]["schema"] == {"type": "object"}
+
+
+def _capturing_model_server():
+    """A model server that records each request body — to see what reached the wire."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen: list[dict] = []
+
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            body = json.dumps({
+                "id": "x", "object": "chat.completion", "created": 0, "model": "fake",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "hi"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/v1", seen
+
+
+async def test_a_refused_param_is_dropped_on_the_fallback_too(monkeypatch):
+    """The 30b-reason → cloud case: the tier the client named accepts `temperature`, the
+    account it falls back to refuses it. Stripping the request up front would be wrong for
+    the first and cannot reach the second — the drop has to ride on the deployment."""
+    srv, base, seen = _capturing_model_server()
+    # The provider account is called natively; this points LiteLLM's OpenAI client here.
+    monkeypatch.setenv("OPENAI_BASE_URL", base)
+    monkeypatch.setenv("CBK_T_SYNC_KEY", "sk-test")
+    try:
+        fleet = Fleet(capabilities={
+            "local": CapabilitySpec(model="fake", model_server="http://127.0.0.1:9/v1",
+                                    cloud_fallback="strict"),
+            "strict": CapabilitySpec(model="openai/strict-model", cloud=True,
+                                     api_key_env="CBK_T_SYNC_KEY",
+                                     drop_params=["temperature"]),
+        })
+        router = build_router(fleet)
+        await router.acompletion(model="local", temperature=0.25, max_tokens=5,
+                                 messages=[{"role": "user", "content": "x"}])
+        await router.acompletion(model="strict", temperature=0,
+                                 messages=[{"role": "user", "content": "x"}])
+    finally:
+        srv.shutdown()
+    assert len(seen) == 2
+    assert all("temperature" not in body for body in seen)
+    assert seen[0]["max_tokens"] == 5  # only the named param goes

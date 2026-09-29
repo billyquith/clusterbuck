@@ -172,7 +172,7 @@ class CloudExecutor:
             # win over this capability's own default (model_client.py's identical ordering).
             request: dict = {"model": model, "messages": messages, "stream": False}
             request.update({k: v for k, v in (job.params or {}).items()
-                            if k in _PARAMS_FORWARDED})
+                            if k in _PARAMS_FORWARDED and k not in spec.drop_params})
 
             resp = await litellm.acompletion(api_key=api_key, **request)
             body = resp.model_dump()

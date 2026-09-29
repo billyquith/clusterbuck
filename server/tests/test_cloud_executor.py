@@ -276,3 +276,26 @@ async def test_job_params_cannot_reach_litellm_through_an_alias(fleet, queue, mo
         assert leaked not in captured, f"{leaked} reached litellm"
     assert captured["api_key"] == "sk-test-123"
     assert captured["temperature"] == 0.2, "ordinary inference params still pass through"
+
+
+async def test_a_param_the_account_refuses_is_never_sent(queue, monkeypatch):
+    """A model that 400s on a non-default `temperature` failed every eval item (the harness
+    sends 0.0); `drop_params` is how the account says so, since LiteLLM's map does not."""
+    monkeypatch.setenv("CBK_TEST_PROVIDER_KEY", "sk-test-123")
+    fleet = Fleet(capabilities={
+        CAP: CapabilitySpec(model=ARTIFACT, cloud=True, api_key_env="CBK_TEST_PROVIDER_KEY",
+                            drop_params=["temperature"]),
+    })
+    record = _enqueue(queue, params={"temperature": 0.0, "max_tokens": 8})
+    await queue.enqueue(record.to_wire())
+
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return _FakeResponse({"model": ARTIFACT, "choices": [], "usage": None})
+
+    monkeypatch.setattr("clusterbuck.cloud_executor.litellm.acompletion", fake_acompletion)
+    await CloudExecutor(queue, fleet, consumer_group="cbk-workers").poll_once()
+    assert "temperature" not in captured
+    assert captured["max_tokens"] == 8

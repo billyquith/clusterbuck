@@ -73,6 +73,13 @@ def _portable_response_format(value):
 LEGACY_FALLBACK = "cloud-fallback"
 
 
+def _drop(spec) -> dict:
+    # On the deployment, not stripped from the request: LiteLLM decides a fallback inside
+    # `acompletion`, so a param the ADDRESSED tier accepts must still be dropped when the
+    # call lands on a fallback account that refuses it — the 30b-reason → cloud case.
+    return {"additional_drop_params": list(spec.drop_params)} if spec.drop_params else {}
+
+
 def build_router(fleet: Fleet, cloud_fallback_model: str | None = None,
                  timeout_s: float | None = None, *,
                  local_only: bool = False) -> Router | None:
@@ -107,7 +114,8 @@ def build_router(fleet: Fleet, cloud_fallback_model: str | None = None,
                 continue
             model_list.append({
                 "model_name": name,
-                "litellm_params": {"model": spec.model, "api_key": key},
+                "litellm_params": {"model": spec.model, "api_key": key,
+                                   **_drop(spec)},
             })
             continue
         model_list.append({
@@ -116,6 +124,7 @@ def build_router(fleet: Fleet, cloud_fallback_model: str | None = None,
                 "model": f"openai/{spec.model}",
                 "api_base": spec.model_server,
                 "api_key": resolve_api_key(spec) or _NOOP_KEY,
+                **_drop(spec),
             },
         })
 
