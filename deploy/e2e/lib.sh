@@ -14,7 +14,7 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # Provides: REPO WORKDIR PIDS  log fail pass  wait_for wait_port_free stop_pid jqpy job_verdict
-#           wait_terminal deadline_in db_row  python311 redis_cli flush_redis
+#           wait_terminal deadline_in db_row  python311 redis_cli flush_redis  enroll_with_hw
 # and installs the EXIT trap that kills PIDS and removes WORKDIR.
 
 : "${E2E_NAME:?set E2E_NAME before sourcing lib.sh}"
@@ -126,3 +126,25 @@ print('|'.join('' if v is None else str(v) for v in (r or ())))" "$1" "$2"
 # `docker exec` to reach; everything else uses the dev container.
 redis_cli()   { ${CBK_REDIS_CLI:-docker exec cbk-redis redis-cli} "$@"; }
 flush_redis() { redis_cli -n 0 FLUSHDB >/dev/null; }
+
+# url, token, state-path, ram-gb, accelerator, [mode] — enrol a node AS IF it had this
+# hardware, and write its identity where `cbk work` reads it (NodeState's wire shape).
+#
+# The coordinator decides a node's tiers from the hardware it probes, once, at enrolment —
+# no heartbeat or API changes them afterwards. So a script that needs a node advertising a
+# particular set of tiers must not let the host decide: `cbk enroll` on a 64 GB Mac is
+# proposed three tiers, on a 16 GB CI runner only one, and pinning.sh passed on the first
+# and could never pass on the second. The hardware here is the test's premise, stated.
+enroll_with_hw() {
+  curl -fsS -X POST "$1/nodes/enroll" -H 'content-type: application/json' -d "{
+    \"join_token\": \"$2\", \"hostname\": \"e2e-$E2E_NAME\", \"os\": \"linux\",
+    \"arch\": \"x86_64\", \"profile\": \"shared\",
+    \"hw\": {\"ram_gb\": $4, \"accelerator\": \"$5\", \"disk_free_gb\": 100}
+  }" | python3 -c "
+import json, sys
+b = json.load(sys.stdin); p = b.get('proposed') or {}
+json.dump({'node_id': b['node_id'], 'node_key': b['node_key'], 'server': sys.argv[1],
+           'capabilities': p.get('capabilities') or [], 'ladder': p.get('ladder'),
+           'mode': sys.argv[3], 'profile': 'shared'}, open(sys.argv[2], 'w'), indent=2)
+" "$1" "$3" "${6:-active}"
+}

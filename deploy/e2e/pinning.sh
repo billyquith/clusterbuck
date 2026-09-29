@@ -38,25 +38,23 @@ PIDS+=($!)
 wait_for "$URL/healthz" "server"
 
 TOKEN=$(curl -fsS -X POST "$URL/nodes/tokens" | python3 -c 'import sys,json;print(json.load(sys.stdin)["join_token"])')
-cbk_worker enroll --token "$TOKEN" --server "$URL" --state "$STATE" >/dev/null
+# 48 GB on CPU, stated rather than probed: that is what the coordinator proposes
+# [8b-extract, 32b-reason] for. Enrolling with the host's real hardware made this test
+# depend on the machine running it — a 16 GB CI runner is proposed 8b-extract alone, has
+# no second tier to be unservable, and the coordinator rightly warned about nothing.
+#
+# `away`, because the proposal only serves the FIRST tier while the owner is `active`, and
+# `away` is the mode in which it serves the whole ladder — exactly when an over-advertised
+# node does its damage.
+enroll_with_hw "$URL" "$TOKEN" "$STATE" 48 cpu away
 NODE_ID=$(python3 -c "import json;print(json.load(open('$STATE'))['node_id'])")
-
-# The enrolment proposal only serves the FIRST tier while the owner is `active`, so put the
-# node in `away` — the mode in which it serves the whole ladder, which is exactly when an
-# over-advertised node does its damage.
-python3 - "$STATE" <<'PY'
-import json, sys
-p = sys.argv[1]
-s = json.load(open(p))
-s["mode"] = "away"
-json.dump(s, open(p, "w"), indent=2)
-PY
+log "node $NODE_ID enrolled with $(python3 -c "import json;print(json.load(open('$STATE'))['ladder']['away'])")"
 
 # One worker, one model, TWO tiers — the ordinary over-advertised node.
 CBK_NODE_STATE="$STATE" CBK_REDIS_URL="${CBK_REDIS_URL:-redis://localhost:6379/0}" \
   CBK_MODEL_SERVER_URL="http://127.0.0.1:$MODEL_PORT/v1" CBK_MODEL="llama3.2:3b" \
   CBK_LADDER_HYSTERESIS_S=0 CBK_HEARTBEAT_MS=500 \
-  cbk_worker_bg work >/dev/null 2>&1 & PIDS+=($!)
+  cbk_worker_bg work >"$WORKDIR/worker.log" 2>&1 & PIDS+=($!)
 log "node $NODE_ID serving [8b-extract, 32b-reason] with only llama3.2:3b installed"
 
 # 1. The coordinator NAMES the mismatch rather than waiting for it to produce bad answers.
@@ -70,7 +68,9 @@ n=next((n for n in json.load(sys.stdin)['nodes'] if n['node_id']=='$NODE_ID'), {
 print(' | '.join(n.get('capability_warnings') or []))")
   [[ -n "$WARN" ]] && break; sleep 0.25
 done
-[[ "$WARN" == *"32b-reason"* ]] || fail "coordinator never flagged the unservable tier ($WARN)"
+[[ "$WARN" == *"32b-reason"* ]] || {
+  curl -fsS "$URL/nodes" >&2; echo >&2; tail -n 40 "$WORKDIR/worker.log" >&2
+  fail "coordinator never flagged the unservable tier ($WARN)"; }
 [[ "$WARN" != *"8b-extract"* ]] || fail "flagged the tier the node CAN serve"
 log "coordinator flagged 32b-reason as unservable here ✓"
 
