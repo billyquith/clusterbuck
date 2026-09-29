@@ -61,7 +61,9 @@ log "node $NODE_ID serving [8b-extract, 32b-reason] with only llama3.2:3b instal
 
 # 1. The coordinator NAMES the mismatch rather than waiting for it to produce bad answers.
 WARN=""
-for _ in $(seq 1 60); do
+# 60 s, not 15: the worker has to start, take its inventory and heartbeat first, and on a
+# cold CI runner that alone overran the old bound. A passing run leaves as soon as it sees it.
+for _ in $(seq 1 240); do
   WARN=$(curl -fsS "$URL/nodes" | python3 -c "
 import sys,json
 n=next((n for n in json.load(sys.stdin)['nodes'] if n['node_id']=='$NODE_ID'), {})
