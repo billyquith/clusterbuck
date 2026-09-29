@@ -6,6 +6,7 @@ import json
 
 import httpx
 import pytest
+
 from cbk_worker.failure import CODES, JobFailure, code_for
 
 

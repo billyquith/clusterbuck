@@ -13,7 +13,7 @@ import json
 
 import pytest
 from clusterbuck.observe import observe_tick
-from clusterbuck.queue import URGENT_TIER, REAPER_CONSUMER, Queue, stream_key
+from clusterbuck.queue import REAPER_CONSUMER, URGENT_TIER, Queue, stream_key
 from clusterbuck.store import Store
 
 CAP = "8b-extract"
